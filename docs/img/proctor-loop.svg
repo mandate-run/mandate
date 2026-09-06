@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="620" viewBox="0 0 1000 620" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#44403C"/></marker></defs>
+<rect x="0.5" y="0.5" width="999" height="619" rx="8" fill="#FAFAF9" stroke="#E7E5E4"/>
+<title>Proctor: build, check, repair, verify</title>
+<text x="30" y="32" font-size="17" text-anchor="start" font-weight="700" fill="#1C1917">Proctor: build, check, repair, verify</text>
+<text x="30" y="50" font-size="12" text-anchor="start" font-weight="normal" fill="#57534E">The agent edits code. Proctor owns the checks and the verdict.</text>
+<rect x="30" y="80" width="190" height="110" rx="6" fill="#F5F5F4" stroke="#DC2626" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="125.0" y="98" font-size="13" text-anchor="middle" font-weight="600" fill="#1C1917">Task contract</text>
+<text x="125.0" y="116" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">hooks, checks, limits</text>
+<text x="125.0" y="132" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">hashed at run start</text>
+<text x="125.0" y="148" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">the agent cannot edit it</text>
+<rect x="30" y="230" width="190" height="110" rx="6" fill="#F5F5F4" stroke="#78716C" stroke-width="1.5"/>
+<text x="125.0" y="248" font-size="13" text-anchor="middle" font-weight="600" fill="#1C1917">Outputs</text>
+<text x="125.0" y="266" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">patch on branch proctor/&lt;run&gt;</text>
+<text x="125.0" y="282" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">report with transaction ids</text>
+<text x="125.0" y="298" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">HCS report hash, a timestamp</text>
+<rect x="30" y="400" width="190" height="90" rx="6" fill="#F5F5F4" stroke="#78716C" stroke-width="1.5"/>
+<text x="125.0" y="418" font-size="13" text-anchor="middle" font-weight="600" fill="#1C1917">Mandate core</text>
+<text x="125.0" y="436" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">signer, ledger, reconciler</text>
+<text x="125.0" y="452" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">paid checks run as mandates</text>
+<rect x="270" y="60" width="320" height="320" rx="6" fill="#F5F5F4" stroke="#78716C" stroke-width="1.5"/>
+<text x="430" y="82" font-size="14" text-anchor="middle" font-weight="600" fill="#1C1917">Proctor (Rust)</text>
+<rect x="290" y="96" width="280" height="36" rx="4" fill="#FFFFFF" stroke="#78716C"/>
+<text x="430" y="119" font-size="12" text-anchor="middle" font-weight="normal" fill="#1C1917">hooks: setup, ready, teardown, with timeouts</text>
+<rect x="290" y="140" width="280" height="36" rx="4" fill="#FFFFFF" stroke="#78716C"/>
+<text x="430" y="163" font-size="12" text-anchor="middle" font-weight="normal" fill="#1C1917">agent: one adapter executable, task + findings</text>
+<rect x="290" y="184" width="280" height="68" rx="4" fill="#FFFFFF" stroke="#78716C"/>
+<text x="430" y="204" font-size="12" text-anchor="middle" font-weight="600" fill="#1C1917">checks and outcomes</text>
+<text x="430" y="220" font-size="11" text-anchor="middle" font-weight="normal" fill="#1C1917">PASS | IMPLEMENTATION_FAILURE</text>
+<text x="430" y="236" font-size="11" text-anchor="middle" font-weight="normal" fill="#1C1917">INFRASTRUCTURE_ERROR | PAYMENT_UNRESOLVED</text>
+<rect x="290" y="260" width="280" height="36" rx="4" fill="#FFFFFF" stroke="#78716C"/>
+<text x="430" y="283" font-size="12" text-anchor="middle" font-weight="normal" fill="#1C1917">journal: attempts, evidence, exposure</text>
+<rect x="290" y="304" width="280" height="36" rx="4" fill="#FFFFFF" stroke="#78716C"/>
+<text x="430" y="327" font-size="12" text-anchor="middle" font-weight="normal" fill="#1C1917">hedera: 402 checks, test purchase, reconciliation</text>
+<rect x="650" y="60" width="320" height="80" rx="6" fill="#F5F5F4" stroke="#78716C" stroke-width="1.5"/>
+<text x="810.0" y="78" font-size="13" text-anchor="middle" font-weight="600" fill="#1C1917">Git worktree</text>
+<text x="810.0" y="96" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">branch proctor/&lt;run&gt;</text>
+<text x="810.0" y="112" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">the only thing the agent edits</text>
+<rect x="650" y="180" width="320" height="80" rx="6" fill="#F5F5F4" stroke="#78716C" stroke-width="1.5"/>
+<text x="810.0" y="198" font-size="13" text-anchor="middle" font-weight="600" fill="#1C1917">Coding agent, via adapter</text>
+<text x="810.0" y="216" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">receives task and findings on stdin</text>
+<text x="810.0" y="232" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">no payment credentials in its environment</text>
+<rect x="270" y="430" width="320" height="96" rx="6" fill="#FEF3C7" stroke="#B45309" stroke-width="1.5"/>
+<text x="430.0" y="448" font-size="13" text-anchor="middle" font-weight="600" fill="#1C1917">Fixtures: sellers in fault mode</text>
+<text x="430.0" y="466" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">quote drift, drop response after settle,</text>
+<text x="430.0" y="482" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">buyer crash point</text>
+<text x="430.0" y="498" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">fast, repeatable, never settlement proof</text>
+<rect x="650" y="430" width="320" height="96" rx="6" fill="#E0F2FE" stroke="#0369A1" stroke-width="1.5"/>
+<text x="810.0" y="448" font-size="13" text-anchor="middle" font-weight="600" fill="#1C1917">Live acceptance: Blocky402 testnet</text>
+<text x="810.0" y="466" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">one test purchase as a mandate:</text>
+<text x="810.0" y="482" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">budget, allowlist of the endpoint, cap</text>
+<text x="810.0" y="498" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">reported under its own heading</text>
+<polyline points="220,135 270,135" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<polyline points="270,258 220,258" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<polyline points="220,445 245,445 245,322 270,322" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="250" y="400" font-size="11" text-anchor="start" font-weight="normal" fill="#57534E">uses</text>
+<polyline points="430,380 430,430" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="436" y="408" font-size="11" text-anchor="start" font-weight="normal" fill="#57534E">setup, ready, teardown</text>
+<polyline points="590,226 625,226 625,478 650,478" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="600" y="410" font-size="11" text-anchor="start" font-weight="normal" fill="#57534E">live pass</text>
+<polyline points="590,158 610,158 610,220 650,220" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="596" y="152" font-size="11" text-anchor="start" font-weight="normal" fill="#57534E">findings</text>
+<polyline points="810,180 810,140" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="816" y="164" font-size="11" text-anchor="start" font-weight="normal" fill="#57534E">edits</text>
+<polyline points="650,100 590,100" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="620" y="93" font-size="11" text-anchor="middle" font-weight="normal" fill="#57534E">recheck</text>
+<text x="810" y="290" font-size="11" text-anchor="middle" font-weight="normal" fill="#57534E">bounded attempts; infrastructure errors stop the loop</text>
+<text x="30" y="560" font-size="12" text-anchor="start" font-weight="normal" fill="#57534E">Loop: check the current implementation, hand failures to the agent, inspect the change, recheck, stop at pass, at the attempt limit,</text>
+<text x="30" y="578" font-size="12" text-anchor="start" font-weight="normal" fill="#57534E">or at the first infrastructure error. Output is a reviewable patch, a report, and Hedera transaction references.</text>
+</svg>

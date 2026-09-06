@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="640" viewBox="0 0 1000 640" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#44403C"/></marker></defs>
+<rect x="0.5" y="0.5" width="999" height="639" rx="8" fill="#FAFAF9" stroke="#E7E5E4"/>
+<title>Mandate architecture: one purchase, end to end</title>
+<text x="30" y="32" font-size="17" text-anchor="start" font-weight="700" fill="#1C1917">Mandate: one purchase, end to end</text>
+<text x="30" y="50" font-size="12" text-anchor="start" font-weight="normal" fill="#57534E">Numbers follow the payment flow in the README.</text>
+<rect x="30" y="150" width="160" height="96" rx="6" fill="#F5F5F4" stroke="#78716C" stroke-width="1.5"/>
+<text x="110.0" y="168" font-size="13" text-anchor="middle" font-weight="600" fill="#1C1917">Principal</text>
+<text x="110.0" y="186" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">mandate.yaml</text>
+<text x="110.0" y="202" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">purpose, service budget,</text>
+<text x="110.0" y="218" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">audit budget, coverage,</text>
+<text x="110.0" y="234" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">constraints</text>
+<rect x="240" y="60" width="320" height="380" rx="6" fill="#F5F5F4" stroke="#78716C" stroke-width="1.5"/>
+<text x="400" y="82" font-size="14" text-anchor="middle" font-weight="600" fill="#1C1917">Mandate runtime (Rust)</text>
+<rect x="260" y="96" width="280" height="36" rx="4" fill="#FFFFFF" stroke="#78716C"/>
+<text x="400" y="119" font-size="12" text-anchor="middle" font-weight="normal" fill="#1C1917">quoter: unsigned request, reads PAYMENT-REQUIRED</text>
+<rect x="260" y="140" width="280" height="36" rx="4" fill="#FFFFFF" stroke="#78716C"/>
+<text x="400" y="163" font-size="12" text-anchor="middle" font-weight="normal" fill="#1C1917">planner: expected cost, full-coverage bound</text>
+<rect x="260" y="184" width="280" height="52" rx="4" fill="#FFFFFF" stroke="#78716C"/>
+<text x="400" y="204" font-size="12" text-anchor="middle" font-weight="600" fill="#1C1917">ledger (SQLite)</text>
+<text x="400" y="220" font-size="12" text-anchor="middle" font-weight="normal" fill="#1C1917">settled + outstanding + held &lt;= service budget</text>
+<rect x="260" y="244" width="280" height="36" rx="4" fill="#FFFFFF" stroke="#78716C"/>
+<text x="400" y="267" font-size="12" text-anchor="middle" font-weight="normal" fill="#1C1917">signer: Hedera transfer, persisted before send</text>
+<rect x="260" y="288" width="280" height="36" rx="4" fill="#FFFFFF" stroke="#78716C"/>
+<text x="400" y="311" font-size="12" text-anchor="middle" font-weight="normal" fill="#1C1917">reconciler: receipt query, then mirror node</text>
+<rect x="260" y="332" width="280" height="36" rx="4" fill="#FFFFFF" stroke="#78716C"/>
+<text x="400" y="355" font-size="12" text-anchor="middle" font-weight="normal" fill="#1C1917">validator: claims, calculations, citations</text>
+<rect x="260" y="376" width="280" height="36" rx="4" fill="#FFFFFF" stroke="#78716C"/>
+<text x="400" y="399" font-size="12" text-anchor="middle" font-weight="normal" fill="#1C1917">receipts: local first, then HCS</text>
+<rect x="640" y="60" width="330" height="170" rx="6" fill="#FEF3C7" stroke="#B45309" stroke-width="1.5"/>
+<text x="805" y="82" font-size="14" text-anchor="middle" font-weight="600" fill="#1C1917">Reference sellers (TypeScript, team-operated)</text>
+<rect x="660" y="96" width="140" height="36" rx="4" fill="#FFFFFF" stroke="#B45309"/>
+<text x="730" y="119" font-size="13" text-anchor="middle" font-weight="normal" fill="#1C1917">screen</text>
+<rect x="810" y="96" width="140" height="36" rx="4" fill="#FFFFFF" stroke="#B45309"/>
+<text x="880" y="119" font-size="13" text-anchor="middle" font-weight="normal" fill="#1C1917">events</text>
+<rect x="660" y="142" width="140" height="36" rx="4" fill="#FFFFFF" stroke="#B45309"/>
+<text x="730" y="165" font-size="13" text-anchor="middle" font-weight="normal" fill="#1C1917">investigate</text>
+<rect x="810" y="142" width="140" height="36" rx="4" fill="#FFFFFF" stroke="#B45309"/>
+<text x="880" y="165" font-size="13" text-anchor="middle" font-weight="normal" fill="#1C1917">explain</text>
+<text x="805" y="200" font-size="11" text-anchor="middle" font-weight="normal" fill="#57534E">published tariffs, bazaar info in every 402</text>
+<text x="805" y="216" font-size="11" text-anchor="middle" font-weight="normal" fill="#57534E">retries served from storage</text>
+<rect x="640" y="290" width="150" height="80" rx="6" fill="#EDE9FE" stroke="#6D28D9" stroke-width="1.5"/>
+<text x="715.0" y="308" font-size="13" text-anchor="middle" font-weight="600" fill="#1C1917">The Graph</text>
+<text x="715.0" y="326" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">Uniswap v3 subgraph</text>
+<text x="715.0" y="342" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">block-height queries</text>
+<rect x="820" y="290" width="150" height="80" rx="6" fill="#F5F5F4" stroke="#78716C" stroke-width="1.5"/>
+<text x="895.0" y="308" font-size="13" text-anchor="middle" font-weight="600" fill="#1C1917">Model API</text>
+<text x="895.0" y="326" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">prose from validated</text>
+<text x="895.0" y="342" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">facts only</text>
+<rect x="230" y="500" width="150" height="80" rx="6" fill="#E0F2FE" stroke="#0369A1" stroke-width="1.5"/>
+<text x="305.0" y="518" font-size="13" text-anchor="middle" font-weight="600" fill="#1C1917">Mirror node</text>
+<text x="305.0" y="536" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">transaction record</text>
+<text x="305.0" y="552" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">ingestion progress</text>
+<rect x="400" y="500" width="180" height="80" rx="6" fill="#E0F2FE" stroke="#0369A1" stroke-width="1.5"/>
+<text x="490.0" y="518" font-size="13" text-anchor="middle" font-weight="600" fill="#1C1917">Hedera consensus</text>
+<text x="490.0" y="536" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">receipt query</text>
+<text x="490.0" y="552" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">HCS receipts topic</text>
+<rect x="640" y="500" width="330" height="80" rx="6" fill="#E0F2FE" stroke="#0369A1" stroke-width="1.5"/>
+<text x="805.0" y="518" font-size="13" text-anchor="middle" font-weight="600" fill="#1C1917">Blocky402 facilitator</text>
+<text x="805.0" y="536" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">verify, co-sign as fee payer, submit</text>
+<text x="805.0" y="552" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">hedera:testnet, exact, fee payer 0.0.7162784</text>
+<polyline points="190,198 240,198" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="215" y="191" font-size="11" text-anchor="middle" font-weight="normal" fill="#57534E">mandate</text>
+<polyline points="540,108 640,108" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="590" y="102" font-size="11" text-anchor="middle" font-weight="normal" fill="#57534E">1 request</text>
+<polyline points="640,124 540,124" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="590" y="138" font-size="11" text-anchor="middle" font-weight="normal" fill="#57534E">402 quote</text>
+<polyline points="540,262 600,262 600,180 640,180" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="545" y="278" font-size="11" text-anchor="start" font-weight="normal" fill="#57534E">2 PAYMENT-SIGNATURE:</text>
+<text x="545" y="292" font-size="11" text-anchor="start" font-weight="normal" fill="#57534E">signed transfer + payment id</text>
+<polyline points="805,230 805,500" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="812" y="395" font-size="11" text-anchor="start" font-weight="normal" fill="#57534E">3 verify, then work,</text>
+<text x="812" y="409" font-size="11" text-anchor="start" font-weight="normal" fill="#57534E">then settle</text>
+<polyline points="770,230 770,290" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="764" y="262" font-size="11" text-anchor="end" font-weight="normal" fill="#57534E">GraphQL</text>
+<polyline points="900,230 900,290" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="906" y="262" font-size="11" text-anchor="start" font-weight="normal" fill="#57534E">facts in</text>
+<polyline points="640,540 580,540" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="610" y="532" font-size="11" text-anchor="middle" font-weight="normal" fill="#57534E">4 submit</text>
+<polyline points="470,500 470,440" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="464" y="474" font-size="11" text-anchor="end" font-weight="normal" fill="#57534E">5a receipt query</text>
+<polyline points="310,440 310,500" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="304" y="474" font-size="11" text-anchor="end" font-weight="normal" fill="#57534E">5b mirror record</text>
+<polyline points="545,440 545,500" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="551" y="474" font-size="11" text-anchor="start" font-weight="normal" fill="#57534E">6 receipts</text>
+<polyline points="240,410 110,410 110,246" fill="none" stroke="#44403C" stroke-width="1.5" marker-end="url(#a)"/>
+<text x="116" y="404" font-size="11" text-anchor="start" font-weight="normal" fill="#57534E">report + unspent</text>
+<text x="30" y="618" font-size="12" text-anchor="start" font-weight="normal" fill="#57534E">Every 402 is a quote. Every purchase is one signed transfer. Settlement is proven by the ledger, never by an HTTP response.</text>
+</svg>
