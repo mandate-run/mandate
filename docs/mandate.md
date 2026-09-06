@@ -57,7 +57,7 @@ mandate:
     service: { total: "0.0100", asset: "USDC" }   # what sellers can be paid
     audit: { total: "0.5", asset: "HBAR" }        # HCS receipts and association fees
     reserve_completion: true        # never spend what finishing will cost
-  coverage: "all_material"          # every material pool, or max_pools: N
+  coverage: "all_material"          # every material pool; capped coverage comes later
   constraints:
     networks: ["hedera:testnet"]
     facilitator: "https://api.testnet.blocky402.com"
@@ -210,7 +210,8 @@ Neither is a sponsor decoration. The first mission is not possible without both.
 - **Authorization.** A signed payment handed to a seller and not yet confirmed by the ledger.
 - **Settlement.** The ledger record that the payment executed.
 - **Receipt.** The buyer's on-chain record of one decision: counterparty, amount, transaction id, payment id hash, request hash, result hash, outcome.
-- **Coverage.** How many material pools the mandate requires deep evidence for: all of them, or a stated maximum.
+- **Coverage.** The requirement that every material pool receives deep evidence. A capped form is a later option.
+- **Outcome.** The runtime's verdict on one pool: non_material, pending, supported or undetermined.
 - **Audit budget.** HBAR set aside for receipts and token association, bounded separately from what sellers can be paid.
 - **Refusal.** A purchase not made, with a machine-readable and human-readable reason.
 
