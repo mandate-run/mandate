@@ -16,26 +16,7 @@ Built from scratch for ETHOnline 2026: Hedera AI & Agentic Payments, Hedera Open
 
 ## Architecture
 
-```
-mandate.yaml -> mandate (Rust)
-                  quoter     unsigned requests, parses PAYMENT-REQUIRED
-                  planner    expected cost and full-coverage bound per plan
-                  ledger     SQLite: settled + outstanding + held <= service budget
-                  signer     Hedera TransferTransaction via r402-hedera, persisted before send
-                  reconciler receipt query, then mirror node
-                  validator  claims, calculations, citations, freshness, schema
-                  receipts   local first, then one HCS message per decision
-                     |  x402 v2 exact, hedera:testnet, payment-identifier
-                     v
-                sellers (TypeScript, one process, four routes, team-operated)
-                  screen . events . investigate . explain
-                     |                          |
-                     v                          v
-                Uniswap v3 subgraph         model API
-                (Subgraph Studio key)
-
-                Blocky402 verifies, co-signs and submits each transfer
-```
+![Mandate architecture](docs/img/mandate-architecture.svg)
 
 | Component | Role | Built with |
 |---|---|---|
@@ -61,7 +42,7 @@ All evidence is live data from the Uniswap v3 subgraph on The Graph Network, id 
 
 ## Harness
 
-Proctor, in `harness/`, certifies x402 sellers on Hedera with one command and builds this project's increments through an agent loop with deterministic and on-chain tiers. It is Mandate's entry to the Hedera Open Source track. Design: [docs/harness.md](docs/harness.md).
+Proctor, in `harness/`, builds Hedera services from an executable acceptance contract, tests them under payment failure, and returns a reviewable change with payment evidence. Mandate's recovery behaviors are built and verified through it. It is Mandate's entry to the Hedera Open Source track. Design: [docs/harness.md](docs/harness.md).
 
 ## Setup
 
@@ -74,6 +55,6 @@ Not runnable yet. Requires a Hedera testnet account associated with USDC `0.0.42
 | [docs/mandate.md](docs/mandate.md) | Why this exists and where it goes |
 | [docs/spec.md](docs/spec.md) | What the runtime must do; authoritative |
 | [docs/threat-model.md](docs/threat-model.md) | What can go wrong, who stops it, what remains |
-| [docs/harness.md](docs/harness.md) | What Proctor checks and why it exists |
+| [docs/harness.md](docs/harness.md) | What Proctor is, what it checks, and its boundaries |
 | [docs/demo.md](docs/demo.md) | What the video shows, in order |
 | [docs/requirements.md](docs/requirements.md) | Sponsor requirements, status and sources |
