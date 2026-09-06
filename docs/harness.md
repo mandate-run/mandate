@@ -52,8 +52,8 @@ run = "cargo build --workspace && pnpm -C sellers build"
 [[check]]
 name = "recovery"
 run = "mandate run fixtures/lost-response.yaml --json"
-expect  = { authorizations = 1, payment_state = "settled", delivery_state = "validated", outstanding = "0" }
-observe = { fixture_signed_payloads = 1, fixture_settlements = 1, served_hash_equals_result = true }
+expect  = { authorizations = 1, submissions = 3, retrievals = 1, payment_state = "settled", delivery_state = "validated", outstanding = "0" }
+observe = { fixture_signed_payloads = 4, fixture_distinct_payloads = 1, fixture_settlements = 1, served_hash_equals_result = true }
 
 [[check]]
 name = "restart"
@@ -82,10 +82,10 @@ Precedence when several apply: PAYMENT_UNRESOLVED, then INFRASTRUCTURE_ERROR, th
 | Scenario | Fixture | Contract, in short |
 |---|---|---|
 | Quote drift | events seller quotes above its ceiling | refused OFF_TARIFF; plan re-chosen; journal shows no signed payment for the drifted quote |
-| Lost response | seller settles, then drops the response | ledger shows one matching transfer; result fetched with the original signed payment; journal shows one signed payload and one settlement; budget columns match |
+| Lost response | seller settles, then drops the response to all three submissions | ledger shows one matching transfer; three submissions then one retrieval, all the same payload; journal shows one settlement; result recovered; budget columns match |
 | Restart after authorization | buyer exits at state `prepared` through a test-only crash point | Proctor snapshots the ledger row; on resume the journal's payload hash equals the snapshot; no second authorization; budget intact |
 | Restart before validation | buyer exits after the body is persisted, before validation | on resume the purchase is validated, not fetched again; no second authorization |
-| Duplicate record | facilitator stub returns a DUPLICATE_TRANSACTION record before the SUCCESS record | payment settles on the SUCCESS record; the duplicate is ignored; exposure is never released early |
+| Duplicate record | the mirror-node adapter returns a DUPLICATE_TRANSACTION record before the SUCCESS record for the id | payment settles on the SUCCESS record; the duplicate is ignored; exposure is never released early |
 
 Fixtures are the reference sellers with fault switches, run locally. A live pass runs the same contract through Blocky402 on testnet with one real test purchase and is reported under its own heading. Fixture results are never presented as proof of settlement.
 
