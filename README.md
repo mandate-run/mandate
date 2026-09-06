@@ -12,7 +12,7 @@ Built from scratch for ETHOnline 2026: Hedera AI & Agentic Payments, Hedera Open
 - Plans over the remaining work: staged evidence, a partial bundle, or the full bundle, choosing the lowest expected cost among plans whose worst case fits the budget at full coverage.
 - Refuses before spending when no plan can guarantee coverage, and says what completion would cost.
 - Pays in USDC on Hedera testnet through the Blocky402 facilitator. Settlement is proven by the ledger, never by an HTTP response, and a lost response is recovered without a second payment.
-- Validates results as structured claims: every calculation is re-evaluated and every citation must exist in purchased evidence.
+- Computes every claim itself from purchased facts; a model only writes prose. Every calculation is re-evaluated, every citation must exist in purchased evidence, and a sample of cited transactions is checked against Ethereum directly.
 
 ## Architecture
 
@@ -28,17 +28,17 @@ Built from scratch for ETHOnline 2026: Hedera AI & Agentic Payments, Hedera Open
 ## Payment flow
 
 1. The runtime sends the real request without payment. The seller answers 402 with `PAYMENT-REQUIRED`: amount, asset, `payTo`, `feePayer`, timeout.
-2. The runtime checks the quote against the seller's tariff, the facilitator's advertised fee payer, the mandate's constraints and the ledger invariant.
+2. The runtime checks the quote against the pinned listing's recipient, asset, network and price ceiling, the facilitator's advertised fee payer, the mandate's constraints and the ledger invariant.
 3. The runtime builds a Hedera `TransferTransaction` with the facilitator as fee payer, signs it, generates the transaction id itself, and persists the signed bytes before anything leaves the process.
 4. The runtime moves the amount from held to outstanding and resends the request with `PAYMENT-SIGNATURE`, carrying a client payment id for idempotency.
 5. The seller verifies through Blocky402, does the work, then settles; Blocky402 co-signs and submits. The result returns with `PAYMENT-RESPONSE`.
-6. The runtime proves settlement from a consensus receipt query or the mirror node record, moves the amount to settled, validates the result, and queues a receipt for HCS. On a lost response it re-fetches with the same signed payment. Absence on the ledger releases exposure only after the ledger's history has passed the authorization's expiry.
+6. The runtime proves settlement from a transaction record whose transfers match the approved debit and credit, moves the amount to settled, validates the result, and queues a receipt for HCS. On a lost response it re-fetches with the same signed payment. An absent record keeps the amount reserved until a later reconciliation finds one, or a release policy the principal set explicitly applies.
 
-Normative detail: [docs/spec.md](docs/spec.md) sections 3, 6 and 9.
+Normative detail: [docs/spec.md](docs/spec.md) sections 3, 6 and 10.
 
 ## The Graph
 
-All evidence is live data from the Uniswap v3 subgraph on The Graph Network, id `5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV`, queried through the gateway with a Subgraph Studio API key. Sellers read token-denominated TVL at the window's two block heights, count and sum mints, burns and swaps in the window, and return the events with transaction hashes as evidence. Each new investigation queries live data; retries return the original purchased result. Every response states its block range, covered window, truncation and indexing status. `Pool.liquidity` is in-range liquidity and is reported, never used for materiality.
+All evidence is live data from the Uniswap v3 subgraph on The Graph Network, id `5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV`, queried through the gateway with a Subgraph Studio API key. Sellers read token-denominated TVL at the window's two block heights, count and sum mints, burns and swaps in the window, and return the events with transaction hashes as evidence. Each new investigation queries live data; retries return the original purchased result. Every response states its block range, covered window, truncation and indexing status. The runtime computes per-pool outcomes and claims from those facts, decides what to buy next, and checks the explanation against them. `Pool.liquidity` is in-range liquidity and is reported, never used for materiality.
 
 ## Harness
 
