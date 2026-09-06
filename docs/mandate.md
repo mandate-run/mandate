@@ -99,7 +99,7 @@ The runtime has three duties. Each maps to a behavior the demo shows.
 1. **The model proposes. The mandate disposes.** No language model holds a key, sees a key, or sets an amount. The runtime computes every claim from purchased facts; a model only turns claims into prose.
 2. **Quotes are facts, not metadata.** Prices come from live 402 responses to the actual request, collected by a client that cannot pay.
 3. **Reserve the finish before spending on the middle.** A sequence of individually affordable purchases can strand a task. The runtime prices the final step from a committed tariff and holds that amount first.
-4. **Every authorization is exposure until the ledger says otherwise.** A timeout after signing releases nothing. The buyer generated the transaction id, so it can ask the ledger directly, and absence counts as proof only once the ledger's history has passed the authorization's expiry.
+4. **Every authorization is exposure until the ledger says otherwise.** A timeout after signing releases nothing. The buyer generated the transaction id, so it can ask the ledger directly. Absence is never proof: an authorization with no record stays reserved until a record appears.
 5. **Sellers publish ceilings. Buyers hold them to it.** A tariff is a versioned price ceiling with unit definitions and an input cap. It makes future steps reservable, lets a seller compete below it, and makes any quote above it refusable.
 6. **Refusal is a first-class outcome.** A refused purchase carries a reason a human can read: over budget, outside constraints, off tariff, evidence insufficient, requirement unmeetable.
 7. **Receipts, not logs.** Hashes, amounts, counterparties and transaction ids go on chain. Prompts, data and results do not.
@@ -137,7 +137,7 @@ The ceilings make the choice depend on what screening finds. With one to three m
 
 **Integrity refusal.** After the screen, the events seller quotes 0.0020 against a published ceiling of 0.0015. The quote is under budget. It is refused anyway, with the tariff version cited, and the one-pool bundle at 0.0032 becomes the cheapest path to a cited answer.
 
-**Unresolved payment.** The events request times out after the authorization was sent. The 0.0015 stays outstanding. The runtime asks the ledger for the transaction id it generated: first the consensus receipt, then the mirror node. If a record shows the transfer with the expected amounts, it fetches the result again with the same signed payment and payment id, and the seller returns the stored result. If a record shows the transaction failed, the amount is released. If no record appears, the amount stays reserved and the report says so; only a later reconciliation that finds a record, or a release policy the principal set explicitly, changes that. It never pays twice and never assumes.
+**Unresolved payment.** The events request times out after the authorization was sent. The 0.0015 stays outstanding. The runtime asks the ledger for the transaction id it generated: the consensus receipt as a hint, then every mirror node record for that id. Resends produce duplicate records, and those are ignored. If a record shows the transfer with the expected amounts, it fetches the result again with the same signed payment and payment id, and the seller returns the stored result. If the only records show failure, the amount is released. If no record appears, the amount stays reserved and the report says so; only a later reconciliation that finds a record changes that. It never pays twice and never assumes.
 
 ## 7. What already exists, and what this adds
 
@@ -189,6 +189,7 @@ Neither is a sponsor decoration. The first mission is not possible without both.
 - **Quality beyond citations.** Citation validity proves a claim is grounded, not that it is right or complete. Task-specific validators and post-payment feedback belong above the runtime.
 - **Tariff standardization.** A committed tariff should be an x402 extension the seller advertises in the 402 itself, not a convention of one buyer.
 - **Non-tariffed sellers.** They can be quoted but not reserved against. The runtime should say so and treat them as last-step purchases only.
+- **Write-off policy.** An authorization that never produces a record stays reserved forever under this design. A principal may want to accept that loss after a delay. That is a policy about risk, not a proof of nonpayment, and it is deliberately absent from the first version.
 - **Disputes.** A seller that takes payment and fails to deliver is recorded and avoided. Refunds and escrow are out of scope until a settlement scheme supports them cleanly.
 - **Cross-chain mandates.** One budget across several rails needs a common unit and exposure accounting per rail.
 - **Learning.** Which sellers deserve trust over time is a learning problem. The runtime provides the ground truth, receipts and outcomes, for that layer to learn from.
