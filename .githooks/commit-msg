@@ -1,0 +1,32 @@
+#!/bin/sh
+# Enforces: conventional subject, 50 chars max; body up to 3 bullets,
+# 50 chars each, starting with "- " and not capitalized. Merge and
+# revert messages pass. Activate once per clone:
+#   git config core.hooksPath .githooks
+awk '
+  function fail(m) { print "commit-msg: " m > "/dev/stderr"; exit 1 }
+  /^#/ { next }
+  { lines[++n] = $0 }
+  END {
+    while (n > 0 && lines[n] ~ /^[[:space:]]*$/) n--
+    if (n == 0) fail("empty message")
+    subj = lines[1]
+    if (subj ~ /^(Merge|Revert) /) exit 0
+    if (subj !~ /^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._\/-]+\))?!?: [^ ]/)
+      fail("subject must be type(scope)?: description")
+    if (length(subj) > 50) fail("subject is " length(subj) " chars, max 50")
+    if (n == 1) exit 0
+    if (lines[2] !~ /^[[:space:]]*$/) fail("second line must be blank")
+    bullets = 0
+    for (i = 3; i <= n; i++) {
+      l = lines[i]
+      if (l ~ /^[[:space:]]*$/) fail("no blank lines inside the body")
+      if (l !~ /^- /) fail("body lines must start with \"- \": " l)
+      if (l ~ /^- [A-Z]/) fail("bullets must not be capitalized: " l)
+      if (length(l) > 50) fail("bullet is " length(l) " chars, max 50: " l)
+      bullets++
+    }
+    if (bullets > 3) fail("body has " bullets " bullets, max 3")
+    exit 0
+  }
+' "$1"
