@@ -35,7 +35,7 @@ No browser tier and no semantic tier. Those belong to app harnesses.
 | T0 static | secret scan, forbidden paths, formatting | no findings |
 | T1 build | `cargo build`, `cargo test`, `pnpm build`, `pnpm test` as declared | all exit 0 |
 | T2 protocol | status is 402; `PAYMENT-REQUIRED` decodes to v2 `PaymentRequired`; an `accepts` entry is `exact` on the declared network; `extra.feePayer` equals the facilitator's `/supported` signer; amount equals the listing tariff for the probe request; `bazaar` info present and valid against its schema; `offer-receipt` offer verifies when present | every check true |
-| T3 chain | ephemeral payer funded by the operator; payer associated with the asset when HTS; paid request settles; mirror node shows the transfer with the expected amount, `payTo` and fee payer; a second identical request with the same `payment-identifier` returns the same body and no second transfer; HCS topic shows a receipt naming the transaction; leftover funds swept back | every check true, transaction ids recorded |
+| T3 chain | ephemeral payer funded by the operator; payer associated with the asset when HTS; paid request settles; receipt query or mirror node shows result SUCCESS with the expected amount, `payTo` and fee payer; a retry with the same `payment-identifier` and the original signed payment returns the same body and no second transfer; a retry with the id and a changed request gets 409; HCS topic shows a receipt naming the transaction; leftover funds swept back | every check true, transaction ids recorded |
 
 ## Loop
 
