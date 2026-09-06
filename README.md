@@ -62,6 +62,10 @@ All evidence is live data from the Uniswap v3 subgraph on The Graph Network, id 
 
 Not runnable yet. Requires a Hedera testnet account associated with USDC `0.0.429274`, funded with the mandate budget in USDC and a little HBAR for association and HCS fees; a Subgraph Studio API key; a model API key. Commands are added once the first settlement gate passes.
 
+## Harness
+
+Proctor, in `harness/`, certifies x402 sellers on Hedera with one command and builds this project's increments through an agent loop with deterministic and on-chain tiers. It is Mandate's entry to the Hedera Open Source track. Design: [docs/harness.md](docs/harness.md).
+
 ## Docs
 
 | File | Answers |
@@ -69,5 +73,6 @@ Not runnable yet. Requires a Hedera testnet account associated with USDC `0.0.42
 | [docs/mandate.md](docs/mandate.md) | Why this exists and where it goes |
 | [docs/spec.md](docs/spec.md) | What the runtime must do |
 | [docs/threat-model.md](docs/threat-model.md) | What can go wrong and what stops it |
+| [docs/harness.md](docs/harness.md) | What Proctor checks and why it exists |
 | [docs/demo.md](docs/demo.md) | What the video shows, in order |
 | [docs/requirements.md](docs/requirements.md) | Sponsor requirements and status |

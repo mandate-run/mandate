@@ -21,7 +21,8 @@ Video order:
 | 0:15 | Scenario 1 live, narrated at the plan choice and at the buying-events decision |
 | 1:45 | HashScan: one payment transaction and the HCS topic with receipts |
 | 2:15 | Scenario 3 live: refusal before the first cent, then 3b for contrast |
-| 3:00 | Scenario 2 or 4, whichever runs cleaner, 30 s |
-| 3:30 | Close: repo, both tracks, one line on what comes next |
+| 2:50 | Scenario 4, 25 s: the off-tariff refusal |
+| 3:15 | Proctor: `proctor validate --pay` against the events seller, then the run attestation on HashScan |
+| 3:45 | Close: repo, three tracks, one line on what comes next |
 
 Scenario 5 is recorded as a backup clip, not in the main cut.
