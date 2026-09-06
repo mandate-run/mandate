@@ -30,7 +30,7 @@ Not pursued: A2A or ACP negotiation, ERC-8004 or HCS-14 identity, Scheduled Tran
 
 | Requirement, quoted | Satisfied by | Status |
 |---|---|---|
-| "Use The Graph as a load-bearing part of the project ... the agent/app uses The Graph (Subgraphs, the Subgraph MCP, or Substreams) as its source of blockchain data." | All evidence comes from Uniswap v3 subgraph `5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV` on The Graph Network; there is no other data source | todo |
+| "Use The Graph as a load-bearing part of the project ... the agent/app uses The Graph (Subgraphs, the Subgraph MCP, or Substreams) as its source of blockchain data." | All analysis data comes from Uniswap v3 subgraph `5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV` on The Graph Network; a public Ethereum RPC is used only to spot-check that cited transactions exist | todo |
 | "Consume live data from a Graph provider, for example querying Subgraphs with an API key from Subgraph Studio" | Sellers query `gateway.thegraph.com` with a Subgraph Studio API key | todo |
 | "Do meaningful work with the data: reasoning, decisions, automation, or a natural-language interface, not just printing a raw query result." | Materiality screening, evidence sufficiency and purchase decisions, cited explanation | todo |
 | "Open-source the code with a clear README or SKILL.md so judges can run it, and submit a public repository plus a short demo video (two to four minutes)." | README Setup runnable on a clean machine; same video | todo |
