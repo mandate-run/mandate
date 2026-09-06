@@ -54,20 +54,20 @@ mandate:
     Explain any material liquidity change in the listed pools over the
     last 24 hours, with transaction-level evidence.
   budget:
-    total: "0.0100 USDC"
+    total: "0.0100"
+    asset: "USDC"
     reserve_completion: true        # never spend what finishing will cost
   constraints:
     networks: ["hedera:testnet"]
-    assets: ["USDC"]
     sellers: "allowlist"            # or: any seller with a committed tariff
-    max_single_payment: "0.0050 USDC"
+    max_single_payment: "0.0050"
     deadline: "2026-09-13T16:00:00Z"
   requirements:
-    evidence: "transaction-level"
+    evidence: "transaction"
     citations: "required"
-    max_data_age_seconds: 3600
+    max_data_age_s: 3600
   duties:
-    receipts: "hcs://0.0.topic"     # every payment and result hash, in order
+    receipts_topic: "0.0.topic"     # every payment and result hash, in order
     report_refusals: true           # every purchase not made, with the reason
 ```
 
