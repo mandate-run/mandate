@@ -18,7 +18,7 @@ Extra points pursued:
 | Extra point, quoted | Satisfied by | Status |
 |---|---|---|
 | "Pay-per-call inference, data, or compute metering rather than a flat per-request charge" | Tariffs priced per pool, per pool-window, per input KB | todo |
-| "Agent discovery via UCP, or a directory that makes your service findable by other agents" | Offer manifest served over HTTP | todo |
+| "Agent discovery via UCP, or a directory that makes your service findable by other agents" | Manifest of listings served over HTTP; every 402 carries the x402 `bazaar` discovery extension | todo |
 | "HTS tokens or custom fee schedules in the settlement path" | USDC, HTS token `0.0.429274` on testnet | todo |
 | "Verifiable payment audit trails on HCS" | One receipt per decision on an HCS topic | todo |
 
@@ -30,8 +30,8 @@ Not pursued: A2A or ACP negotiation, ERC-8004 or HCS-14 identity, Scheduled Tran
 
 | Requirement, quoted | Satisfied by | Status |
 |---|---|---|
-| "Use The Graph as a load-bearing part of the project ... the agent/app uses The Graph (Subgraphs, the Subgraph MCP, or Substreams) as its source of blockchain data." | All evidence comes from the Uniswap v3 subgraph; there is no other data source | todo |
-| "Consume live data from a Graph provider, for example querying Subgraphs with an API key from Subgraph Studio" | Sellers query The Graph Network with a Subgraph Studio API key | todo |
+| "Use The Graph as a load-bearing part of the project ... the agent/app uses The Graph (Subgraphs, the Subgraph MCP, or Substreams) as its source of blockchain data." | All evidence comes from Uniswap v3 subgraph `5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV` on The Graph Network; there is no other data source | todo |
+| "Consume live data from a Graph provider, for example querying Subgraphs with an API key from Subgraph Studio" | Sellers query `gateway.thegraph.com` with a Subgraph Studio API key | todo |
 | "Do meaningful work with the data: reasoning, decisions, automation, or a natural-language interface, not just printing a raw query result." | Materiality screening, evidence sufficiency and purchase decisions, cited explanation | todo |
 | "Open-source the code with a clear README or SKILL.md so judges can run it, and submit a public repository plus a short demo video (two to four minutes)." | README Setup runnable on a clean machine; same video | todo |
 | "Select the pool that matches how you built: Start Fresh for net-new" | First commit 2026-09-06, no prior code | done |
