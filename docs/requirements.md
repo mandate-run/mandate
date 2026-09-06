@@ -34,7 +34,7 @@ Not pursued: A2A or ACP negotiation, ERC-8004 or HCS-14 identity, Scheduled Tran
 | "Consume live data from a Graph provider, for example querying Subgraphs with an API key from Subgraph Studio" | Sellers query `gateway.thegraph.com` with a Subgraph Studio API key | todo |
 | "Do meaningful work with the data: reasoning, decisions, automation, or a natural-language interface, not just printing a raw query result." | Materiality screening, evidence sufficiency and purchase decisions, cited explanation | todo |
 | "Open-source the code with a clear README or SKILL.md so judges can run it, and submit a public repository plus a short demo video (two to four minutes)." | README Setup runnable on a clean machine; same video | todo |
-| "Select the pool that matches how you built: Start Fresh for net-new" | First commit 2026-09-06, no prior code | done |
+| "Select the pool that matches how you built: Start Fresh for net-new" | First commit `f6cc4fa`, 2026-09-06, no prior code | done |
 
 ## Hedera: Open Source, Improve the Hedera Harness
 
@@ -50,4 +50,16 @@ Extra points pursued: "Harness for uncovered language/framework", "New service c
 
 ## One video
 
-ETHGlobal requires one 2 to 4 minute video per project and rejects others at upload; the sponsor limits above are looser and do not apply. One project may apply to up to 3 partner prizes, and all tracks of one partner count as one, so Mandate applies to Hedera, both tracks, and The Graph. The video must serve all three. Must show on screen: a 402 response, a payment settling with a Hedera transaction id, a live subgraph query, the decision to buy more evidence, a refusal with its reason, the HCS receipts, and one `proctor validate --pay` run with its attestation.
+ETHGlobal requires one 2 to 4 minute video per project and rejects others at upload; the sponsor limits above are looser and do not apply. One project may apply to up to 3 partner prizes, and all tracks of one partner count as one, so Mandate applies to Hedera, both tracks, and The Graph. The video must serve all three. Must show on screen: a 402 response, a payment settling with a Hedera transaction id, a live subgraph query, the decision to buy more evidence, a refusal with its reason, a lost response recovered without a second payment, the HCS receipts, and one `proctor validate --pay` run with its attestation.
+
+## Sources
+
+All quotes and facts above were verified on 2026-09-06.
+
+- Hedera prize page: https://ethglobal.com/events/ethonline2026/prizes/hedera
+- The Graph prize page: https://ethglobal.com/events/ethonline2026/prizes/the-graph
+- ETHGlobal submission rules: https://ethglobal.com/events/ethonline2026/info/details
+- Blocky402 testnet `/supported`, probed live: https://api.testnet.blocky402.com/supported
+- Hedera exact scheme: https://github.com/x402-foundation/x402/blob/main/specs/schemes/exact/scheme_exact_hedera.md
+- payment-identifier extension: https://github.com/x402-foundation/x402/blob/main/specs/extensions/payment_identifier.md
+- Hedera Harness: https://github.com/hedera-dev/hedera-harness
