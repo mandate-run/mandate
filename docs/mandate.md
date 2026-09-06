@@ -82,7 +82,7 @@ These are testable invariants, not intentions.
 2. No payment leaves outside the allowed networks, assets, sellers and per-payment cap.
 3. No payment is made against a quote that contradicts the seller's committed tariff.
 4. The outcome is either a report that meets the stated requirements, or an explicit refusal with the reason for every purchase not made.
-5. Every payment and every result hash is on the public ledger before the report is delivered.
+5. Every payment and every result hash is in the local ledger before the report is delivered and is published to the public ledger; the report lists any receipt still pending.
 
 ## 4. Three duties, three behaviors
 
@@ -96,11 +96,11 @@ The runtime has three duties. Each maps to a behavior the demo shows.
 
 ## 5. Principles
 
-1. **The model proposes. The mandate disposes.** No language model holds a key, sees a key, or sets an amount.
+1. **The model proposes. The mandate disposes.** No language model holds a key, sees a key, or sets an amount. The runtime computes every claim from purchased facts; a model only turns claims into prose.
 2. **Quotes are facts, not metadata.** Prices come from live 402 responses to the actual request, collected by a client that cannot pay.
 3. **Reserve the finish before spending on the middle.** A sequence of individually affordable purchases can strand a task. The runtime prices the final step from a committed tariff and holds that amount first.
 4. **Every authorization is exposure until the ledger says otherwise.** A timeout after signing releases nothing. The buyer generated the transaction id, so it can ask the ledger directly, and absence counts as proof only once the ledger's history has passed the authorization's expiry.
-5. **Sellers commit to tariffs. Buyers hold them to it.** A tariff is a versioned pricing formula with unit definitions and an input cap. It makes future steps reservable and out-of-tariff quotes refusable.
+5. **Sellers publish ceilings. Buyers hold them to it.** A tariff is a versioned price ceiling with unit definitions and an input cap. It makes future steps reservable, lets a seller compete below it, and makes any quote above it refusable.
 6. **Refusal is a first-class outcome.** A refused purchase carries a reason a human can read: over budget, outside constraints, off tariff, evidence insufficient, requirement unmeetable.
 7. **Receipts, not logs.** Hashes, amounts, counterparties and transaction ids go on chain. Prompts, data and results do not.
 8. **Evidence over verdicts.** Report what the data shows and cite it. Do not emit a score that cannot be explained.
@@ -109,16 +109,16 @@ The runtime has three duties. Each maps to a behavior the demo shows.
 
 The reference mission is a DeFi liquidity investigation. The evidence is live on The Graph. The payments settle on Hedera. Four services are listed, each an ordinary x402 endpoint with a published tariff. All four are reference providers operated by the Mandate team: the market is real in protocol and simulated in vendors, and the runtime is not told which is which.
 
-| Listing | Product | Tariff |
+| Listing | Product | Price ceiling |
 |---|---|---|
 | screen | Token TVL and activity at the window's ends per pool, from block-height queries | 0.0002 per pool |
 | events | Mints, burns and swaps in the window with transaction hashes | 0.0015 per pool-window |
 | investigate | screen plus events plus explanation, bundled | 0.0020 plus 0.0012 per pool |
-| explain | Facts to a validated, cited narrative | 0.0001 per KB of evidence, at most 8 KB |
+| explain | Prose from a bounded brief of claims the runtime computed | 0.0001 per KB of brief, at most 8 KB |
 
 Mandate: five pools, service budget 0.0100 USDC, coverage all material pools, per-payment cap 0.0090, transaction-level citations required, planning assumption one material pool.
 
-The tariffs make the choice depend on what screening finds. With one to three material pools the staged path is cheapest. At four, the bundle for the material subset wins. At five, the full bundle wins outright.
+The ceilings make the choice depend on what screening finds. With one to three material pools the staged path is cheapest. At four the two paths tie at the explanation's ceiling and the tie-break on fewer authorizations picks the partial bundle; a live explanation quote below the ceiling flips that. At five the full bundle wins outright.
 
 **Normal completion**
 
@@ -128,16 +128,16 @@ The tariffs make the choice depend on what screening finds. With one to three ma
 | 1 | Quote screen and investigate live; estimate events and explain. Staged expected 0.0033, bound 0.0093. Hybrid expected 0.0042, bound 0.0090. Bundle 0.0080. All feasible. Choose staged | 0 | 0.0008 | 0.0092 |
 | 2 | Buy screen for five pools | 0.0010 | 0.0008 | 0.0082 |
 | 3 | One pool material. Re-plan: events plus explain 0.0023 against a one-pool bundle 0.0032. Buy events for that pool | 0.0025 | 0.0008 | 0.0067 |
-| 4 | Evidence is 5 KB; explain quotes 0.0005. Consume the reserve, release 0.0003. Buy. Validator confirms every calculation and citation | 0.0030 | 0 | 0.0070 |
+| 4 | The runtime computes outcomes and claims; the brief is 5 KB; explain quotes 0.0005. Consume the reserve, release 0.0003. Buy. Validator confirms coverage, every calculation and citation, and three sampled transactions on Ethereum | 0.0030 | 0 | 0.0070 |
 | 5 | Receipts published. Deliver the report; 0.0070 unspent | 0.0030 | 0 | 0.0070 |
 
-**Economic adaptation.** The bundle seller drops its base charge and prices 0.0006 per pool. Five pools now cost 0.0030, below the staged expectation of 0.0033. The bundle is chosen before any screening. Nothing else changed.
+**Economic adaptation.** The bundle seller quotes 0.0030 live for five pools, below its published ceiling of 0.0080 and below the staged expectation of 0.0033. The bundle is chosen before any screening. Nothing else changed.
 
 **Safe incompletion.** Service budget 0.0030. Before buying anything the runtime prices every plan at full coverage: the cheapest bound is the full bundle at 0.0080, the cheapest expectation is staged at 0.0033. Neither fits. It refuses with both numbers and spends nothing. If the mandate permits degrading, it buys the screen alone for 0.0010, delivers the screening facts labelled incomplete, and leaves 0.0020 unspent.
 
-**Integrity refusal.** After the screen, the events seller quotes 0.0020 against a committed tariff of 0.0015. The quote is under budget. It is refused anyway, with the tariff version cited, and the one-pool bundle at 0.0032 becomes the cheapest path to a cited answer.
+**Integrity refusal.** After the screen, the events seller quotes 0.0020 against a published ceiling of 0.0015. The quote is under budget. It is refused anyway, with the tariff version cited, and the one-pool bundle at 0.0032 becomes the cheapest path to a cited answer.
 
-**Unresolved payment.** The events request times out after the authorization was sent. The 0.0015 stays outstanding. The runtime asks the ledger for the transaction id it generated: first the consensus receipt, then the mirror node. If the transfer settled, it fetches the result again with the same signed payment and payment id, and the seller returns the stored result. If the ledger's history has passed the authorization's expiry with no record, the exposure is released. If neither can be established by the deadline, the amount stays reserved and the report says so. It never pays twice and never assumes.
+**Unresolved payment.** The events request times out after the authorization was sent. The 0.0015 stays outstanding. The runtime asks the ledger for the transaction id it generated: first the consensus receipt, then the mirror node. If a record shows the transfer with the expected amounts, it fetches the result again with the same signed payment and payment id, and the seller returns the stored result. If a record shows the transaction failed, the amount is released. If no record appears, the amount stays reserved and the report says so; only a later reconciliation that finds a record, or a release policy the principal set explicitly, changes that. It never pays twice and never assumes.
 
 ## 7. What already exists, and what this adds
 
@@ -202,7 +202,9 @@ Neither is a sponsor decoration. The first mission is not possible without both.
 - **Seller receipt.** A signed statement from the seller that a payment was received for a resource.
 - **Payment id.** The client-generated identifier reused across retries, per the x402 payment-identifier extension.
 - **Quote.** The price and terms in a live 402 response to a specific request.
-- **Tariff.** A versioned pricing formula with unit definitions and an input cap that a seller commits to in advance.
+- **Tariff.** A versioned price ceiling with unit definitions and an input cap that a seller publishes in advance.
+- **Claim.** A typed statement the runtime computes from purchased facts, with its calculation and evidence references.
+- **Brief.** The bounded input to the explanation step: outcomes, claims and a few supporting events.
 - **Reservation.** Budget held for a future step, priced from a tariff at the input cap.
 - **Authorization.** A signed payment handed to a seller and not yet confirmed by the ledger.
 - **Settlement.** The ledger record that the payment executed.
