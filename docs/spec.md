@@ -1,16 +1,16 @@
 # Mandate runtime specification
 
-Version 0.2, draft. MUST, MUST NOT and SHOULD follow RFC 2119. Terms not defined here are defined in [mandate.md](mandate.md) section 13.
+Version 0.3, draft. MUST, MUST NOT and SHOULD follow RFC 2119. This document is authoritative; where another document disagrees, this one wins. Terms not defined here are defined in [mandate.md](mandate.md) section 13.
 
 ## 1. Scope
 
 The behavior of a buyer runtime executing one mandate against x402 v2 sellers using the `exact` scheme on Hedera, settled by a remote facilitator. Seller obligations the runtime relies on are in section 12. Seller internals, learning across mandates and scheduling of several mandates are out of scope.
 
-Protocol references: x402 v2 core and HTTP transport; the Hedera `exact` scheme; the extensions `bazaar`, `payment-identifier` and `offer-receipt`.
+Protocol references: x402 v2 core and HTTP transport; the Hedera `exact` scheme; the extensions `bazaar` and `payment-identifier`. The `offer-receipt` extension is deferred until the purchase and recovery path works.
 
 ## 2. Objects
 
-Amounts are decimal strings in the asset's smallest unit. Times are RFC 3339 UTC. Hashes are SHA-256 hex.
+Protocol amounts are integers in the asset's atomic unit; USDC has 6 decimals, HBAR has 8. Documents and transcripts show decimal strings. Times are RFC 3339 UTC. Hashes are SHA-256 hex.
 
 ### 2.1 Mandate
 
@@ -19,22 +19,28 @@ Amounts are decimal strings in the asset's smallest unit. Times are RFC 3339 UTC
 | id | string | Unique per run |
 | principal | account id | Funder and recipient of the report |
 | purpose | string | The task in one sentence |
-| budget.total | amount | Hard cap on all exposure |
-| budget.asset | token id | Payment asset; `0.0.0` is HBAR |
+| budget.service.total | amount | Hard cap on service exposure: settled + outstanding + held |
+| budget.service.asset | token id | Payment asset; `0.0.0` is HBAR |
+| budget.audit.total | amount | Hard cap on HBAR spent on HCS messages and token association |
 | budget.reserve_completion | bool | Hold the final step before discretionary spend |
+| coverage | enum or int | `all_material`, or `max_pools: N`, the most pools the mandate authorizes deep evidence for |
 | constraints.networks | list | CAIP-2 ids, e.g. `hedera:testnet` |
 | constraints.facilitator | url | Facilitator base URL; its `/supported` pins the fee payer |
-| constraints.sellers | enum | `allowlist`, `tariffed`, `any` |
+| constraints.manifest | path and hash | Locally approved listing manifest, pinned |
+| constraints.sellers | enum | `allowlist`, `tariffed` |
 | constraints.allowlist | list | Seller ids, when `allowlist` |
-| constraints.max_single_payment | amount | Cap per authorization |
+| constraints.max_single_payment | amount | Cap per authorization; also applied when judging plan feasibility |
 | constraints.deadline | time | No authorization after this |
 | requirements.evidence | enum | `screening`, `transaction` |
 | requirements.citations | enum | `required`, `optional` |
 | requirements.max_data_age_s | int | Max age of the newest indexed block used |
-| requirements.degrade | bool | When no plan can meet `evidence`, run the best plan that produces at least `screening` and label the report incomplete. Default false |
-| duties.receipts_topic | topic id | HCS topic for receipts; created if absent |
+| requirements.degrade | bool | When no plan can meet coverage and evidence, run the best plan that produces at least `screening` and label the report incomplete. Default false |
+| duties.receipts_topic | topic id | Configured HCS topic shared across mandates |
+| duties.anchor_before_delivery | bool | Wait for HCS acknowledgement of every receipt before delivering. Default false: deliver with `audit_pending` |
 | duties.report_refusals | bool | Include every refusal in the report |
-| inputs | object | `pools`, `window_h`, `materiality`, `min_event_usd`, `expected_material_pools` (default 1) |
+| inputs | object | `pools`, `window_h`, `materiality`, `min_event_usd`, `expected_material_pools` |
+
+`inputs.expected_material_pools` is a declared planning assumption, default 1. It affects plan choice, never feasibility.
 
 ### 2.2 Listing, one manifest entry
 
@@ -45,141 +51,160 @@ Amounts are decimal strings in the asset's smallest unit. Times are RFC 3339 UTC
 | capability | `screen`, `events`, `investigate`, `explain` |
 | produces | `screening`, `transaction`, `report` |
 | tariff.version | Changes whenever any tariff field changes |
-| tariff.base | Fixed component |
+| tariff.base | Fixed component, atomic units |
 | tariff.unit | `pool`, `pool_window`, `input_kb` |
-| tariff.unit_price | Price per unit |
-| tariff.input_cap | Maximum units the seller will price |
+| tariff.unit_price | Atomic units per unit |
+| tariff.max_units | Largest request the seller accepts; larger requests are refused, never clamped |
+| tariff.rounding | How fractional units count; `input_kb` rounds the request body up to whole KB |
 | network, asset, pay_to | Expected payment terms |
-| offer_key | Seller public key for `offer-receipt` JWS, optional |
 | discovery | The seller's `bazaar` info object, optional |
 
-Expected price for `n` units is `base + unit_price * min(n, input_cap)`. A quote is on tariff when its amount equals the expected price for the request's unit count exactly. The manifest is one JSON document; its hash goes in receipt 0.
+Price for `n` units, `n <= max_units`, is `base + unit_price * n`. A quote is on tariff when its amount equals that price exactly. The manifest is a JSON document the principal approved and pinned by hash; the hash records which document was used and does not authenticate the seller.
 
 ### 2.3 Quote
 
-From one 402 response: `listing_id, amount, asset, network, pay_to, fee_payer, max_timeout_s, resource.url, resource.method, resource.body_hash, received_at, expected_amount, on_tariff, fee_payer_ok, offer`. `offer` is the verified `offer-receipt` offer when the seller signed one, else null.
+From one 402 response: `listing_id, amount, asset, network, pay_to, fee_payer, max_timeout_s, received_at, expected_amount, on_tariff, fee_payer_ok`, plus Mandate's own request binding `method, url, body_hash`, which is local metadata and not part of x402 `ResourceInfo`. A quote is used only within `received_at + max_timeout_s`; `maxTimeoutSeconds` is the payment completion window, so this is a conservative heuristic, not a seller commitment.
 
 ### 2.4 Reservation
 
-`id, step, amount, source (tariff_at_cap | quote), state (held | consumed | released)`.
+`id, step, amount, source (tariff_at_max | quote), state (held | consumed | released)`.
 
 ### 2.5 Authorization
 
-`id, quote_id, payment_id, tx_id, amount, valid_start, valid_until, state (sent | delivered | settled | expired | unknown)`.
+`id, quote_id, payment_id, tx_id, amount, valid_start, valid_until, signed_bytes, state (prepared | sent | delivered | settled | expired | unresolved)`.
 
-`payment_id` is `pay_` plus a UUID v4, carried as `extensions["payment-identifier"].info.id` in the PaymentPayload. `tx_id` is `fee_payer@valid_start`, generated by the runtime before sending.
+`payment_id` is `pay_` plus a UUID v4, carried as `extensions["payment-identifier"].info.id` in the PaymentPayload. `tx_id` is `fee_payer@valid_start`, generated by the runtime. `signed_bytes` is the exact payload sent; a resend transmits these bytes and nothing else.
 
 ### 2.6 Receipt
 
-`seq, mandate_id, step, listing_id, seller, amount, asset, tx_id, payment_id, request_hash, response_hash, seller_receipt_hash, outcome (paid | refused | failed), reason, latency_ms, at`. Receipt 0 carries `mandate_hash`, `manifest_hash` and `spec_version` instead of a purchase.
+`seq, mandate_id, step, listing_id, seller, amount, asset, tx_id, payment_id_hash, request_hash, response_hash, outcome (paid | refused | failed | unresolved), reason, latency_ms, at`. Receipt 0 carries `mandate_hash`, `manifest_hash` and `spec_version` instead of a purchase. The payment id itself is never published.
 
 ### 2.7 Refusal reasons
 
 | Code | Meaning |
 |---|---|
-| OVER_BUDGET | amount exceeds free budget |
+| OVER_BUDGET | amount exceeds free service budget |
 | RESERVE_VIOLATION | purchase would consume the completion reserve |
-| OUTSIDE_CONSTRAINTS | network, asset, seller, fee payer, cap or deadline |
+| OUTSIDE_CONSTRAINTS | network, asset, seller, fee payer, per-payment cap, request size or deadline |
 | OFF_TARIFF | quote amount differs from expected amount |
 | EVIDENCE_INSUFFICIENT | result below `requirements.evidence` and no affordable upgrade |
-| REQUIREMENT_UNMEETABLE | no feasible plan satisfies a requirement |
+| REQUIREMENT_UNMEETABLE | no feasible plan satisfies coverage and evidence |
 | SELLER_UNREACHABLE | no 402 within timeout during quoting |
-| PAYMENT_UNRESOLVED | authorization neither settled nor expired at deadline |
+| PAYMENT_UNRESOLVED | authorization neither settled nor provably unexecuted at deadline |
 
 ## 3. Invariants
 
 The ledger is durable, in SQLite. Every state change below is one transaction.
 
-- I1. `settled + outstanding + held <= budget.total` after every change. `outstanding` sums authorizations in `sent`, `delivered` or `unknown`; `held` sums reservations in `held`.
-- I2. An authorization MUST equal its approved quote in amount, asset, network, pay_to, fee_payer and resource. `fee_payer` MUST equal the signer the facilitator advertises for the network in `/supported`.
-- I3. A tariffed listing's quote MUST be on tariff or it is refused OFF_TARIFF. Untariffed listings are eligible only when `constraints.sellers` is `any`, and only for the final step.
-- I4. When `reserve_completion` is true, a reservation for the final step priced at `tariff_at_cap` MUST be held before any authorization for a non-final step.
-- I5. An authorization leaves `outstanding` only when the mirror node returns its `tx_id`, then `settled`, or when `valid_until + 30 s` has passed and the mirror node returns nothing, then `expired`. No HTTP response changes this.
-- I6. One `payment_id` per logical request, reused on every retry. A retry MUST NOT create a second authorization while one for the same `payment_id` is `sent`, `delivered` or `unknown`.
-- I7. Receipts MUST be appended in `seq` order. The report MUST NOT be delivered before HCS acknowledges the last receipt.
-- I8. No amount, recipient or key material originates from model output.
-- I9. Nothing is authorized after `constraints.deadline`.
+- I1. `settled + outstanding + held <= budget.service.total` after every change. `outstanding` sums authorizations in `prepared`, `sent`, `delivered` or `unresolved`; `held` sums reservations in `held`.
+- I2. An authorization MUST equal its approved quote in amount, asset, network, pay_to, fee_payer and request binding. `fee_payer` MUST equal the signer the facilitator advertises for the network in `/supported`. `amount <= constraints.max_single_payment`.
+- I3. A quote MUST be on tariff or it is refused OFF_TARIFF. Only listings in the pinned manifest are quoted.
+- I4. When `reserve_completion` is true, a reservation for the final step priced at `tariff_at_max` MUST be held before any authorization for a non-final step.
+- I5. `settled` requires ledger evidence: a receipt query returning SUCCESS for `tx_id`, or a mirror node record for `tx_id` with result SUCCESS and transfers matching amount, asset and `pay_to`. `expired` requires both that `valid_until` has passed and that the mirror node's latest ingested consensus timestamp is later than `valid_until` with no record for `tx_id`. Anything else is `unresolved` and keeps its exposure. No HTTP response changes this.
+- I6. One `payment_id` per logical purchase, reused on every retry. A logical purchase whose payment settled MUST NOT acquire a second authorization because its response is missing.
+- I7. Accounting moves are atomic transfers: `held -> outstanding` when an authorization is prepared, `outstanding -> settled` on I5 evidence, `outstanding -> free` on `expired`. No amount is counted in two columns.
+- I8. Only a persisted authorization is transmitted. After a crash, every authorization in `prepared` or `sent` is resent from `signed_bytes` and reconciled; nothing is re-signed.
+- I9. Receipts are durable locally in `seq` order before publication. Publication failure never repeats a purchase. When `anchor_before_delivery` is false, the report is delivered with `audit_pending` listing unpublished sequence numbers.
+- I10. `audit_spent <= budget.audit.total`. A refusal with zero service spend may still spend audit budget.
+- I11. No amount, recipient or key material originates from model output.
+- I12. Nothing is authorized after `constraints.deadline`.
 
 ## 4. Quoting
 
 1. Filter listings by `constraints` and by the capabilities the candidate plans need. Filtered listings are never contacted.
-2. Quote only steps whose request body is fully known now. Send the real request from a client that holds no signer and never retries. Record the 402 as a Quote; compute `expected_amount`, `on_tariff` and `fee_payer_ok`; verify a signed offer when present.
+2. Quote only steps whose request body is fully known now and whose unit count is at most `max_units`. Send the real request from a client that holds no signer and never retries. Record the 402 as a Quote; compute `expected_amount`, `on_tariff` and `fee_payer_ok`.
 3. Steps whose body depends on an earlier result are estimated from the tariff and quoted once their input exists.
 4. No 402 within `quote_timeout_ms`, or any non-402 response, is SELLER_UNREACHABLE.
-5. A quote expires at the earlier of `received_at + max_timeout_s` and the offer's `validUntil`. Expired quotes are re-requested, never reused.
+5. Expired quotes are re-requested, never reused.
 
 ## 5. Planning
 
-A plan is an ordered list of steps, each bound to one capability, a quantity and, once quoted, one listing.
+Remaining work is the set of pools still needing evidence, `P`, and whether a report is still owed. Before screening, `P` is every pool. After screening, `P` is the material pools. Candidate plans over remaining work:
 
-| Plan | Steps |
-|---|---|
-| staged | screen all pools; events for up to `k` material pools; explain |
-| bundled | investigate all pools |
+| Plan | Steps | Report from |
+|---|---|---|
+| staged | screen unscreened pools; events for material pools; explain | explain |
+| hybrid | screen unscreened pools; investigate material pools | investigate |
+| bundle | investigate all pools in `P` | investigate |
 
-Two numbers per plan. `expected` is the sum of known quotes plus tariff prices at expected quantities, using `inputs.expected_material_pools` for events. `bound` is the sum of known quotes plus tariff prices at maximum quantities. A plan is feasible when `bound <= budget.total - settled - outstanding`. Quantities that are not required, such as `k`, are reduced until the plan is feasible. A plan whose product cannot satisfy `requirements.evidence` at minimum quantities is infeasible.
+Two numbers per plan. `expected` prices unknown quantities with `expected_material_pools`. `bound` prices them with the coverage maximum: `|P|` under `all_material`, else `min(|P|, max_pools)`. A plan is feasible when `bound <= budget.service.total - settled - outstanding` and no single step exceeds `max_single_payment` at its maximum quantity. Quantities are never reduced below the coverage maximum to make a plan fit.
 
-Choose the feasible plan with the lowest `expected`. Ties go to fewer authorizations. When no plan is feasible: refuse REQUIREMENT_UNMEETABLE before any purchase, reporting the cheapest plan's minimum cost and the available budget; when `requirements.degrade` is true, run instead the lowest-`expected` feasible plan producing at least `screening`, and label the report incomplete.
+Choose the feasible plan with the lowest `expected`. Ties go to fewer authorizations. When no plan is feasible: refuse REQUIREMENT_UNMEETABLE before any purchase, reporting the lowest `bound` among plans, the lowest `expected`, and the available budget; when `requirements.degrade` is true, run instead the lowest-`expected` feasible plan producing at least `screening`, and label the report incomplete.
 
-The chosen plan with both numbers, and every rejected plan with its reason, MUST appear in the transcript. Re-plan after every step with the actual result. A reservation is released when its step is quoted lower or is no longer needed.
+Re-plan after every step over the new remaining work. The chosen plan, both numbers, the assumption used, and every rejected plan with its reason MUST appear in the transcript. A reservation is released when its step is quoted lower or is no longer needed.
 
 ## 6. Purchase state machine
 
+Ordering for one purchase: hold budget durably; build and sign; persist `tx_id`, `signed_bytes` and the request binding while moving `held -> outstanding`; send; reconcile. The send happens only after the persist commits.
+
 | From | Event | To | Effect |
 |---|---|---|---|
-| quoted | I1 to I4 and I9 pass | approved | hold `amount` unless already reserved |
-| quoted | any check fails | refused | receipt with reason |
-| approved | transfer signed; request sent with `PAYMENT-SIGNATURE` | sent | `outstanding += amount`; poll mirror node for `tx_id` every 5 s |
-| sent | 2xx with body | delivered | store `response_hash`, `PAYMENT-RESPONSE`, seller receipt hash |
-| sent | timeout or 5xx | unknown | keep polling |
-| sent, delivered, unknown | mirror node shows `tx_id` | settled | `settled += amount`; `outstanding -= amount`; if no body yet, re-fetch with the same `payment_id` |
-| sent, delivered, unknown | `valid_until + 30 s` passed, no record | expired | `outstanding -= amount`; receipt `failed` if delivered, else may re-quote |
+| quoted | I1 to I4 and I12 pass | approved | reservation `held` for `amount` unless one exists |
+| approved | payload signed and persisted | prepared | reservation `consumed`; `outstanding += amount` |
+| prepared | request sent with `PAYMENT-SIGNATURE` | sent | start reconciliation: receipt query, then mirror node every 5 s |
+| sent | 2xx with body | delivered | store `response_hash` and `PAYMENT-RESPONSE`; keep reconciling |
+| sent | timeout or 5xx | sent | keep reconciling; resend `signed_bytes` with the same `payment_id` at most once per 30 s while `valid_until` has not passed |
+| prepared, sent, delivered | I5 evidence of settlement | settled | `outstanding -= amount`; `settled += amount`; if no body, fetch with the same `PAYMENT-SIGNATURE` and `payment_id` |
+| prepared, sent, delivered | I5 conditions for expiry | expired | `outstanding -= amount`; receipt `failed` if delivered, else may re-quote |
+| prepared, sent, delivered | deadline reached, neither above | unresolved | exposure kept; receipt `unresolved`; report says so |
 | settled with body | section 8 passes | accepted | |
-| settled with body | section 8 fails | rejected | receipt `failed`; upgrade only within I1 and I4 |
+| settled with body | section 8 fails | rejected | receipt `failed`; no second authorization for this purchase |
 
-## 7. Evidence sufficiency
+Recovery after a crash: load every authorization not in a terminal state and resume its row above. Settlement observed before any HTTP response is the `prepared -> settled` row.
+
+## 7. Evidence contract
+
+Every evidence response carries `deployment_id`, `block_start`, `block_end`, `block_end_timestamp`, `indexing_errors`, `window_requested`, `window_covered`, `truncated`, and per pool the facts below. A seller MUST NOT report no material change when `truncated` is true or a USD valuation needed for the verdict is null; it reports `undetermined`.
+
+Screening facts per pool: `Pool.totalValueLockedToken0`, `totalValueLockedToken1`, `totalValueLockedUSD` and `liquidity` queried at `block_start` and at `block_end` using block-height queries; mint, burn and swap counts and summed `amountUSD` within the window from event queries. Block heights are the last block at or before each window end; the covered window is their timestamps. `liquidity` is in-range liquidity, reported and unused.
+
+A pool is material when the relative change in either token TVL is at least `inputs.materiality`, or any single event has `amountUSD >= inputs.min_event_usd`. Zero material pools is a valid, complete result.
 
 | Bought | Required | Action |
 |---|---|---|
 | screening | screening | proceed to explain |
-| screening | transaction | buy events for material pools within `k`; if none affordable, EVIDENCE_INSUFFICIENT |
+| screening | transaction | buy events for material pools; if none affordable, EVIDENCE_INSUFFICIENT |
 | transaction | any | proceed to explain |
 
-A pool is material when `abs(tvl_end - tvl_start) / tvl_start >= inputs.materiality`, with `tvl` read from `PoolHourData.tvlUSD` at the window's ends, or when any mint, burn or swap in the window has `amountUSD >= inputs.min_event_usd`. Events with null `amountUSD` are reported and never counted. `Pool.liquidity` is in-range liquidity; it is reported and never used for materiality.
+Events facts per pool: every mint, burn and swap in the window with `transaction.id`, `logIndex`, `timestamp`, `amount0`, `amount1`, `amountUSD`, `origin`, and for mints and burns `owner`, `tickLower`, `tickUpper`; paginated to completion or `truncated` set.
 
 ## 8. Result validation
 
-- Every transaction hash cited in an explanation MUST be present in purchased evidence. One miss fails.
-- The newest block timestamp in evidence, from `_meta.block.timestamp`, MUST be within `requirements.max_data_age_s` of the quote's `received_at`.
+An explanation is a structured document: a list of claims, each with `type` (`tvl_change`, `large_event`, `activity_summary`), `pool`, `values` taken from facts, `calculation` as an arithmetic expression over fact values, and `evidence` as transaction hashes or fact ids, followed by prose.
+
+- Every `evidence` hash MUST be present in purchased evidence; every fact id MUST resolve.
+- Every `calculation` MUST evaluate to the claimed value from the referenced facts.
+- When `citations` is `required`, there MUST be at least one claim and every claim MUST carry at least one evidence reference.
+- Every number in the prose MUST appear among claim values or fact values.
+- `block_end_timestamp` MUST be within `requirements.max_data_age_s` of the quote's `received_at`, and `indexing_errors` MUST be false.
 - The response MUST conform to the listing's output schema.
-- A seller receipt, when present, MUST verify against `offer_key` and name this `tx_id`; otherwise it is ignored and noted.
+
+The guarantee this establishes: validated calculations and evidence references. It does not establish causation or completeness beyond the covered window.
 
 ## 9. Hedera exact binding
 
-Per the x402 Hedera `exact` scheme. The runtime builds a `TransferTransaction` with:
+Per the x402 Hedera `exact` scheme. The runtime builds a `TransferTransaction` with `transaction_id.account_id = quote.fee_payer` and `valid_start = now - 5 s`; `transaction_valid_duration = min(quote.max_timeout_s, 120)` seconds; one debit from the runtime account and one credit of `quote.amount` in `quote.asset` to `quote.pay_to`; node account ids from the mirror node `/api/v1/network/nodes`; the runtime key's signature only.
 
-- `transaction_id.account_id = quote.fee_payer`; `valid_start = now - 5 s`
-- `transaction_valid_duration = min(quote.max_timeout_s, 120)` seconds
-- one debit from the runtime account and one credit of `quote.amount` in `quote.asset` to `quote.pay_to`
-- node account ids from the mirror node `/api/v1/network/nodes`
-- the runtime key's signature only
+The serialized bytes, base64, form `payload.transaction` of a PaymentPayload whose `resource` and `accepted` copy the quote and whose `extensions` carry `payment-identifier`. The payload travels base64-encoded in `PAYMENT-SIGNATURE`. `PAYMENT-RESPONSE` is recorded and never trusted.
 
-The serialized bytes, base64, form `payload.transaction` of a PaymentPayload whose `resource` and `accepted` copy the quote and whose `extensions` carry `payment-identifier`. The payload travels base64-encoded in `PAYMENT-SIGNATURE`. `PAYMENT-RESPONSE` is recorded and never trusted; I5 governs. Settlement is read from `/api/v1/transactions/{fee_payer}-{seconds}-{nanos}` on the network's mirror node.
+Reconciliation sources: a `TransactionReceiptQuery` for `tx_id` against consensus nodes, available for about three minutes after consensus and free of charge; then `/api/v1/transactions/{fee_payer}-{seconds}-{nanos}` on the mirror node, checking `result` and `transfers` or `token_transfers`. Mirror ingestion progress is the `consensus_timestamp` of the latest transaction the mirror node returns.
 
-The runtime payment account holds exactly `budget.total` of `budget.asset` and is associated with that token when it is an HTS token. It holds HBAR only for the association and for HCS fees; no listing can be paid in HBAR under a USDC mandate, and those fees are outside `budget.total`. The facilitator pays transfer fees.
+The runtime payment account holds exactly `budget.service.total` of the service asset, is associated with that token when it is an HTS token, and holds `budget.audit.total` in HBAR for association and HCS fees. The facilitator pays transfer fees.
 
 ## 10. Receipts
 
-One HCS message per receipt: JSON, at most 1024 bytes, section 2.6 fields only. Never inputs, prompts, evidence or reports. One topic per mandate, created at start; its id appears in the transcript and the report.
+One HCS message per receipt: JSON, at most 1024 bytes, section 2.6 fields only. Never inputs, prompts, evidence, reports or payment ids. One configured topic; `mandate_id` and `seq` identify the run. Receipts are written to the local ledger first and published by a queue that retries; I9 governs delivery.
 
 ## 11. Transcript
 
-Printed in order: mandate summary; quotes table with listing, amount, expected, on_tariff, fee_payer_ok, latency, plus tariff estimates for unquoted steps; chosen plan with expected and bound, rejected plans with reasons; per step the `payment_id`, `tx_id`, state transitions with times, validation result; every refusal with code, needed and available amounts; totals settled, released, returned; HCS topic id.
+Printed in order: mandate summary with coverage and the planning assumption; quotes table with listing, amount, expected, on_tariff, fee_payer_ok, latency, plus tariff estimates for unquoted steps; chosen plan with expected and bound, rejected plans with reasons; per step the `payment_id`, `tx_id`, state transitions with times and evidence source, validation result; every refusal with code, needed bound, needed expected and available amounts; totals settled, released, unspent, audit spent; HCS topic id and any `audit_pending` sequence numbers.
 
 ## 12. Seller obligations the runtime relies on
 
-- Publish a listing with a versioned tariff and quote exactly the tariff price for the request received.
+The four reference sellers are operated by the Mandate team. Any seller that meets these obligations can be listed.
+
+- Publish a listing with a versioned tariff, refuse requests above `max_units`, and quote exactly the tariff price for the request received.
 - Include the `bazaar` discovery info in every 402.
-- Honor `payment-identifier`: the same id with the same request returns the same result without a second settlement.
-- Verify, then do the work, then settle. A failed handler MUST NOT settle.
-- SHOULD sign quotes as `offer-receipt` offers with JWS and return a signed receipt naming the transaction.
+- Honor `payment-identifier` per its specification: bind the id to payer, route, request fingerprint and payment terms; return the stored result for a matching retry without a second settlement; answer 409 when the id matches but the request differs. Result retrieval requires the original `PAYMENT-SIGNATURE`; the id alone retrieves nothing.
+- Store results durably at least until the mandate deadline. Each new purchase queries live data; only retries are served from storage.
+- Verify, then do the work, then settle. A failed handler MUST NOT settle. This limits, and does not eliminate, the loss from a seller that settles and withholds value; that loss is bounded by `max_single_payment` and ends the seller's participation for the mandate.
