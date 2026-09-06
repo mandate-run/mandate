@@ -59,6 +59,7 @@ mandate:
     reserve_completion: true        # never spend what finishing will cost
   constraints:
     networks: ["hedera:testnet"]
+    facilitator: "https://api.testnet.blocky402.com"
     sellers: "allowlist"            # or: any seller with a committed tariff
     max_single_payment: "0.0050"
     deadline: "2026-09-13T16:00:00Z"
@@ -66,6 +67,7 @@ mandate:
     evidence: "transaction"
     citations: "required"
     max_data_age_s: 3600
+    degrade: false                  # never quietly deliver less than asked
   duties:
     receipts_topic: "0.0.topic"     # every payment and result hash, in order
     report_refusals: true           # every purchase not made, with the reason
@@ -104,9 +106,9 @@ The runtime has three duties. Each maps to a behavior the demo shows.
 
 ## 6. Anatomy of a run
 
-The reference mission is a DeFi liquidity investigation. The evidence is live on The Graph. The payments settle on Hedera. Four offers are on sale, each an ordinary x402 service with a published tariff.
+The reference mission is a DeFi liquidity investigation. The evidence is live on The Graph. The payments settle on Hedera. Four services are listed, each an ordinary x402 endpoint with a published tariff.
 
-| Offer | Product | Tariff |
+| Listing | Product | Tariff |
 |---|---|---|
 | screen | 24h liquidity, TVL and volume deltas, event counts, index freshness | 0.0002 per pool |
 | events | Mints, burns and swaps above a threshold, with transaction hashes | 0.0020 per pool-window |
@@ -120,7 +122,7 @@ Mandate: five pools, budget 0.0100 USDC, transaction-level citations required.
 | Step | Action | Spent | Held | Free |
 |---|---|---|---|---|
 | 0 | Reserve the cheapest explanation that can meet the requirement | 0 | 0.0008 | 0.0092 |
-| 1 | Collect live quotes. Staged path expected 0.0038. Bundle 0.0080. Choose staged | 0 | 0.0008 | 0.0092 |
+| 1 | Quote screen and investigate live; estimate events and explain from tariffs. Staged expected 0.0038, worst case 0.0098. Bundle 0.0080. Choose staged | 0 | 0.0008 | 0.0092 |
 | 2 | Buy screen for five pools | 0.0010 | 0.0008 | 0.0082 |
 | 3 | One pool moved. Screening lacks transaction citations. Buy events for that pool only | 0.0030 | 0.0008 | 0.0062 |
 | 4 | Buy explanation. Validator confirms every claim cites a purchased transaction | 0.0038 | 0 | 0.0062 |
@@ -128,9 +130,9 @@ Mandate: five pools, budget 0.0100 USDC, transaction-level citations required.
 
 **Economic adaptation.** The bundle seller cuts its tariff to 0.0006 per pool. Five pools now cost 0.0030 bundled, below the staged expectation of 0.0038. The bundle wins. Nothing else changed.
 
-**Safe incompletion.** Budget 0.0030. Reserve 0.0008. Screen costs 0.0010, leaving 0.0012. Events cost 0.0020. The runtime refuses events for insufficient funds and refuses the explanation because no transaction-level evidence exists to cite. It delivers the screening findings labelled incomplete, both refusals with amounts, and returns 0.0020.
+**Safe incompletion.** Budget 0.0030. Before buying anything the runtime prices the cheapest plan that can meet the citation requirement: screen 0.0010, one deep dive 0.0020, explanation 0.0008, total 0.0038. It refuses with the shortfall and spends nothing. If the mandate permits degrading, it buys the screen alone, delivers the screening findings labelled incomplete, and returns 0.0020.
 
-**Integrity refusal.** A seller quotes 0.0025 for events against a committed tariff of 0.0020. The quote is under budget. It is refused anyway, with the tariff version cited.
+**Integrity refusal.** After the screen, the events seller quotes 0.0025 against a committed tariff of 0.0020. The quote is under budget. It is refused anyway, with the tariff version cited, and the bundle becomes the cheapest path to a cited answer.
 
 **Unresolved payment.** The events request times out after the payment authorization was sent. The 0.0020 stays held. The runtime queries the ledger for the transaction id it generated. If settled, it retrieves the result under the same idempotency key. If absent after the authorization's validity window, it releases the hold. It never pays twice and never assumes.
 
@@ -192,13 +194,16 @@ Neither is a sponsor decoration. The first mission is not possible without both.
 ## 13. Glossary
 
 - **Mandate.** Purpose, budget, constraints, requirements and duties issued by a principal to an agent.
-- **Offer.** A purchasable service with a capability description and a tariff.
+- **Listing.** A purchasable service with a capability, a tariff and payment terms, published in a manifest.
+- **Seller offer.** A quote the seller has signed under the x402 offer-receipt extension.
+- **Seller receipt.** A signed statement from the seller that a payment was received for a resource.
+- **Payment id.** The client-generated identifier reused across retries, per the x402 payment-identifier extension.
 - **Quote.** The price and terms in a live 402 response to a specific request.
 - **Tariff.** A versioned pricing formula with unit definitions and an input cap that a seller commits to in advance.
 - **Reservation.** Budget held for a future step, priced from a tariff at the input cap.
 - **Authorization.** A signed payment handed to a seller and not yet confirmed by the ledger.
 - **Settlement.** The ledger record that the payment executed.
-- **Receipt.** The on-chain record of one decision: counterparty, amount, transaction id, request hash, result hash, outcome.
+- **Receipt.** The buyer's on-chain record of one decision: counterparty, amount, transaction id, payment id, request hash, result hash, outcome.
 - **Refusal.** A purchase not made, with a machine-readable and human-readable reason.
 
 ## 14. Lines for reuse
