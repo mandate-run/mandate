@@ -24,7 +24,7 @@ Hedera Harness drives Cursor or Claude Code to build features into scaffold-hbar
 
 ## Independent measurement
 
-The application under test is never its own oracle. Fixture sellers write a journal Proctor reads: for every request, the route, the payment id, the hash of the signed payment, whether settlement was called, and the hash of the result served. For live passes the ledger record is the observer. A check has two parts: `expect`, assertions over the application's own output, and `observe`, measurements Proctor takes from the journal and the ledger. A check passes only when both agree.
+The application under test is never its own oracle. Fixture sellers write a journal Proctor reads: for every request, the route, the payment id, the hash of the signed payment, whether settlement was called, and the hash of the result served. For live passes the mirror node record set is the observer. At a crash point Proctor also snapshots the application ledger after the process exits: transaction id, signed payload hash and reservation. A check has two parts: `expect`, assertions over the application's own output, and `observe`, measurements Proctor takes from the journal and the ledger. A check passes only when both agree.
 
 Proctor, the verifier, the fixtures and the adapters live outside the worktree the agent edits. Their hashes, with the task's, are recorded at run start; a changed hash aborts the attempt.
 
@@ -59,7 +59,7 @@ observe = { fixture_signed_payloads = 1, fixture_settlements = 1, served_hash_eq
 name = "restart"
 run = "scripts/crash-after prepared && mandate resume --json"
 expect  = { authorizations = 1, outstanding = "0" }
-observe = { fixture_signed_payloads = 1, identical_signed_bytes = true }
+observe = { ledger_snapshot_at_crash = true, resumed_payload_hash_equals_snapshot = true, fixture_signed_payloads = 1 }
 
 [live]                        # optional; reported under its own heading
 facilitator = "https://api.testnet.blocky402.com"
@@ -83,7 +83,9 @@ Precedence when several apply: PAYMENT_UNRESOLVED, then INFRASTRUCTURE_ERROR, th
 |---|---|---|
 | Quote drift | events seller quotes above its ceiling | refused OFF_TARIFF; plan re-chosen; journal shows no signed payment for the drifted quote |
 | Lost response | seller settles, then drops the response | ledger shows one matching transfer; result fetched with the original signed payment; journal shows one signed payload and one settlement; budget columns match |
-| Restart after authorization | buyer exits at state `prepared` through a test-only crash point | on resume the journal shows the identical signed bytes; no second authorization; budget intact |
+| Restart after authorization | buyer exits at state `prepared` through a test-only crash point | Proctor snapshots the ledger row; on resume the journal's payload hash equals the snapshot; no second authorization; budget intact |
+| Restart before validation | buyer exits after the body is persisted, before validation | on resume the purchase is validated, not fetched again; no second authorization |
+| Duplicate record | facilitator stub returns a DUPLICATE_TRANSACTION record before the SUCCESS record | payment settles on the SUCCESS record; the duplicate is ignored; exposure is never released early |
 
 Fixtures are the reference sellers with fault switches, run locally. A live pass runs the same contract through Blocky402 on testnet with one real test purchase and is reported under its own heading. Fixture results are never presented as proof of settlement.
 
@@ -95,7 +97,7 @@ Fixtures are the reference sellers with fault switches, run locally. A live pass
 | agent | invoke one adapter executable with the task and the previous findings; one adapter first |
 | checks | run checks, compare `expect` to application output and `observe` to journal and ledger, classify into the four outcomes |
 | journal | persist attempts, hashes of task, verifier, fixtures and adapter, configuration, evidence, transaction ids and any unresolved exposure under `.proctor/runs/<id>/` |
-| hedera | inspect 402 requirements, execute bounded test purchases as mandates through Mandate core, reconcile settlement from records, optionally publish the report hash to HCS |
+| hedera | inspect 402 requirements, execute bounded test purchases as mandates through Mandate core, reconcile settlement from mirror record sets, optionally publish the report hash to HCS |
 
 Proctor depends on Mandate core for signing, reconciliation and the ledger. Mandate does not depend on Proctor.
 
