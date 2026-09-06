@@ -12,9 +12,9 @@ Hedera Harness drives Cursor or Claude Code to build features into scaffold-hbar
 |---|---|
 | Unit of work | An executable acceptance contract, not a product brief |
 | Project type | Anything built and started from commands; Rust and Node services first |
-| Oracle | The protocol and the ledger; no browser, no model-graded tier |
+| Oracle | The protocol and the ledger, observed independently of the application; no browser, no model-graded tier |
 | Failure testing | Fault-injecting fixtures for quote drift, lost responses and restarts, plus a separately labelled live pass |
-| Loop safety | Four outcomes; infrastructure errors stop the loop; the agent cannot alter the contract |
+| Loop safety | Four outcomes with a fixed precedence; infrastructure errors stop the loop; the agent cannot alter the contract, the verifier or the fixtures |
 | Paid checks | Run as mandates through Mandate core, with their own budget and durable ledger |
 
 ## Commands
@@ -22,9 +22,15 @@ Hedera Harness drives Cursor or Claude Code to build features into scaffold-hbar
 - `proctor check tasks/<task>.toml` runs the contract once against the current implementation. No agent. A task with only protocol checks against a URL is the smallest task.
 - `proctor run tasks/<task>.toml` runs the bounded loop: check, hand failures to the coding agent, inspect the change, recheck, stop at pass, at the attempt limit, or at the first infrastructure error. Output: a patch on branch `proctor/<run>`, a report, and transaction references.
 
+## Independent measurement
+
+The application under test is never its own oracle. Fixture sellers write a journal Proctor reads: for every request, the route, the payment id, the hash of the signed payment, whether settlement was called, and the hash of the result served. For live passes the ledger record is the observer. A check has two parts: `expect`, assertions over the application's own output, and `observe`, measurements Proctor takes from the journal and the ledger. A check passes only when both agree.
+
+Proctor, the verifier, the fixtures and the adapters live outside the worktree the agent edits. Their hashes, with the task's, are recorded at run start; a changed hash aborts the attempt.
+
 ## Task contract
 
-A task file declares hooks, checks and limits. Proctor hashes it at the start of a run; a changed hash aborts the attempt. The agent edits the worktree, never the task, the checks or Proctor. Example, illustrative until the crate exists:
+Example, illustrative until the crate exists:
 
 ```toml
 [task]
@@ -46,12 +52,14 @@ run = "cargo build --workspace && pnpm -C sellers build"
 [[check]]
 name = "recovery"
 run = "mandate run fixtures/lost-response.yaml --json"
-expect = { step = "events", authorizations = 1, state = "settled", result_recovered = true, outstanding = "0" }
+expect  = { authorizations = 1, payment_state = "settled", delivery_state = "validated", outstanding = "0" }
+observe = { fixture_signed_payloads = 1, fixture_settlements = 1, served_hash_equals_result = true }
 
 [[check]]
 name = "restart"
 run = "scripts/crash-after prepared && mandate resume --json"
-expect = { authorizations = 1, outstanding = "0" }
+expect  = { authorizations = 1, outstanding = "0" }
+observe = { fixture_signed_payloads = 1, identical_signed_bytes = true }
 
 [live]                        # optional; reported under its own heading
 facilitator = "https://api.testnet.blocky402.com"
@@ -60,20 +68,22 @@ mandate = "fixtures/live-acceptance.yaml"
 
 ## Outcomes
 
-| Outcome | Meaning | Loop |
+| Outcome | What it covers | Loop |
 |---|---|---|
-| PASS | every check met its expectation | stop, report |
-| IMPLEMENTATION_FAILURE | a check ran and its expectation was not met | findings to the agent; next attempt |
-| INFRASTRUCTURE_ERROR | a hook failed, a check crashed or returned malformed output, or the facilitator, mirror node or Graph gateway was unreachable | stop; nothing goes to the agent |
-| PAYMENT_UNRESOLVED | a live test purchase is neither settled nor provably unexecuted | stop; exposure recorded in the journal; resume later |
+| PASS | every check's `expect` and `observe` met | stop, report |
+| IMPLEMENTATION_FAILURE | compiler or build errors, failed assertions, application crashes, malformed application output, a hook that runs project code and fails | findings to the agent; next attempt |
+| INFRASTRUCTURE_ERROR | the verifier or a fixture crashed, a toolchain is missing, or the facilitator, mirror node or Graph gateway is unreachable by Proctor's own independent probe | stop; nothing goes to the agent |
+| PAYMENT_UNRESOLVED | a live test purchase is neither settled, failed nor released | stop; exposure recorded in the journal; resume later |
+
+Precedence when several apply: PAYMENT_UNRESOLVED, then INFRASTRUCTURE_ERROR, then IMPLEMENTATION_FAILURE. Timeouts, malformed verifier output and outages never become a pass.
 
 ## Initial scenarios
 
 | Scenario | Fixture | Contract, in short |
 |---|---|---|
-| Quote drift | events seller quotes above tariff | refused OFF_TARIFF; plan re-chosen; no authorization for the drifted quote |
-| Lost response | seller settles, then drops the response | settlement proven from the ledger; result fetched with the original signed payment; exactly one authorization; budget columns match |
-| Restart after authorization | buyer exits at state `prepared` through a test-only crash point | on resume the same signed bytes are sent; no second authorization; budget intact |
+| Quote drift | events seller quotes above its ceiling | refused OFF_TARIFF; plan re-chosen; journal shows no signed payment for the drifted quote |
+| Lost response | seller settles, then drops the response | ledger shows one matching transfer; result fetched with the original signed payment; journal shows one signed payload and one settlement; budget columns match |
+| Restart after authorization | buyer exits at state `prepared` through a test-only crash point | on resume the journal shows the identical signed bytes; no second authorization; budget intact |
 
 Fixtures are the reference sellers with fault switches, run locally. A live pass runs the same contract through Blocky402 on testnet with one real test purchase and is reported under its own heading. Fixture results are never presented as proof of settlement.
 
@@ -83,22 +93,22 @@ Fixtures are the reference sellers with fault switches, run locally. A live pass
 |---|---|
 | hooks | run setup, ready, check and teardown commands with timeouts; capture output |
 | agent | invoke one adapter executable with the task and the previous findings; one adapter first |
-| checks | run checks, compare to expectations, classify into the four outcomes |
-| journal | persist attempts, task hash, configuration, evidence, transaction ids and any unresolved exposure under `.proctor/runs/<id>/` |
-| hedera | inspect 402 requirements, execute bounded test purchases as mandates through Mandate core, reconcile settlement, optionally publish the report hash to HCS |
+| checks | run checks, compare `expect` to application output and `observe` to journal and ledger, classify into the four outcomes |
+| journal | persist attempts, hashes of task, verifier, fixtures and adapter, configuration, evidence, transaction ids and any unresolved exposure under `.proctor/runs/<id>/` |
+| hedera | inspect 402 requirements, execute bounded test purchases as mandates through Mandate core, reconcile settlement from records, optionally publish the report hash to HCS |
 
 Proctor depends on Mandate core for signing, reconciliation and the ledger. Mandate does not depend on Proctor.
 
 ## Boundaries
 
-- The agent cannot approve changes to its own contract. Contract and verifier version are frozen per run. A wrong test is fixed in a separate change, never inside the attempt it would turn green.
+- The agent cannot approve changes to its own contract, verifier or fixtures. All are frozen per run. A wrong test is fixed in a separate change, never inside the attempt it would turn green.
 - Infrastructure failure stops the loop. A facilitator outage never causes a rewrite of working payment code.
 - Paid checks spend from a bounded test account under a mandate: allowlist of the endpoint under test, per-payment cap, durable authorizations. Restarting an attempt does not refill the allowance.
 - Payment credentials are not in the agent's environment or the application's. A git worktree contains changes; it is not a security sandbox.
 
 ## Evidence and the video
 
-The report states which checks passed, against which endpoint and configuration, at what time, with transaction ids. An HCS message carrying the report hash makes that statement timestamped and identifiable; it does not prove a deployment still runs the tested code. The video segment is a two-attempt transcript from building Mandate: a first attempt that fails a recovery check, the agent's change, and a second attempt that passes with a live transaction reference. If development passes first time, the segment checks out the commit before the fix, lets Proctor catch it, and says so.
+`report.json` holds the tested facts: endpoint, request fingerprint, task and verifier hashes, network, checks with their `expect` and `observe` results, transaction ids, time. It is frozen before anchoring; `attestation.json` holds the HCS transaction and sequence number separately, so the report hash never changes after publication. The HCS message makes the report timestamped and identifiable; it does not prove a deployment still runs the tested code. The video segment is a two-attempt transcript from building Mandate: a first attempt that fails a recovery check, the agent's change, and a second attempt that passes with a live transaction reference. If development passes first time, the segment checks out the commit before the fix, lets Proctor catch it, and says so.
 
 ## Track mapping
 
@@ -113,4 +123,4 @@ The report states which checks passed, against which endpoint and configuration,
 
 ## Deferred
 
-Seller certification, automatic account provisioning, a plugin marketplace, more than one agent adapter, multi-agent orchestration, and an upstream PR unless something worth contributing appears.
+Seller certification, automatic account provisioning and sweeping, a plugin marketplace, more than one agent adapter, multi-agent orchestration, and an upstream PR unless something worth contributing appears.
