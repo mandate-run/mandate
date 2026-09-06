@@ -22,7 +22,7 @@ Main cut:
 | 1:40 | HashScan: one payment transaction and the HCS topic with receipts |
 | 2:05 | Scenario 3: refusal before the first cent, then 3b for contrast |
 | 2:45 | Scenario 5: the lost response, settlement found on the ledger, result recovered, no second payment |
-| 3:15 | Proctor: `proctor validate --pay` against the events seller, then the run attestation on HashScan |
+| 3:15 | Proctor: two-attempt transcript from building Mandate, a failing recovery check, the agent's change, a passing rerun with a live transaction reference |
 | 3:45 | Close: repo, three tracks, one line on what comes next |
 
 Scenarios 2 and 4 are recorded as backup clips, not in the main cut.
