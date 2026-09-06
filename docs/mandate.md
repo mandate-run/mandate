@@ -10,7 +10,7 @@ This document states the idea. It is the source the README, the pitch and the de
 
 ## Thesis
 
-Every request on the internet is getting a price. The sellers are ready. The buyers do not exist.
+Every request on the internet is getting a price. The sellers are ready. The buyer side is thin.
 
 An agent that can be trusted with money is the missing piece of the machine economy, and trust is a property of the buyer, not of the payment rail. Mandate is a runtime that lets an agent hold money under enforceable terms. It buys what a task needs, keeps enough to finish, refuses what it cannot justify, and puts a receipt for every decision on a public ledger.
 
@@ -22,7 +22,7 @@ The x402 protocol revived the HTTP 402 status code as a checkout. A server answe
 
 The consequence is larger than micropayments. When any endpoint can quote a price per call, every API, model and dataset becomes a purchasable good, and every agent action becomes a purchasing decision. The web is turning into a market in which the customers are machines.
 
-## 2. The gap: nobody built the buyer
+## 2. The gap: the buyer side is an SDK
 
 The seller side is well served. Paywall middleware, facilitators that verify and settle, directories that list what is for sale, routers that pick the cheapest model. The buyer side is an SDK that pays whenever it is asked.
 
@@ -35,7 +35,7 @@ An agent holding a wallet today is a liability:
 - It can be talked into spending by text inside a tool result.
 - When any of this happens, nobody can reconstruct what was bought, from whom, or why.
 
-Adoption reflects this. One community measurement of The Graph's pay-per-query gateway, two months after launch, counted a few hundred payments totalling a few dollars. The rail worked. The buyers never came, because no one will fund an agent that cannot be trusted with the money.
+One community measurement of The Graph's pay-per-query gateway, two months after launch, counted a few hundred payments totalling a few dollars. That is one data point, not proof, but it is consistent with the rail not being the bottleneck.
 
 ## 3. The idea: a mandate
 
@@ -54,14 +54,15 @@ mandate:
     Explain any material liquidity change in the listed pools over the
     last 24 hours, with transaction-level evidence.
   budget:
-    total: "0.0100"
-    asset: "USDC"
+    service: { total: "0.0100", asset: "USDC" }   # what sellers can be paid
+    audit: { total: "0.5", asset: "HBAR" }        # HCS receipts and association fees
     reserve_completion: true        # never spend what finishing will cost
+  coverage: "all_material"          # every material pool, or max_pools: N
   constraints:
     networks: ["hedera:testnet"]
     facilitator: "https://api.testnet.blocky402.com"
     sellers: "allowlist"            # or: any seller with a committed tariff
-    max_single_payment: "0.0050"
+    max_single_payment: "0.0090"
     deadline: "2026-09-13T16:00:00Z"
   requirements:
     evidence: "transaction"
@@ -98,7 +99,7 @@ The runtime has three duties. Each maps to a behavior the demo shows.
 1. **The model proposes. The mandate disposes.** No language model holds a key, sees a key, or sets an amount.
 2. **Quotes are facts, not metadata.** Prices come from live 402 responses to the actual request, collected by a client that cannot pay.
 3. **Reserve the finish before spending on the middle.** A sequence of individually affordable purchases can strand a task. The runtime prices the final step from a committed tariff and holds that amount first.
-4. **Every authorization is exposure until the ledger says otherwise.** A timeout after signing releases nothing. The buyer generated the transaction id, so it can ask the ledger directly.
+4. **Every authorization is exposure until the ledger says otherwise.** A timeout after signing releases nothing. The buyer generated the transaction id, so it can ask the ledger directly, and absence counts as proof only once the ledger's history has passed the authorization's expiry.
 5. **Sellers commit to tariffs. Buyers hold them to it.** A tariff is a versioned pricing formula with unit definitions and an input cap. It makes future steps reservable and out-of-tariff quotes refusable.
 6. **Refusal is a first-class outcome.** A refused purchase carries a reason a human can read: over budget, outside constraints, off tariff, evidence insufficient, requirement unmeetable.
 7. **Receipts, not logs.** Hashes, amounts, counterparties and transaction ids go on chain. Prompts, data and results do not.
@@ -106,35 +107,37 @@ The runtime has three duties. Each maps to a behavior the demo shows.
 
 ## 6. Anatomy of a run
 
-The reference mission is a DeFi liquidity investigation. The evidence is live on The Graph. The payments settle on Hedera. Four services are listed, each an ordinary x402 endpoint with a published tariff.
+The reference mission is a DeFi liquidity investigation. The evidence is live on The Graph. The payments settle on Hedera. Four services are listed, each an ordinary x402 endpoint with a published tariff. All four are reference providers operated by the Mandate team: the market is real in protocol and simulated in vendors, and the runtime is not told which is which.
 
 | Listing | Product | Tariff |
 |---|---|---|
-| screen | 24h liquidity, TVL and volume deltas, event counts, index freshness | 0.0002 per pool |
-| events | Mints, burns and swaps above a threshold, with transaction hashes | 0.0020 per pool-window |
-| investigate | screen plus events plus explanation, bundled | 0.0016 per pool |
-| explain | Evidence to a cited narrative. Two model tiers, same requirement contract | 0.0008 or 0.0020 per report, input capped |
+| screen | Token TVL and activity at the window's ends per pool, from block-height queries | 0.0002 per pool |
+| events | Mints, burns and swaps in the window with transaction hashes | 0.0015 per pool-window |
+| investigate | screen plus events plus explanation, bundled | 0.0020 plus 0.0012 per pool |
+| explain | Facts to a validated, cited narrative | 0.0001 per KB of evidence, at most 8 KB |
 
-Mandate: five pools, budget 0.0100 USDC, transaction-level citations required.
+Mandate: five pools, service budget 0.0100 USDC, coverage all material pools, per-payment cap 0.0090, transaction-level citations required, planning assumption one material pool.
+
+The tariffs make the choice depend on what screening finds. With one to three material pools the staged path is cheapest. At four, the bundle for the material subset wins. At five, the full bundle wins outright.
 
 **Normal completion**
 
-| Step | Action | Spent | Held | Free |
+| Step | Action | Settled | Held | Free |
 |---|---|---|---|---|
-| 0 | Reserve the cheapest explanation that can meet the requirement | 0 | 0.0008 | 0.0092 |
-| 1 | Quote screen and investigate live; estimate events and explain from tariffs. Staged expected 0.0038, worst case 0.0098. Bundle 0.0080. Choose staged | 0 | 0.0008 | 0.0092 |
+| 0 | Reserve the explanation at its maximum price | 0 | 0.0008 | 0.0092 |
+| 1 | Quote screen and investigate live; estimate events and explain. Staged expected 0.0033, bound 0.0093. Hybrid expected 0.0042, bound 0.0090. Bundle 0.0080. All feasible. Choose staged | 0 | 0.0008 | 0.0092 |
 | 2 | Buy screen for five pools | 0.0010 | 0.0008 | 0.0082 |
-| 3 | One pool moved. Screening lacks transaction citations. Buy events for that pool only | 0.0030 | 0.0008 | 0.0062 |
-| 4 | Buy explanation. Validator confirms every claim cites a purchased transaction | 0.0038 | 0 | 0.0062 |
-| 5 | Write receipts to HCS. Deliver report and 0.0062 unspent | 0.0038 | 0 | 0.0062 |
+| 3 | One pool material. Re-plan: events plus explain 0.0023 against a one-pool bundle 0.0032. Buy events for that pool | 0.0025 | 0.0008 | 0.0067 |
+| 4 | Evidence is 5 KB; explain quotes 0.0005. Consume the reserve, release 0.0003. Buy. Validator confirms every calculation and citation | 0.0030 | 0 | 0.0070 |
+| 5 | Receipts published. Deliver the report; 0.0070 unspent | 0.0030 | 0 | 0.0070 |
 
-**Economic adaptation.** The bundle seller cuts its tariff to 0.0006 per pool. Five pools now cost 0.0030 bundled, below the staged expectation of 0.0038. The bundle wins. Nothing else changed.
+**Economic adaptation.** The bundle seller drops its base charge and prices 0.0006 per pool. Five pools now cost 0.0030, below the staged expectation of 0.0033. The bundle is chosen before any screening. Nothing else changed.
 
-**Safe incompletion.** Budget 0.0030. Before buying anything the runtime prices the cheapest plan that can meet the citation requirement: screen 0.0010, one deep dive 0.0020, explanation 0.0008, total 0.0038. It refuses with the shortfall and spends nothing. If the mandate permits degrading, it buys the screen alone, delivers the screening findings labelled incomplete, and returns 0.0020.
+**Safe incompletion.** Service budget 0.0030. Before buying anything the runtime prices every plan at full coverage: the cheapest bound is the full bundle at 0.0080, the cheapest expectation is staged at 0.0033. Neither fits. It refuses with both numbers and spends nothing. If the mandate permits degrading, it buys the screen alone for 0.0010, delivers the screening facts labelled incomplete, and leaves 0.0020 unspent.
 
-**Integrity refusal.** After the screen, the events seller quotes 0.0025 against a committed tariff of 0.0020. The quote is under budget. It is refused anyway, with the tariff version cited, and the bundle becomes the cheapest path to a cited answer.
+**Integrity refusal.** After the screen, the events seller quotes 0.0020 against a committed tariff of 0.0015. The quote is under budget. It is refused anyway, with the tariff version cited, and the one-pool bundle at 0.0032 becomes the cheapest path to a cited answer.
 
-**Unresolved payment.** The events request times out after the payment authorization was sent. The 0.0020 stays held. The runtime queries the ledger for the transaction id it generated. If settled, it retrieves the result under the same idempotency key. If absent after the authorization's validity window, it releases the hold. It never pays twice and never assumes.
+**Unresolved payment.** The events request times out after the authorization was sent. The 0.0015 stays outstanding. The runtime asks the ledger for the transaction id it generated: first the consensus receipt, then the mirror node. If the transfer settled, it fetches the result again with the same signed payment and payment id, and the seller returns the stored result. If the ledger's history has passed the authorization's expiry with no record, the exposure is released. If neither can be established by the deadline, the amount stays reserved and the report says so. It never pays twice and never assumes.
 
 ## 7. What already exists, and what this adds
 
@@ -147,7 +150,7 @@ Mandate: five pools, budget 0.0100 USDC, transaction-level citations required.
 | Tally, Hedera x402 bounty 2026 | Hard ceiling, bill audit against a signed price, seller cut-off | The same discipline applied across a task with several sellers and steps |
 | 402Pilot, arXiv 2026 | Learns provider value with bandits in replay | Live settlement, exposure accounting and refusal semantics for that learning to sit on |
 
-The honest claim is narrow: the agent buys the evidence its task needs, keeps enough to finish, and explains every purchase it refused. Nobody has shown that end to end with real settlement.
+The honest claim is narrow: the agent buys the evidence its task needs, keeps enough to finish, and explains every purchase it refused. AgentRouter and Tally each do parts of this with real settlement. We have not found one runtime that does all of it, and the claim is about the combination, not the parts.
 
 ## 8. Why Hedera and The Graph first
 
@@ -203,7 +206,9 @@ Neither is a sponsor decoration. The first mission is not possible without both.
 - **Reservation.** Budget held for a future step, priced from a tariff at the input cap.
 - **Authorization.** A signed payment handed to a seller and not yet confirmed by the ledger.
 - **Settlement.** The ledger record that the payment executed.
-- **Receipt.** The buyer's on-chain record of one decision: counterparty, amount, transaction id, payment id, request hash, result hash, outcome.
+- **Receipt.** The buyer's on-chain record of one decision: counterparty, amount, transaction id, payment id hash, request hash, result hash, outcome.
+- **Coverage.** How many material pools the mandate requires deep evidence for: all of them, or a stated maximum.
+- **Audit budget.** HBAR set aside for receipts and token association, bounded separately from what sellers can be paid.
 - **Refusal.** A purchase not made, with a machine-readable and human-readable reason.
 
 ## 14. Lines for reuse
