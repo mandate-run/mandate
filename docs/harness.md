@@ -1,63 +1,116 @@
 # Proctor
 
-Working name. A harness that builds and certifies x402 services on Hedera, inspired by Hedera Harness and submitted to its Open Source track. It is part of Mandate: it turns the seller obligations in [spec.md](spec.md) section 12 into executable checks, and its run attestations on HCS are a trust signal the buyer can read at discovery.
+Working name. Proctor builds Hedera services from an acceptance contract, tests their behavior under payment failure, and returns a reviewable change with payment evidence. It is a standalone tool inspired by Hedera Harness and is Mandate's entry to the Hedera Open Source track. Mandate is the first project built with it.
+
+![Proctor loop](img/proctor-loop.svg)
 
 ## Why a second harness
 
-Hedera Harness drives Cursor or Claude Code to build features into scaffold-hbar projects, Next.js with Hardhat or Foundry, and validates with static checks, Playwright, a semantic grader and an on-chain tier that completes real testnet transactions verified via the mirror node. Payment services are a different target: no browser, no page to grade, and the oracle is the protocol and the ledger. Proctor covers what that tool does not:
+Hedera Harness drives Cursor or Claude Code to build features into scaffold-hbar projects, Next.js with Hardhat or Foundry, and validates with static checks, Playwright, a semantic grader and an on-chain tier that completes testnet transactions from a burner signer. The official x402 end-to-end suite tests client, server and facilitator combinations across languages, Hedera included. Neither tests what happens between payment and delivery: a quote that drifts from the agreed price, a response lost after settlement, a process that dies after signing. Those behaviors decide whether an agent can be trusted with money. Proctor tests them and drives a coding agent to fix them.
 
-| Gap | Proctor |
+| Difference | Proctor |
 |---|---|
-| Rust and plain Node service projects | Recipe declares build and test commands; no framework assumed |
-| x402 v2 conformance | Protocol tier decodes the 402 and checks it field by field |
-| Payment services on Hedera | Chain tier makes a real paid request through Blocky402 and verifies it on the mirror node |
-| HCS and HTS in the settlement path | Checks receipt messages on a topic and token association before paying |
-| Evidence that a run happened | Attestation of commit, report hash and verdict written to HCS |
-| Agent lock-in | Any CLI agent via a command template; deterministic tiers before any model is involved |
+| Unit of work | An executable acceptance contract, not a product brief |
+| Project type | Anything built and started from commands; Rust and Node services first |
+| Oracle | The protocol and the ledger; no browser, no model-graded tier |
+| Failure testing | Fault-injecting fixtures for quote drift, lost responses and restarts, plus a separately labelled live pass |
+| Loop safety | Four outcomes; infrastructure errors stop the loop; the agent cannot alter the contract |
+| Paid checks | Run as mandates through Mandate core, with their own budget and durable ledger |
 
-No browser tier and no semantic tier. Those belong to app harnesses.
+## Commands
 
-## One command, no recipe
+- `proctor check tasks/<task>.toml` runs the contract once against the current implementation. No agent. A task with only protocol checks against a URL is the smallest task.
+- `proctor run tasks/<task>.toml` runs the bounded loop: check, hand failures to the coding agent, inspect the change, recheck, stop at pass, at the attempt limit, or at the first infrastructure error. Output: a patch on branch `proctor/<run>`, a report, and transaction references.
 
-`proctor validate <url>` runs the protocol tier against any x402 endpoint. With `--pay` it also runs the chain tier from an ephemeral funded testnet payer and prints the transaction id. This is the tool a Track 1 builder runs before a buyer ever tries to pay them.
+## Task contract
 
-## Contract
+A task file declares hooks, checks and limits. Proctor hashes it at the start of a run; a changed hash aborts the attempt. The agent edits the worktree, never the task, the checks or Proctor. Example, illustrative until the crate exists:
 
-- **Recipe** `proctor.toml`: project kind, baseline commands, agent command template, PRD paths, max attempts, enabled tiers, network, mirror URL, facilitator URL, attestation topic.
-- **Validator**: any executable. It receives the run context as JSON on stdin and prints `{ "name", "pass", "evidence": [], "hint" }`. Exit code is ignored; the JSON is the verdict.
-- **Run**: `.proctor/runs/<id>/report.json` with every check, duration, transaction id and HCS sequence number. Checkpoint commits on branch `proctor/<id>` stage explicit paths only.
-- **Attestation**: one HCS message `{ run_id, commit, report_hash, verdict, at }`, at most 1024 bytes.
+```toml
+[task]
+name = "recover a paid request after a lost response"
+attempts = 3
 
-## Tiers
+[hooks]                       # commands with timeouts; output captured
+setup = "scripts/sellers up --fault drop-response-after-settle"
+ready = "scripts/sellers ready"
+teardown = "scripts/sellers down"
 
-| Tier | Checks | Pass condition |
+[agent]
+adapter = "adapters/claude-code"   # executable; task and findings arrive on stdin
+
+[[check]]
+name = "build"
+run = "cargo build --workspace && pnpm -C sellers build"
+
+[[check]]
+name = "recovery"
+run = "mandate run fixtures/lost-response.yaml --json"
+expect = { step = "events", authorizations = 1, state = "settled", result_recovered = true, outstanding = "0" }
+
+[[check]]
+name = "restart"
+run = "scripts/crash-after prepared && mandate resume --json"
+expect = { authorizations = 1, outstanding = "0" }
+
+[live]                        # optional; reported under its own heading
+facilitator = "https://api.testnet.blocky402.com"
+mandate = "fixtures/live-acceptance.yaml"
+```
+
+## Outcomes
+
+| Outcome | Meaning | Loop |
 |---|---|---|
-| T0 static | secret scan, forbidden paths, formatting | no findings |
-| T1 build | `cargo build`, `cargo test`, `pnpm build`, `pnpm test` as declared | all exit 0 |
-| T2 protocol | status is 402; `PAYMENT-REQUIRED` decodes to v2 `PaymentRequired`; an `accepts` entry is `exact` on the declared network; `extra.feePayer` equals the facilitator's `/supported` signer; amount equals the listing tariff for the probe request; `bazaar` info present and valid against its schema; `offer-receipt` offer verifies when present | every check true |
-| T3 chain | ephemeral payer funded by the operator; payer associated with the asset when HTS; paid request settles; receipt query or mirror node shows result SUCCESS with the expected amount, `payTo` and fee payer; a retry with the same `payment-identifier` and the original signed payment returns the same body and no second transfer; a retry with the id and a changed request gets 409; HCS topic shows a receipt naming the transaction; leftover funds swept back | every check true, transaction ids recorded |
+| PASS | every check met its expectation | stop, report |
+| IMPLEMENTATION_FAILURE | a check ran and its expectation was not met | findings to the agent; next attempt |
+| INFRASTRUCTURE_ERROR | a hook failed, a check crashed or returned malformed output, or the facilitator, mirror node or Graph gateway was unreachable | stop; nothing goes to the agent |
+| PAYMENT_UNRESOLVED | a live test purchase is neither settled nor provably unexecuted | stop; exposure recorded in the journal; resume later |
 
-## Loop
+## Initial scenarios
 
-`proctor run`: for each PRD, invoke the agent with the PRD and the repo; run tiers in order and stop at the first failing tier; on failure invoke the agent again with the failing checks' JSON as feedback, up to max attempts; checkpoint after each attempt; attest the final verdict. `proctor validate` runs T2 and optionally T3 with no agent.
+| Scenario | Fixture | Contract, in short |
+|---|---|---|
+| Quote drift | events seller quotes above tariff | refused OFF_TARIFF; plan re-chosen; no authorization for the drifted quote |
+| Lost response | seller settles, then drops the response | settlement proven from the ledger; result fetched with the original signed payment; exactly one authorization; budget columns match |
+| Restart after authorization | buyer exits at state `prepared` through a test-only crash point | on resume the same signed bytes are sent; no second authorization; budget intact |
 
-## Use inside Mandate
+Fixtures are the reference sellers with fault switches, run locally. A live pass runs the same contract through Blocky402 on testnet with one real test purchase and is reported under its own heading. Fixture results are never presented as proof of settlement.
 
-- Mandate's four sellers are certified by Proctor. Each listing in the manifest carries the HCS message id of its latest passing attestation.
-- The buyer's `constraints.sellers` gains a value `certified`: only listings with a valid attestation at the manifest's commit are quoted. Not in the first cut of the runtime.
-- Mandate's own increments after the first end-to-end run are built through `proctor run`. Those runs are the before and after evidence for the track.
+## Modules
+
+| Module | Responsibility |
+|---|---|
+| hooks | run setup, ready, check and teardown commands with timeouts; capture output |
+| agent | invoke one adapter executable with the task and the previous findings; one adapter first |
+| checks | run checks, compare to expectations, classify into the four outcomes |
+| journal | persist attempts, task hash, configuration, evidence, transaction ids and any unresolved exposure under `.proctor/runs/<id>/` |
+| hedera | inspect 402 requirements, execute bounded test purchases as mandates through Mandate core, reconcile settlement, optionally publish the report hash to HCS |
+
+Proctor depends on Mandate core for signing, reconciliation and the ledger. Mandate does not depend on Proctor.
+
+## Boundaries
+
+- The agent cannot approve changes to its own contract. Contract and verifier version are frozen per run. A wrong test is fixed in a separate change, never inside the attempt it would turn green.
+- Infrastructure failure stops the loop. A facilitator outage never causes a rewrite of working payment code.
+- Paid checks spend from a bounded test account under a mandate: allowlist of the endpoint under test, per-payment cap, durable authorizations. Restarting an attempt does not refill the allowance.
+- Payment credentials are not in the agent's environment or the application's. A git worktree contains changes; it is not a security sandbox.
+
+## Evidence and the video
+
+The report states which checks passed, against which endpoint and configuration, at what time, with transaction ids. An HCS message carrying the report hash makes that statement timestamped and identifiable; it does not prove a deployment still runs the tested code. The video segment is a two-attempt transcript from building Mandate: a first attempt that fails a recovery check, the agent's change, and a second attempt that passes with a live transaction reference. If development passes first time, the segment checks out the commit before the fix, lets Proctor catch it, and says so.
 
 ## Track mapping
 
 | Requirement, quoted | How |
 |---|---|
-| "Submit meaningful contribution to Hedera Harness (PR acceptable) or build new harness inspired by it" | Proctor, plus one upstream PR adding an x402 conformance shell validator to Hedera Harness |
+| "build new harness inspired by it" | Proctor, standalone, with the inspiration and differences documented above |
 | "Public GitHub repo/PR with README explaining problem solved" | This document and the crate README |
-| "Demo video (≤5 minutes) showing improvement" | A segment of the project video: `proctor validate --pay` against a seller, then a run's attestation on HashScan |
-| "Harness for uncovered language/framework" | Rust workspaces and plain Node services |
-| "New service coverage" | x402, Blocky402 settlement, HCS receipts, HTS association |
-| "Clear before/after developer experience evidence" | Manual gate-one transcript versus one `proctor validate --pay` command; Mandate increments built by `proctor run` |
+| "Demo video (≤5 minutes) showing improvement" | The two-attempt segment of the project video |
+| "Harness for uncovered language/framework" | Rust workspaces and Node services |
+| "New service coverage" | x402 payment recovery on Hedera, HCS receipts, HTS association |
+| "Clear before/after developer experience evidence" | Manual reproduction of a payment bug versus `proctor run`; Mandate's recovery increments built through it |
 
-## Non-goals
+## Deferred
 
-Browser tests, model-graded assertions, mainnet, multi-repo orchestration.
+Seller certification, automatic account provisioning, a plugin marketplace, more than one agent adapter, multi-agent orchestration, and an upstream PR unless something worth contributing appears.
