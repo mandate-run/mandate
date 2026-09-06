@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+
+members = [
+  "mandate-core",
+  "mandate-cli",
+  "stub",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.96"
+license = "MIT"
+

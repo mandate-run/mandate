@@ -4,7 +4,9 @@ Give your agent a mandate, not a credit card.
 
 Mandate buys the evidence an agent needs, tracks every payment authorization against its budget, and explains when it cannot finish. It is a buyer runtime for agents that pay per request over x402: given a purpose, a budget and hard constraints, it collects live quotes, plans the cheapest path that can cover the task, reserves the final step, pays one signed Hedera transfer per purchase, validates what it bought, and writes a receipt for every decision to Hedera Consensus Service.
 
-Built from scratch for ETHOnline 2026: Hedera AI & Agentic Payments, Hedera Open Source, The Graph AI Use Case From Scratch. Status: specification complete, no code yet, private until submission.
+Built from scratch for ETHOnline 2026: Hedera AI & Agentic Payments, Hedera Open Source, The Graph AI Use Case From Scratch.
+
+Status: specification complete; buyer runtime implemented in Rust with a fixture demo mode (simulated sellers, settlement and evidence) that replays the demo scenarios end to end. Live x402 sellers, Hedera testnet settlement, The Graph evidence and the Proctor harness are not wired up yet.
 
 ## What it does
 
@@ -44,9 +46,94 @@ All evidence is live data from the Uniswap v3 subgraph on The Graph Network, id 
 
 Proctor, in `harness/`, builds Hedera services from an executable acceptance contract, tests them under payment failure, and returns a reviewable change with payment evidence. Mandate's recovery behaviors are built and verified through it. It is Mandate's entry to the Hedera Open Source track. Design: [docs/harness.md](docs/harness.md).
 
-## Setup
+## Build, test and run
 
-Not runnable yet. Requires a Hedera testnet account associated with USDC `0.0.429274`, holding the service budget in USDC and the audit budget in HBAR; a Subgraph Studio API key; a model API key. Commands are added once the first settlement gate passes.
+Requirements: a recent stable Rust toolchain (the workspace targets 1.96). No
+external services, keys or accounts are needed for the fixture demo.
+
+### Build
+
+```bash
+cargo build --workspace          # debug
+cargo build --release --workspace
+```
+
+### Test
+
+```bash
+cargo test --workspace           # unit + fixture scenario + CLI integration tests
+cargo clippy --workspace -- -D warnings
+```
+
+The test suite pins the demo arithmetic from docs/mandate.md section 6 (plan
+costs, refusal numbers, totals), exercises the ledger invariants (I1, I2, I7,
+I8) and round-trips the CLI commands against a temp directory.
+
+### Run
+
+The whole CLI surface:
+
+```bash
+cargo run -p mandate-cli -- --help            # every command and option
+cargo run -p mandate-cli -- init --out-dir <dir>   # write mandate, manifest, empty ledger
+cargo run -p mandate-cli -- run --scenario <name>  # execute one demo scenario
+cargo run -p mandate-cli -- ledger <mandate_id>    # budget exposure + authorizations
+cargo run -p mandate-cli -- receipts <mandate_id>  # receipts in sequence
+cargo run -p mandate-cli -- reconcile <mandate_id> # re-check settlement of open authorizations
+```
+
+`run` writes the final ledger state and a `transcript.json` (pass `--json` to
+print the transcript as JSON instead of the demo-style text).
+
+## Launch the demo
+
+```bash
+# 1. create the demo mandate, pinned manifest and empty ledger
+cargo run -p mandate-cli -- init --out-dir mandate-demo
+
+# 2. scenario 1: normal completion (staged path chosen)
+cargo run -p mandate-cli -- run \
+  --mandate-path mandate-demo/mandate.json \
+  --manifest-path mandate-demo/manifest.json \
+  --ledger-path mandate-demo/ledger.json \
+  --transcript-path mandate-demo/transcript.json \
+  --scenario normal
+
+# 3. the other demo scenarios: bundle | refusal | offerriff
+cargo run -p mandate-cli -- run --mandate-path mandate-demo/mandate.json \
+  --manifest-path mandate-demo/manifest.json \
+  --ledger-path mandate-demo/ledger.json \
+  --transcript-path mandate-demo/transcript.json \
+  --scenario bundle
+```
+
+What each scenario shows:
+
+| Scenario | Output to look for |
+|---|---|
+| `normal` | `plan staged expected 0.0033 bound 0.0093 chosen`; three purchases settle; `outcomes: 1 supported, 4 non_material; claims 4`; `validation passed: coverage 5/5`; `unspent 0.0072` |
+| `bundle` | the investigate seller quotes 0.0030 live, below its 0.0080 ceiling; `plan bundle expected 0.0030 bound 0.0030 chosen`; one purchase |
+| `refusal` | with a budget nothing fits, `REFUSED REQUIREMENT_UNMEETABLE needed bound 0.0080 needed expected 0.0033 available 0.0030`; `settled 0.0000`; run it against a small-budget mandate: `cargo run -p mandate-cli -- init --out-dir mandate-demo-refusal --service-total 0.0030` |
+| `offtariff` | after screening, the events seller quotes 0.0020 against its 0.0015 ceiling; `REFUSED OFF_TARIFF`; the hybrid plan (0.0032) wins; `unspent 0.0058` |
+
+After a run, inspect what was persisted:
+
+```bash
+cargo run -p mandate-cli -- ledger dev-mandate
+cargo run -p mandate-cli -- receipts dev-mandate
+cargo run -p mandate-cli -- reconcile dev-mandate   # everything settled: 0 unresolved
+```
+
+The fixture executes the real ledger, planning, purchase state machine, brief
+and validation logic against simulated quotes, settlement records and evidence
+(matching the arithmetic in docs/mandate.md section 6). The video script in
+docs/demo.md narrates these scenarios; the fixture's brief is 3 KB, so its
+explain quote and totals are slightly smaller than that script assumed.
+
+Going live (not wired up yet) requires a Hedera testnet account associated
+with USDC `0.0.429274` holding the service budget in USDC and the audit budget
+in HBAR; a Subgraph Studio API key; a model API key; and the reference
+sellers.
 
 ## Docs
 

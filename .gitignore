@@ -1,0 +1,12 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Cargo.lock is intentionally NOT ignored: this workspace ships binaries
+# (mandate-cli, stub), and lockfiles pin their dependency graph.
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
