@@ -103,11 +103,25 @@ impl PaymentPayload {
         transaction_base64: String,
         payment_id: &str,
     ) -> Self {
+        // Echo the seller's declaration and set `info.id`, as the reference
+        // client does; a bare `{ "info": { "id" } }` when nothing was declared.
+        let mut declared = required
+            .extensions
+            .get(PAYMENT_IDENTIFIER)
+            .cloned()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({ "info": {} }));
+        let info = declared
+            .as_object_mut()
+            .expect("object")
+            .entry("info")
+            .or_insert_with(|| json!({}));
+        if !info.is_object() {
+            *info = json!({});
+        }
+        info["id"] = Value::String(payment_id.to_owned());
         let mut extensions = Map::new();
-        extensions.insert(
-            PAYMENT_IDENTIFIER.to_owned(),
-            json!({ "info": { "id": payment_id } }),
-        );
+        extensions.insert(PAYMENT_IDENTIFIER.to_owned(), declared);
         Self {
             x402_version: X402_VERSION,
             resource: required.resource.clone(),
@@ -207,11 +221,29 @@ mod tests {
         assert_eq!(back.payment_id(), Some("pay_x"));
         assert_eq!(back.resource.unwrap()["url"], "http://localhost:4021/spike");
         let json: Value = serde_json::from_slice(&STANDARD.decode(header).unwrap()).unwrap();
-        assert_eq!(
-            json["extensions"]["payment-identifier"]["info"]["id"],
-            "pay_x"
-        );
+        let ext = &json["extensions"]["payment-identifier"];
+        assert_eq!(ext["info"]["id"], "pay_x");
+        assert_eq!(ext["info"]["required"], true);
+        assert_eq!(ext["schema"]["type"], "object");
         assert!(json.get("error").is_none());
+    }
+
+    #[test]
+    fn payload_without_declaration_still_carries_id() {
+        let required = PaymentRequired {
+            x402_version: 2,
+            error: None,
+            resource: None,
+            accepts: vec![],
+            extensions: Map::new(),
+        };
+        let req: Requirement = serde_json::from_str(
+            r#"{"scheme":"exact","network":"hedera:testnet","amount":"1","payTo":"0.0.1","maxTimeoutSeconds":60,"asset":"HBAR"}"#,
+        )
+        .unwrap();
+        let payload = PaymentPayload::new(&required, &req, "AA==".to_owned(), "pay_y");
+        assert_eq!(payload.payment_id(), Some("pay_y"));
+        assert!(payload.resource.is_none());
     }
 
     #[test]
