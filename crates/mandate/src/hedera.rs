@@ -162,6 +162,20 @@ pub fn valid_start_now() -> OffsetDateTime {
 
 /// Builds, freezes and signs the transfer with the runtime key only.
 pub fn sign_transfer(signer: &Signer, t: &Transfer<'_>) -> Result<SignedTransfer, Error> {
+    let (transaction_id, raw) = sign_transfer_raw(signer, t)?;
+    Ok(SignedTransfer {
+        transaction_id,
+        bytes: canonical_transaction_list(&raw)?,
+        valid_until: t.valid_start + t.valid_duration,
+    })
+}
+
+/// The SDK's own serialization of the signed transfer, before the canonical
+/// rewrite. Exposed for the cross-SDK fixture.
+pub fn sign_transfer_raw(
+    signer: &Signer,
+    t: &Transfer<'_>,
+) -> Result<(TransactionId, Vec<u8>), Error> {
     let mut tx = TransferTransaction::new();
     match t.asset {
         Asset::Hbar => {
@@ -180,12 +194,107 @@ pub fn sign_transfer(signer: &Signer, t: &Transfer<'_>) -> Result<SignedTransfer
         .transaction_valid_duration(t.valid_duration);
     tx.freeze()?;
     tx.sign(signer.key.clone());
-    let bytes = canonical_transaction_list(&tx.to_bytes()?)?;
-    Ok(SignedTransfer {
-        transaction_id,
-        bytes,
-        valid_until: t.valid_start + t.valid_duration,
-    })
+    Ok((transaction_id, tx.to_bytes()?))
+}
+
+/// Deterministic signed transfers for `sellers/src/cross-sdk.test.ts`, which
+/// decodes and signature-verifies them with the JavaScript SDK. Regenerate
+/// with the `cross_sdk_fixture` example; `fixture_matches_committed_file`
+/// fails when the signer's output drifts from the committed file.
+pub mod fixture {
+    use std::str::FromStr;
+
+    use base64::Engine as _;
+    use serde::{Deserialize, Serialize};
+    use time::OffsetDateTime;
+
+    use super::{
+        AccountId, Asset, PrivateKey, Signer, TokenId, Transfer, sign_transfer, sign_transfer_raw,
+        valid_duration,
+    };
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Case {
+        pub name: String,
+        /// Canonical bytes, what the runtime sends.
+        pub transaction: String,
+        /// The SDK's raw serialization; the JavaScript SDK must reject it.
+        pub legacy_transaction: String,
+        pub fee_payer: String,
+        pub payer: String,
+        pub pay_to: String,
+        pub asset: String,
+        pub amount: i64,
+        pub node_account_ids: Vec<String>,
+        pub valid_start_seconds: i64,
+        pub valid_duration_seconds: i64,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Fixture {
+        pub generator: String,
+        pub public_key_der: String,
+        pub cases: Vec<Case>,
+    }
+
+    /// A throwaway key with a fixed seed. Never funded.
+    const SEED_DER: &str = "302e020100300506032b6570042204200101010101010101010101010101010101010101010101010101010101010101";
+
+    pub fn build() -> Fixture {
+        let key = PrivateKey::from_str(SEED_DER).expect("fixed key");
+        let signer = Signer::new(AccountId::new(0, 0, 5), key.clone());
+        let nodes = [
+            AccountId::new(0, 0, 3),
+            AccountId::new(0, 0, 4),
+            AccountId::new(0, 0, 5),
+        ];
+        let valid_start = OffsetDateTime::from_unix_timestamp(1_788_800_000).expect("timestamp");
+        let assets = [
+            ("hbar", Asset::Hbar),
+            ("usdc", Asset::Token(TokenId::new(0, 0, 429_274))),
+        ];
+        let cases = assets
+            .into_iter()
+            .map(|(name, asset)| {
+                let t = Transfer {
+                    fee_payer: AccountId::new(0, 0, 7_162_784),
+                    pay_to: AccountId::new(0, 0, 111),
+                    asset,
+                    amount: 1000,
+                    node_account_ids: &nodes,
+                    valid_start,
+                    valid_duration: valid_duration(120),
+                };
+                let signed = sign_transfer(&signer, &t).expect("signs");
+                let (_, raw) = sign_transfer_raw(&signer, &t).expect("signs");
+                Case {
+                    name: name.to_owned(),
+                    transaction: signed.base64(),
+                    legacy_transaction: super::STANDARD.encode(raw),
+                    fee_payer: t.fee_payer.to_string(),
+                    payer: signer.account_id.to_string(),
+                    pay_to: t.pay_to.to_string(),
+                    asset: asset.to_string(),
+                    amount: t.amount,
+                    node_account_ids: nodes.iter().map(ToString::to_string).collect(),
+                    valid_start_seconds: 1_788_800_000,
+                    valid_duration_seconds: 120,
+                }
+            })
+            .collect();
+        Fixture {
+            generator: "cargo run -q -p mandate --example cross_sdk_fixture > sellers/fixtures/rust-signed-transfers.json".to_owned(),
+            public_key_der: key.public_key().to_string_der(),
+            cases,
+        }
+    }
+
+    /// The file as the example writes it.
+    pub fn render(fixture: &Fixture) -> String {
+        let mut out = serde_json::to_string_pretty(fixture).expect("serializes");
+        out.push('\n');
+        out
+    }
 }
 
 /// Keeps only `signedTransactionBytes` in every entry of a serialized
@@ -615,6 +724,33 @@ mod tests {
         .unwrap();
         assert_eq!(raw_body.body_bytes, canonical_body.body_bytes);
         assert_eq!(raw_body.sig_map, canonical_body.sig_map);
+    }
+
+    #[test]
+    fn fixture_matches_committed_file() {
+        let committed = include_str!("../../../sellers/fixtures/rust-signed-transfers.json");
+        let rendered = fixture::render(&fixture::build());
+        assert!(
+            rendered == committed,
+            "the committed cross-SDK fixture is stale; regenerate it with the cross_sdk_fixture example"
+        );
+        let parsed: fixture::Fixture = serde_json::from_str(committed).unwrap();
+        for case in &parsed.cases {
+            let bytes = STANDARD.decode(&case.transaction).unwrap();
+            assert!(
+                is_canonical_transaction_list(&bytes).unwrap(),
+                "{}",
+                case.name
+            );
+            let seen = inspect(&bytes).unwrap();
+            assert_eq!(seen.transaction_id.account_id.to_string(), case.fee_payer);
+            let legacy = STANDARD.decode(&case.legacy_transaction).unwrap();
+            assert!(
+                !is_canonical_transaction_list(&legacy).unwrap(),
+                "{}",
+                case.name
+            );
+        }
     }
 
     #[test]
