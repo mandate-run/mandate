@@ -92,7 +92,8 @@ impl Receipt {
     }
 
     /// The HCS message: compact JSON within the bound. A `reason` is cut to
-    /// fit; when the fixed fields alone exceed the bound, that is an error.
+    /// fit and dropped entirely when even an empty one does not; only when the
+    /// fixed fields alone exceed the bound is that an error.
     pub fn message(&self) -> Result<Vec<u8>, ReceiptError> {
         let mut candidate = self.clone();
         loop {
@@ -101,16 +102,20 @@ impl Receipt {
                 return Ok(bytes);
             }
             let excess = bytes.len() - MAX_BYTES;
-            match candidate.reason.as_mut() {
+            match candidate.reason.take() {
                 Some(reason) if !reason.is_empty() => {
-                    let keep = reason.len().saturating_sub(excess + 1);
-                    let mut cut = keep;
+                    let mut cut = reason.len().saturating_sub(excess + 1);
                     while cut > 0 && !reason.is_char_boundary(cut) {
                         cut -= 1;
                     }
-                    reason.truncate(cut);
+                    if cut > 0 {
+                        let mut kept = reason;
+                        kept.truncate(cut);
+                        candidate.reason = Some(kept);
+                    }
                 }
-                _ => {
+                Some(_) => {}
+                None => {
                     return Err(ReceiptError::TooLarge {
                         seq: self.seq,
                         len: bytes.len(),
@@ -182,6 +187,22 @@ mod tests {
         assert!(bytes.len() > MAX_BYTES - 8, "{}", bytes.len());
         let back: Receipt = serde_json::from_slice(&bytes).unwrap();
         assert!(back.reason.unwrap().starts_with("é"));
+    }
+
+    #[test]
+    fn a_reason_is_dropped_when_the_fixed_fields_leave_no_room() {
+        // Fixed fields at 1020 bytes fit; the same receipt with any reason must
+        // fit too, by dropping the field rather than keeping `"reason":""`.
+        let mut r = paid(None);
+        let base = r.message().unwrap().len();
+        r.mandate_id.push_str(&"x".repeat(1020 - base));
+        assert_eq!(r.message().unwrap().len(), 1020);
+        r.reason = Some("budget".to_owned());
+        let bytes = r.message().unwrap();
+        assert_eq!(bytes.len(), 1020);
+        let back: Receipt = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back.reason, None);
+        assert!(!String::from_utf8(bytes).unwrap().contains("\"reason\""));
     }
 
     #[test]
