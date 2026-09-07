@@ -38,7 +38,7 @@ Normative detail: [docs/spec.md](docs/spec.md) sections 3, 6 and 10.
 
 ## The Graph
 
-All evidence is live data from the Uniswap v3 subgraph on The Graph Network, id `5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV`, queried through the gateway with a Subgraph Studio API key. Sellers read token-denominated TVL at the window's two block heights, count and sum mints, burns and swaps in the window, and return the events with transaction hashes as evidence. Each new investigation queries live data; retries return the original purchased result. Every response states its block range, covered window, truncation and indexing status. The runtime computes per-pool outcomes and claims from those facts, decides what to buy next, and checks the explanation against them. `Pool.liquidity` is in-range liquidity and is reported, never used for materiality.
+All evidence is live data from the Uniswap v3 subgraph on The Graph Network, id `5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV`, queried through the gateway with a Subgraph Studio API key. Sellers read token-denominated TVL at the window's two observation blocks, hourly volume and transaction counts, and the largest event above the materiality threshold, and return the events with transaction hashes as evidence. Each new investigation queries live data; retries return the original purchased result. Every response states its block range, covered window, truncation and indexing status. The runtime computes per-pool outcomes and claims from those facts, decides what to buy next, and checks the explanation against them. `Pool.liquidity` is in-range liquidity and is reported, never used for materiality.
 
 ## Harness
 
