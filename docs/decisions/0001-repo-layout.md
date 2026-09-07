@@ -2,7 +2,7 @@
 
 Date: 2026-09-07. Issue: #1. Status: accepted.
 
-**Decision.** One repository: a Cargo workspace with `crates/mandate` and `harness`, one pnpm package in `sellers/`, one env file per tree, toolchains pinned in the tree, TOML for every file the runtime and the harness read.
+**Decision.** One repository: a Cargo workspace with `crates/mandate` and `harness`, one pnpm package in `sellers/`, one env file per tree, toolchains pinned in the tree, TOML for mandate files and task contracts.
 
 **Why.** Proctor depends on Mandate core for signing and the ledger, judges get one README and one video, and a shared root env would hand the buyer key to sellers and to agent subprocesses.
 

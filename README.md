@@ -20,7 +20,7 @@ Built from scratch for ETHOnline 2026: Hedera AI & Agentic Payments, Hedera Open
 
 | Component | Role | Built with |
 |---|---|---|
-| mandate | buyer runtime and CLI | Rust, r402-hedera for signing, SQLite |
+| mandate | buyer runtime and CLI | Rust, r402-protocol types, own exact-scheme signer on the Hedera SDK, SQLite |
 | sellers | four x402-gated reference endpoints with published tariffs and durable result storage | TypeScript, `@x402/hedera`, x402 HTTP resource server with per-request pricing |
 | manifest | listings and tariffs, approved and pinned by the principal; each 402 also carries the x402 `bazaar` discovery info | JSON |
 | facilitator | verifies and settles; fee payer `0.0.7162784` on testnet | Blocky402, `api.testnet.blocky402.com` |
