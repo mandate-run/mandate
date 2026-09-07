@@ -9,12 +9,17 @@ use std::str::FromStr;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use hedera::{
-    AccountId, AnyTransaction, Hbar, PrivateKey, TokenId, TransactionId, TransferTransaction,
+    AccountId, AnyTransaction, Client, Hbar, PrivateKey, TokenId, TopicCreateTransaction, TopicId,
+    TopicMessageSubmitTransaction, TransactionId, TransferTransaction,
 };
 use serde::Deserialize;
 use time::{Duration, OffsetDateTime};
 
-pub use hedera::{AccountId as HederaAccountId, TokenId as HederaTokenId};
+pub use hedera::{
+    AccountId as HederaAccountId, TokenId as HederaTokenId, TopicId as HederaTopicId,
+};
+
+use crate::config::Network;
 
 /// Longest validity the runtime signs, section 10.
 pub const MAX_VALID_SECONDS: u64 = 120;
@@ -37,6 +42,8 @@ pub enum Error {
     NotATransfer,
     #[error("transaction bytes are not a TransactionList: {0}")]
     Proto(#[from] prost::DecodeError),
+    #[error("receipt carries no topic id")]
+    MissingTopicId,
 }
 
 impl From<hedera::Error> for Error {
@@ -75,6 +82,58 @@ impl Signer {
     /// A throwaway ed25519 key for tests and dry runs.
     pub fn ephemeral(account_id: AccountId) -> Self {
         Self::new(account_id, PrivateKey::generate_ed25519())
+    }
+
+    /// Operator-signed access to consensus nodes for the audit budget:
+    /// topics and receipts. Payments never go through here.
+    pub fn consensus(&self, network: Network) -> Consensus {
+        let client = match network {
+            Network::Testnet => Client::for_testnet(),
+            Network::Mainnet => Client::for_mainnet(),
+        };
+        client.set_operator(self.account_id, self.key.clone());
+        Consensus {
+            client,
+            public_key: self.key.public_key(),
+        }
+    }
+}
+
+/// Topic creation and message submission paid from the audit budget.
+pub struct Consensus {
+    client: Client,
+    public_key: hedera::PublicKey,
+}
+
+impl Consensus {
+    /// The operator client, for the setup example.
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+
+    /// Creates the receipts topic with the runtime key as admin and submit key.
+    pub async fn create_topic(&self, memo: &str) -> Result<TopicId, Error> {
+        let receipt = TopicCreateTransaction::new()
+            .topic_memo(memo)
+            .admin_key(self.public_key)
+            .submit_key(self.public_key)
+            .execute(&self.client)
+            .await?
+            .get_receipt(&self.client)
+            .await?;
+        receipt.topic_id.ok_or(Error::MissingTopicId)
+    }
+
+    /// Submits one message and returns its topic sequence number.
+    pub async fn submit_message(&self, topic: TopicId, message: &[u8]) -> Result<u64, Error> {
+        let receipt = TopicMessageSubmitTransaction::new()
+            .topic_id(topic)
+            .message(message.to_vec())
+            .execute(&self.client)
+            .await?
+            .get_receipt(&self.client)
+            .await?;
+        Ok(receipt.topic_sequence_number)
     }
 }
 
@@ -492,6 +551,46 @@ impl MirrorNode {
             .iter()
             .map(|n| AccountId::from_str(&n.node_account_id).map_err(Error::from))
             .collect()
+    }
+}
+
+/// One message from `/api/v1/topics/{id}/messages/{seq}`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TopicMessage {
+    /// Base64 as the mirror node returns it.
+    pub message: String,
+    pub sequence_number: u64,
+    #[serde(default)]
+    pub consensus_timestamp: String,
+    #[serde(default)]
+    pub payer_account_id: Option<String>,
+}
+
+impl TopicMessage {
+    pub fn bytes(&self) -> Result<Vec<u8>, base64::DecodeError> {
+        STANDARD.decode(&self.message)
+    }
+}
+
+impl MirrorNode {
+    /// One topic message by sequence number; None until the mirror node has it.
+    pub async fn topic_message(
+        &self,
+        topic: &str,
+        seq: u64,
+    ) -> Result<Option<TopicMessage>, Error> {
+        let url = format!("{}/api/v1/topics/{topic}/messages/{seq}", self.base_url);
+        let resp = self.client.get(&url).send().await?;
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(Error::Status {
+                status: resp.status().as_u16(),
+                url,
+            });
+        }
+        Ok(Some(resp.json::<TopicMessage>().await?))
     }
 }
 
