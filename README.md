@@ -58,3 +58,7 @@ Not runnable yet. Requires a Hedera testnet account associated with USDC `0.0.42
 | [docs/harness.md](docs/harness.md) | What Proctor is, what it checks, and its boundaries |
 | [docs/demo.md](docs/demo.md) | What the video shows, in order |
 | [docs/requirements.md](docs/requirements.md) | Sponsor requirements, status and sources |
+
+## License
+
+Apache-2.0, see [LICENSE](LICENSE).
