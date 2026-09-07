@@ -44,6 +44,36 @@ impl Network {
     }
 }
 
+/// Everything but the key: what quoting and reconciliation need. A process
+/// built on this alone cannot pay.
+#[derive(Debug, Clone)]
+pub struct PublicConfig {
+    pub network: Network,
+    pub facilitator_url: String,
+    pub mirror_node_url: String,
+    pub hcs_topic_id: Option<String>,
+}
+
+impl PublicConfig {
+    pub fn load() -> Result<Self, ConfigError> {
+        let file = env_files();
+        let get = |name: &'static str| lookup(&file, name);
+        let network = match get("HEDERA_NETWORK").as_deref() {
+            None | Some("testnet") => Network::Testnet,
+            Some("mainnet") => Network::Mainnet,
+            Some(other) => return Err(ConfigError::Network(other.to_owned())),
+        };
+        Ok(Self {
+            network,
+            facilitator_url: get("FACILITATOR_URL")
+                .unwrap_or_else(|| "https://api.testnet.blocky402.com".to_owned()),
+            mirror_node_url: get("MIRROR_NODE_URL")
+                .unwrap_or_else(|| network.default_mirror_node().to_owned()),
+            hcs_topic_id: get("HCS_TOPIC_ID"),
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub network: Network,
@@ -68,36 +98,40 @@ impl std::fmt::Debug for Config {
 
 impl Config {
     pub fn load() -> Result<Self, ConfigError> {
+        let public = PublicConfig::load()?;
         let file = env_files();
-        let get = |name: &'static str| -> Option<String> {
-            std::env::var(name)
-                .ok()
-                .filter(|v| !v.is_empty())
-                .or_else(|| file.get(name).cloned().filter(|v| !v.is_empty()))
-        };
-        let network = match get("HEDERA_NETWORK").as_deref() {
-            None | Some("testnet") => Network::Testnet,
-            Some("mainnet") => Network::Mainnet,
-            Some(other) => return Err(ConfigError::Network(other.to_owned())),
-        };
         Ok(Self {
-            network,
-            account_id: get("MANDATE_ACCOUNT_ID")
+            network: public.network,
+            account_id: lookup(&file, "MANDATE_ACCOUNT_ID")
                 .ok_or(ConfigError::Missing("MANDATE_ACCOUNT_ID"))?,
-            private_key: get("MANDATE_PRIVATE_KEY")
+            private_key: lookup(&file, "MANDATE_PRIVATE_KEY")
                 .ok_or(ConfigError::Missing("MANDATE_PRIVATE_KEY"))?,
-            facilitator_url: get("FACILITATOR_URL")
-                .unwrap_or_else(|| "https://api.testnet.blocky402.com".to_owned()),
-            mirror_node_url: get("MIRROR_NODE_URL")
-                .unwrap_or_else(|| network.default_mirror_node().to_owned()),
-            hcs_topic_id: get("HCS_TOPIC_ID"),
+            facilitator_url: public.facilitator_url,
+            mirror_node_url: public.mirror_node_url,
+            hcs_topic_id: public.hcs_topic_id,
         })
+    }
+
+    pub fn public(&self) -> PublicConfig {
+        PublicConfig {
+            network: self.network,
+            facilitator_url: self.facilitator_url.clone(),
+            mirror_node_url: self.mirror_node_url.clone(),
+            hcs_topic_id: self.hcs_topic_id.clone(),
+        }
     }
 
     /// The runtime signer. The only way the key leaves this struct.
     pub fn signer(&self) -> Result<Signer, HederaError> {
         Signer::from_strings(&self.account_id, &self.private_key)
     }
+}
+
+fn lookup(file: &HashMap<String, String>, name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| file.get(name).cloned().filter(|v| !v.is_empty()))
 }
 
 fn env_files() -> HashMap<String, String> {
