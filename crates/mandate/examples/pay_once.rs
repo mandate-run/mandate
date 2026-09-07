@@ -99,11 +99,16 @@ async fn main() -> anyhow::Result<()> {
         let saved: Saved = serde_json::from_slice(
             &std::fs::read(SAVED).with_context(|| format!("{SAVED} not found"))?,
         )?;
-        let first = send(&http, &saved).await?;
+        let body = send(&http, &saved).await?;
         let expected = expected(&saved)?;
-        report_records(&mirror, &saved.mirror_id, &expected).await?;
-        println!("resend body hash {:?}", first);
-        return Ok(());
+        let settlement = report_records(&mirror, &saved.mirror_id, &expected).await?;
+        let mut checks = Checks::default();
+        checks.require("resend answered 2xx", body.is_some());
+        checks.require(
+            "settlement is a matching SUCCESS record",
+            matches!(settlement, Settlement::Settled { .. }),
+        );
+        return checks.finish();
     }
 
     let url = url.context("usage: pay_once <url> [--sign-only] | pay_once --resend")?;
@@ -195,10 +200,12 @@ async fn main() -> anyhow::Result<()> {
 
     // 5. Reconcile from the mirror node record set.
     let expected = expected(&saved)?;
-    let mut settlement = Settlement::Absent;
+    let mut settlement = Settlement::Absent {
+        duplicates_ignored: 0,
+    };
     for _ in 0..18 {
         settlement = report_records(&mirror, &saved.mirror_id, &expected).await?;
-        if settlement != Settlement::Absent {
+        if !matches!(settlement, Settlement::Absent { .. }) {
             break;
         }
         tokio::time::sleep(StdDuration::from_secs(5)).await;
@@ -207,13 +214,47 @@ async fn main() -> anyhow::Result<()> {
 
     // 6. Resend the identical authorization.
     let second = send(&http, &saved).await?;
-    println!(
-        "resend served the same body: {}",
-        first.is_some() && first == second
-    );
     let after = report_records(&mirror, &saved.mirror_id, &expected).await?;
     println!("settlement after resend: {after:?}");
-    Ok(())
+
+    // 7. The gate passes only when every check holds.
+    let mut checks = Checks::default();
+    checks.require("first send answered 2xx", first.is_some());
+    checks.require(
+        "settlement is a matching SUCCESS record",
+        matches!(settlement, Settlement::Settled { .. }),
+    );
+    checks.require("resend answered 2xx", second.is_some());
+    checks.require(
+        "resend served the identical body",
+        first.is_some() && first == second,
+    );
+    checks.require("record set unchanged by the resend", after == settlement);
+    checks.finish()
+}
+
+/// Gate checks. Every failure is printed; any failure is a non-zero exit.
+#[derive(Default)]
+struct Checks {
+    failures: Vec<&'static str>,
+}
+
+impl Checks {
+    fn require(&mut self, name: &'static str, ok: bool) {
+        println!("check {}: {name}", if ok { "pass" } else { "FAIL" });
+        if !ok {
+            self.failures.push(name);
+        }
+    }
+
+    fn finish(self) -> anyhow::Result<()> {
+        if self.failures.is_empty() {
+            println!("pay_once: all checks passed");
+            Ok(())
+        } else {
+            bail!("pay_once: {} check(s) failed", self.failures.len())
+        }
+    }
 }
 
 fn expected(saved: &Saved) -> anyhow::Result<Expected> {
@@ -257,11 +298,10 @@ async fn send(http: &reqwest::Client, saved: &Saved) -> anyhow::Result<Option<St
         body.len(),
         String::from_utf8_lossy(&body[..shown])
     );
-    if status.as_u16() == 402 {
-        if let Some(raw) = resp_header_required(&body) {
-            println!("seller answered 402 again: {raw}");
-        }
-        bail!("payment was not accepted");
+    if status.as_u16() == 402
+        && let Some(raw) = resp_header_required(&body)
+    {
+        println!("seller answered 402 again: {raw}");
     }
     Ok(status.is_success().then_some(hash))
 }
