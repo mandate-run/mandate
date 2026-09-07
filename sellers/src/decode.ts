@@ -2,7 +2,7 @@
 // node account ids, validity and transfers. Input is a PAYMENT-SIGNATURE
 // header or a bare base64 transaction.
 //   pnpm exec tsx src/decode.ts <base64>
-import { Transaction } from "@x402/hedera";
+import { Transaction, TransferTransaction } from "@x402/hedera";
 
 const arg = process.argv[2];
 if (arg === undefined) {
@@ -16,7 +16,12 @@ try {
 } catch {
   // bare transaction bytes
 }
-const tx = Transaction.fromBytes(Buffer.from(transaction, "base64"));
+const decoded = Transaction.fromBytes(Buffer.from(transaction, "base64"));
+if (!(decoded instanceof TransferTransaction)) {
+  console.error(`not a TransferTransaction: ${decoded.constructor.name}`);
+  process.exit(1);
+}
+const tx: TransferTransaction = decoded;
 const hbar: Record<string, string> = {};
 for (const [account, amount] of tx.hbarTransfers) hbar[account.toString()] = amount.toTinybars().toString();
 const tokens: Record<string, Record<string, string>> = {};
@@ -30,7 +35,7 @@ console.log(
       payerAccount: tx.transactionId?.accountId?.toString() ?? null,
       validStart: tx.transactionId?.validStart?.toDate().toISOString() ?? null,
       validDurationSeconds: tx.transactionValidDuration,
-      nodeAccountIds: tx.nodeAccountIds.map((id) => id.toString()),
+      nodeAccountIds: (tx.nodeAccountIds ?? []).map((id) => id.toString()),
       hbarTransfers: hbar,
       tokenTransfers: tokens,
     },
