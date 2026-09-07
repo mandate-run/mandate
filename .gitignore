@@ -17,3 +17,6 @@ dist/
 
 # os and editors
 .DS_Store
+
+# agent worktrees
+.claude/worktrees/
