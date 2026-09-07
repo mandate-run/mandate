@@ -341,42 +341,72 @@ pub struct Expected {
     pub amount: i64,
 }
 
-/// I5 applied to a record set.
+pub const DUPLICATE: &str = "DUPLICATE_TRANSACTION";
+
+/// I5 applied to a record set. Only nonce-zero records count, and
+/// `DUPLICATE_TRANSACTION` records are ignored everywhere: a duplicate says
+/// another submission of the same id was accepted first, whose own record
+/// decides the outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Settlement {
-    /// A `SUCCESS` record with the expected transfers. Other records are ignored.
+    /// A `SUCCESS` record with the expected transfers.
     Settled {
         consensus_timestamp: String,
         duplicates_ignored: usize,
     },
-    /// Records exist and none succeeded.
-    Failed { results: Vec<String> },
+    /// No `SUCCESS` record and at least one non-duplicate failure record.
+    Failed {
+        results: Vec<String>,
+        duplicates_ignored: usize,
+    },
     /// A `SUCCESS` record exists but its transfers are not the expected ones.
     /// Never released automatically; reconcile by hand.
-    Anomaly { results: Vec<String> },
-    /// No record yet. Absence releases nothing.
-    Absent,
+    Anomaly {
+        results: Vec<String>,
+        duplicates_ignored: usize,
+    },
+    /// No record that decides anything yet, duplicates included. Absence releases nothing.
+    Absent { duplicates_ignored: usize },
 }
 
 /// Classifies a record set, section 10 and invariant I5.
 pub fn settlement(records: &[MirrorRecord], expected: &Expected) -> Settlement {
-    if records.is_empty() {
-        return Settlement::Absent;
-    }
-    let results = || records.iter().map(|r| r.result.clone()).collect::<Vec<_>>();
-    let successes: Vec<&MirrorRecord> = records
+    let nonce_zero: Vec<&MirrorRecord> = records.iter().filter(|r| r.nonce == 0).collect();
+    let duplicates_ignored = nonce_zero.iter().filter(|r| r.result == DUPLICATE).count();
+    let considered: Vec<&MirrorRecord> = nonce_zero
         .iter()
-        .filter(|r| r.result == "SUCCESS" && r.nonce == 0)
+        .copied()
+        .filter(|r| r.result != DUPLICATE)
+        .collect();
+    if considered.is_empty() {
+        return Settlement::Absent { duplicates_ignored };
+    }
+    let results = || {
+        considered
+            .iter()
+            .map(|r| r.result.clone())
+            .collect::<Vec<_>>()
+    };
+    let successes: Vec<&MirrorRecord> = considered
+        .iter()
+        .copied()
+        .filter(|r| r.result == "SUCCESS")
         .collect();
     if successes.is_empty() {
-        return Settlement::Failed { results: results() };
+        return Settlement::Failed {
+            results: results(),
+            duplicates_ignored,
+        };
     }
     match successes.iter().find(|r| has_transfers(r, expected)) {
         Some(r) => Settlement::Settled {
             consensus_timestamp: r.consensus_timestamp.clone(),
-            duplicates_ignored: records.len() - 1,
+            duplicates_ignored,
         },
-        None => Settlement::Anomaly { results: results() },
+        None => Settlement::Anomaly {
+            results: results(),
+            duplicates_ignored,
+        },
     }
 }
 
@@ -525,15 +555,49 @@ mod tests {
     }
 
     #[test]
-    fn settlement_absent_failed_and_anomaly() {
-        assert_eq!(settlement(&[], &expected()), Settlement::Absent);
-
+    fn duplicates_alone_decide_nothing() {
+        assert_eq!(
+            settlement(&[], &expected()),
+            Settlement::Absent {
+                duplicates_ignored: 0
+            }
+        );
         let set: MirrorRecords = serde_json::from_str(MIRROR).unwrap();
         let only_duplicate = vec![set.transactions[1].clone()];
         assert_eq!(
             settlement(&only_duplicate, &expected()),
+            Settlement::Absent {
+                duplicates_ignored: 1
+            }
+        );
+    }
+
+    #[test]
+    fn failed_needs_a_non_duplicate_failure_record() {
+        let set: MirrorRecords = serde_json::from_str(MIRROR).unwrap();
+        let mut failed = set.transactions[1].clone();
+        failed.result = "INSUFFICIENT_TOKEN_BALANCE".to_owned();
+        let records = vec![failed, set.transactions[1].clone()];
+        assert_eq!(
+            settlement(&records, &expected()),
             Settlement::Failed {
-                results: vec!["DUPLICATE_TRANSACTION".to_owned()]
+                results: vec!["INSUFFICIENT_TOKEN_BALANCE".to_owned()],
+                duplicates_ignored: 1
+            }
+        );
+    }
+
+    #[test]
+    fn child_records_and_wrong_transfers() {
+        let set: MirrorRecords = serde_json::from_str(MIRROR).unwrap();
+        let mut child = set.transactions[0].clone();
+        child.nonce = 1;
+        child.token_transfers.clear();
+        let with_child = vec![child, set.transactions[1].clone()];
+        assert_eq!(
+            settlement(&with_child, &expected()),
+            Settlement::Absent {
+                duplicates_ignored: 1
             }
         );
 
@@ -541,9 +605,12 @@ mod tests {
             amount: 999,
             ..expected()
         };
-        assert!(matches!(
+        assert_eq!(
             settlement(&set.transactions, &wrong_amount),
-            Settlement::Anomaly { .. }
-        ));
+            Settlement::Anomaly {
+                results: vec!["SUCCESS".to_owned()],
+                duplicates_ignored: 1
+            }
+        );
     }
 }
