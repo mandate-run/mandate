@@ -11,11 +11,11 @@
 //! and `HEDERA_NETWORK` from the process environment, else from
 //! `crates/mandate/.env` or `./.env`. The key is read once and never printed.
 
-use std::collections::HashMap;
 use std::time::Duration as StdDuration;
 
 use anyhow::{Context as _, bail, ensure};
-use mandate::hedera::{self, Asset, Expected, MirrorNode, Settlement, Signer, Transfer};
+use mandate::config::Config;
+use mandate::hedera::{self, Asset, Expected, MirrorNode, Settlement, Transfer};
 use mandate::x402::{self, PaymentPayload, PaymentRequired, PaymentResponse};
 use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
@@ -39,49 +39,6 @@ struct Saved {
     created_at: String,
 }
 
-struct Config {
-    account_id: String,
-    private_key: String,
-    mirror_url: String,
-    network: String,
-}
-
-impl Config {
-    fn load() -> anyhow::Result<Self> {
-        let mut file = HashMap::new();
-        for path in ["crates/mandate/.env", ".env"] {
-            if let Ok(text) = std::fs::read_to_string(path) {
-                for line in text.lines() {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        continue;
-                    }
-                    if let Some((k, v)) = line.split_once('=') {
-                        file.entry(k.trim().to_owned())
-                            .or_insert_with(|| v.trim().to_owned());
-                    }
-                }
-            }
-        }
-        let get = |name: &str| -> Option<String> {
-            std::env::var(name)
-                .ok()
-                .filter(|v| !v.is_empty())
-                .or_else(|| file.get(name).cloned().filter(|v| !v.is_empty()))
-        };
-        Ok(Self {
-            account_id: get("MANDATE_ACCOUNT_ID").context("MANDATE_ACCOUNT_ID is not set")?,
-            private_key: get("MANDATE_PRIVATE_KEY").context("MANDATE_PRIVATE_KEY is not set")?,
-            mirror_url: get("MIRROR_NODE_URL")
-                .unwrap_or_else(|| "https://testnet.mirrornode.hedera.com".to_owned()),
-            network: match get("HEDERA_NETWORK").as_deref() {
-                Some("mainnet") => "hedera:mainnet".to_owned(),
-                _ => "hedera:testnet".to_owned(),
-            },
-        })
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -93,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     let http = reqwest::Client::builder()
         .timeout(StdDuration::from_secs(30))
         .build()?;
-    let mirror = MirrorNode::new(http.clone(), cfg.mirror_url.clone());
+    let mirror = MirrorNode::new(http.clone(), cfg.mirror_node_url.clone());
 
     if resend_only {
         let saved: Saved = serde_json::from_slice(
@@ -132,8 +89,8 @@ async fn main() -> anyhow::Result<()> {
         serde_json::to_string_pretty(&required)?
     );
     let req = required
-        .exact_on(&cfg.network)
-        .with_context(|| format!("no exact requirement on {}", cfg.network))?;
+        .exact_on(cfg.network.caip2())
+        .with_context(|| format!("no exact requirement on {}", cfg.network.caip2()))?;
     let fee_payer = req
         .fee_payer()
         .context("requirement carries no extra.feePayer")?;
@@ -141,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
     // 2. Sign with the runtime key only.
     let nodes = mirror.node_account_ids(5).await?;
     ensure!(!nodes.is_empty(), "mirror node listed no consensus nodes");
-    let signer = Signer::from_strings(&cfg.account_id, &cfg.private_key)?;
+    let signer = cfg.signer()?;
     let asset = Asset::parse(&req.asset)?;
     let amount: i64 = req.amount.parse().context("amount is not an integer")?;
     let pay_to: hedera::HederaAccountId = req.pay_to.parse()?;

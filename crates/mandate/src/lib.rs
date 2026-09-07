@@ -1,6 +1,7 @@
 //! Mandate core. Each module names the spec section it implements.
 
 pub mod analysis;
+pub mod config;
 pub mod evidence;
 pub mod hedera;
 pub mod ledger;
