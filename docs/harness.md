@@ -118,7 +118,7 @@ Proctor depends on Mandate core for signing, reconciliation and the ledger. Mand
 |---|---|
 | "build new harness inspired by it" | Proctor, standalone, with the inspiration and differences documented above |
 | "Public GitHub repo/PR with README explaining problem solved" | This document and the crate README |
-| "Demo video (≤5 minutes) showing improvement" | The two-attempt segment of the project video |
+| "Demo video (≤5 minutes) showing improvement" | The Proctor before-and-after segment of the project video |
 | "Harness for uncovered language/framework" | Rust workspaces and Node services |
 | "New service coverage" | x402 payment recovery on Hedera, HCS receipts, HTS association |
 | "Clear before/after developer experience evidence" | Manual reproduction of a payment bug versus `proctor run`; Mandate's recovery increments built through it |

@@ -50,7 +50,7 @@ Extra points pursued: "Harness for uncovered language/framework", "New service c
 
 ## One video
 
-ETHGlobal requires one 2 to 4 minute video per project and rejects others at upload; the sponsor limits above are looser and do not apply. One project may apply to up to 3 partner prizes, and all tracks of one partner count as one, so Mandate applies to Hedera, both tracks, and The Graph. The video must serve all three. Must show on screen: a 402 response, a payment settling with a Hedera transaction id, a live subgraph query, the decision to buy more evidence, a refusal with its reason, a lost response recovered without a second payment, the HCS receipts, and one Proctor two-attempt run.
+ETHGlobal requires one 2 to 4 minute video per project and rejects others at upload; the sponsor limits above are looser and do not apply. One project may apply to up to 3 partner prizes, and all tracks of one partner count as one, so Mandate applies to Hedera, both tracks, and The Graph. The video must serve all three. Must show on screen: a 402 response, a payment settling with a Hedera transaction id, a live subgraph query, the decision to buy more evidence, a live quote changing the chosen plan, a refusal with its reason, a lost response recovered without a second payment, the HCS receipts, and one Proctor before and after: a failing check, the fix, a passing rerun, as two `proctor run` attempts or two `proctor check` runs.
 
 ## Sources
 
