@@ -31,17 +31,19 @@ Protocol amounts are integers in the asset's atomic unit; USDC has 6 decimals, H
 | constraints.allowlist | list | Seller ids, when `allowlist` |
 | constraints.max_single_payment | amount | Cap per authorization; also applied when judging plan feasibility |
 | constraints.deadline | time | No authorization after this |
-| constraints.eth_rpc | url | Public Ethereum JSON-RPC, used only for provenance spot-checks |
+| constraints.eth_rpc | url | Public Ethereum JSON-RPC, used only for provenance spot-checks; required when `provenance_samples` is positive |
 | requirements.evidence | enum | `screening`, `transaction` |
 | requirements.citations | enum | `required`, `optional` |
 | requirements.max_data_age_s | int | Max age of the newest indexed block used |
-| requirements.provenance_samples | int | Cited transaction hashes checked against `eth_rpc` per report, at most the number cited. Default 3 |
+| requirements.provenance_samples | int | Cited transaction hashes checked against `eth_rpc` per report, at most the number cited. Default 3; 0 disables sampling and the report says `not_run` |
 | requirements.brief_events | int | Most supporting events per pool in the explanation brief. Default 5 |
 | requirements.degrade | bool | When no plan can meet coverage and evidence, run the best plan that produces at least `screening` and label the report incomplete. Default false |
 | duties.receipts_topic | topic id | Configured HCS topic shared across mandates |
 | duties.anchor_before_delivery | bool | Wait for HCS acknowledgement of every receipt before delivering. Default false: deliver with `audit_pending` |
 | duties.report_refusals | bool | Include every refusal in the report |
 | inputs | object | `pools`, `window_h`, `materiality`, `min_event_usd`, `expected_material_pools` |
+
+A mandate that violates a field rule above is rejected at load with the field named; nothing is quoted or spent.
 
 `inputs.expected_material_pools` is a declared planning assumption, default 1. It affects plan choice, never feasibility.
 
@@ -224,7 +226,7 @@ For a bundled `investigate` report, the runtime recomputes outcomes and claims f
 - Claims: every `evidence` reference resolves to purchased evidence; every `calculation` re-evaluates to its value; `claim.pool` is in `R`; the evidence kind matches the table in section 8.
 - Citations: when `citations` is `required`, every claim carries at least one evidence reference of its permitted kind, and every supported pool has at least one claim. A supported pool whose transaction-level evidence contains at least one event MUST have at least one claim citing a transaction hash.
 - Prose: every number in the prose appears among claim values or fact values.
-- Provenance: from the transaction hashes cited by claims and listed in the brief, `min(provenance_samples, hashes)` are chosen deterministically and checked with `eth_getTransactionReceipt` against `eth_rpc`; each MUST exist with status 1 and list the pool address among its log addresses. When no transaction hash is cited, provenance is `not_applicable`; a report of non-material pools cites block-height facts and passes on those. When `provenance_samples` is 0 or no `eth_rpc` is configured, provenance is `not_run` and the report says so. This verifies existence and pool involvement, not amounts.
+- Provenance: from the transaction hashes cited by claims and listed in the brief, `min(provenance_samples, hashes)` are chosen deterministically and checked with `eth_getTransactionReceipt` against `eth_rpc`; each MUST exist with status 1 and list the pool address among its log addresses. When no transaction hash is cited, provenance is `not_applicable`, whatever the setting; a report of non-material pools cites block-height facts and passes on those. When hashes are cited and `provenance_samples` is 0, provenance is `not_run` and the report says so. A positive `provenance_samples` with no `constraints.eth_rpc` fails mandate validation before any purchase; a missing RPC never downgrades a requested check. This verifies existence and pool involvement, not amounts.
 - Freshness: `block_end_timestamp` within `requirements.max_data_age_s` of the quote's `received_at`; `indexing_errors` false.
 - Schema: the response conforms to the listing's output schema.
 
@@ -246,7 +248,7 @@ One HCS message per receipt: JSON, at most 1024 bytes, section 2.6 fields only. 
 
 ## 12. Transcript
 
-Printed in order: mandate summary with coverage, the planning assumption and the mandatory brief bound; quotes table with listing, amount, ceiling, within_tariff, listing_match, fee_payer_ok, latency, plus ceiling estimates for unquoted steps; chosen plan with expected and bound, rejected plans with reasons; per step the `payment_id`, `tx_id`, submissions, retrievals, payment and delivery transitions with times, record counts including duplicates ignored; per-pool outcomes and claim counts; validation result including provenance samples or `not_applicable`; every refusal with code, needed bound, needed expected and available amounts; totals settled, released, unspent, unresolved, audit spent; HCS topic id and any `audit_pending` sequence numbers; a reconcile notice when anything is unresolved.
+Printed in order: mandate summary with coverage, the planning assumption and the mandatory brief bound; quotes table with listing, amount, ceiling, within_tariff, listing_match, fee_payer_ok, latency, plus ceiling estimates for unquoted steps; chosen plan with expected and bound, rejected plans with reasons; per step the `payment_id`, `tx_id`, submissions, retrievals, payment and delivery transitions with times, record counts including duplicates ignored; per-pool outcomes and claim counts; validation result including provenance samples, `not_applicable` or `not_run`; every refusal with code, needed bound, needed expected and available amounts; totals settled, released, unspent, unresolved, audit spent; HCS topic id and any `audit_pending` sequence numbers; a reconcile notice when anything is unresolved.
 
 ## 13. Seller obligations the runtime relies on
 
