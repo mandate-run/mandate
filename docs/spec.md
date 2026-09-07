@@ -179,9 +179,9 @@ Rules:
 
 Every evidence response carries `deployment_id`, `block_start`, `block_end`, `block_end_timestamp`, `indexed_block`, `indexed_block_timestamp`, `indexing_errors`, `window_requested`, `window_covered`, `coverage_shortfall`, `truncated`, and per pool the facts below. A seller MUST NOT report no material change when `truncated` or `coverage_shortfall` is true or a USD valuation needed for the verdict is null; it reports `undetermined`. A GraphQL error or a null USD field yields `undetermined`, never a zero.
 
-Observation blocks: `block_start` and `block_end` are the last blocks at or before each window end in which subgraph state changed, read from the `transactions` entity; facts are stated at those blocks and the covered window is their timestamps. A window end more than 900 s after its observation block is a `coverage_shortfall`. Events are selected by timestamp range and are exact regardless. Every paginated query is pinned to one head block, `indexed_block`.
+Observation blocks: `block_start` and `block_end` are the last blocks at or before each window end in which subgraph state changed, read from the `transactions` entity at the indexed head; facts are stated at those blocks. An observation block may be older than the boundary it stands for; the state is the same, since nothing in the subgraph changed in between. `coverage_shortfall` is true when `indexed_block_timestamp` is before the window end, and `window_covered.to` is then the indexed head; otherwise `window_covered` equals `window_requested`. Events are selected by timestamp range and are exact regardless. Every query of one response is pinned to `indexed_block` and read from `deployment_id`; a different deployment mid-response is an error.
 
-Screening facts per pool: `Pool.totalValueLockedToken0`, `totalValueLockedToken1`, `totalValueLockedUSD` and `liquidity` at `block_start` and at `block_end`, with each token's USD price at those blocks; hourly `tvlUSD`, `volumeUSD` and `txCount` from `poolHourDatas` over the window; and per event type the largest mint, burn or swap with `amountUSD >= inputs.min_event_usd`, or none. The screen costs one request per pool whatever the activity. `liquidity` is in-range liquidity, reported and unused.
+Screen windows are hour-aligned; an unaligned request is rejected before payment, and hourly rows then lie inside the window. Screening facts per pool: `Pool.totalValueLockedToken0`, `totalValueLockedToken1`, `totalValueLockedUSD` and `liquidity` at `block_start` and at `block_end`, with each token's USD price at those blocks; hourly `tvlUSD`, `volumeUSD` and `txCount` from `poolHourDatas` over the window; per event type the largest mint, burn or swap with `amountUSD >= inputs.min_event_usd`, or none; and whether any mint or burn in the window has a null `amountUSD`, which leaves that check incomplete. A pool absent at `block_start` is `undetermined` until events are held; absence is not a zero. The screen costs one request per pool whatever the activity. `liquidity` is in-range liquidity, reported and unused.
 
 A pool is material when the relative change in either token TVL is at least `inputs.materiality`, or any single event has `amountUSD >= inputs.min_event_usd`. When a token's starting TVL is zero, its relative change is undefined; that token counts as material when its ending TVL is nonzero and the USD value of the change is at least `min_event_usd`. Zero material pools is a valid, complete result.
 
@@ -191,7 +191,7 @@ A pool is material when the relative change in either token TVL is at least `inp
 | screening | transaction | buy events for pools in `W`; if none affordable, EVIDENCE_INSUFFICIENT |
 | transaction | any | proceed to explain |
 
-Events facts per pool: every mint, burn and swap in the window with `transaction.id`, `logIndex`, `timestamp`, `amount0`, `amount1`, `amountUSD`, `origin`, and for mints and burns `owner`, `tickLower`, `tickUpper`; per type the count and the summed `amountUSD`, with the number of null `amountUSD` values; paginated by id at the head block to completion or `truncated` set at the listing's cap.
+Events facts per pool: every mint, burn and swap in the window with `transaction.id`, `logIndex`, `timestamp`, `amount0`, `amount1`, `amountUSD`, `origin`, and for mints and burns `owner`, `tickLower`, `tickUpper`, where `logIndex` and a burn's `owner` may be null in the subgraph and a citation then rests on the transaction hash; per type the count and the summed `amountUSD`, with the number of null `amountUSD` values; paginated by id at the head block to completion or `truncated` set at the listing's cap.
 
 ## 8. Analysis
 
@@ -204,7 +204,7 @@ Per-pool outcome:
 | non_material | facts complete and below both thresholds |
 | pending | material by complete screening facts; `requirements.evidence` is `transaction` and no transaction-level evidence is held yet |
 | supported | material and the held evidence meets `requirements.evidence` |
-| undetermined | `truncated` or `coverage_shortfall` is true, a needed valuation is null, or facts are missing |
+| undetermined | `truncated` or `coverage_shortfall` is true, a needed valuation is null, an event in the window has no valuation, or facts are missing |
 
 Under `requirements.evidence` `screening`, a material pool with complete screening facts is `supported` immediately.
 
