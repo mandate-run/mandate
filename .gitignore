@@ -21,3 +21,6 @@ dist/
 
 # agent worktrees
 .claude/worktrees/
+
+# spike outputs
+pay_once.json
