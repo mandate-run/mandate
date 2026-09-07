@@ -47,31 +47,35 @@ Mandate, the runtime, enforces that instrument at the moment of spending. The ag
 
 ### The mandate object
 
-```yaml
-mandate:
-  principal: "0.0.123456"           # who funds it and who is owed the report
-  purpose: >
-    Explain any material liquidity change in the listed pools over the
-    last 24 hours, with transaction-level evidence.
-  budget:
-    service: { total: "0.0100", asset: "USDC" }   # what sellers can be paid
-    audit: { total: "0.5", asset: "HBAR" }        # HCS receipts and association fees
-    reserve_completion: true        # never spend what finishing will cost
-  coverage: "all_material"          # every material pool; capped coverage comes later
-  constraints:
-    networks: ["hedera:testnet"]
-    facilitator: "https://api.testnet.blocky402.com"
-    sellers: "allowlist"            # or: any seller with a committed tariff
-    max_single_payment: "0.0090"
-    deadline: "2026-09-13T16:00:00Z"
-  requirements:
-    evidence: "transaction"
-    citations: "required"
-    max_data_age_s: 3600
-    degrade: false                  # never quietly deliver less than asked
-  duties:
-    receipts_topic: "0.0.topic"     # every payment and result hash, in order
-    report_refusals: true           # every purchase not made, with the reason
+```toml
+[mandate]
+principal = "0.0.123456"            # who funds it and who is owed the report
+purpose = """
+Explain any material liquidity change in the listed pools over the
+last 24 hours, with transaction-level evidence."""
+coverage = "all_material"           # every material pool; capped coverage comes later
+
+[mandate.budget]
+service = { total = "0.0100", asset = "USDC" }   # what sellers can be paid
+audit = { total = "0.5", asset = "HBAR" }        # HCS receipts and association fees
+reserve_completion = true           # never spend what finishing will cost
+
+[mandate.constraints]
+networks = ["hedera:testnet"]
+facilitator = "https://api.testnet.blocky402.com"
+sellers = "allowlist"               # or: any seller with a committed tariff
+max_single_payment = "0.0090"
+deadline = 2026-09-13T16:00:00Z
+
+[mandate.requirements]
+evidence = "transaction"
+citations = "required"
+max_data_age_s = 3600
+degrade = false                     # never quietly deliver less than asked
+
+[mandate.duties]
+receipts_topic = "0.0.topic"        # every payment and result hash, in order
+report_refusals = true              # every purchase not made, with the reason
 ```
 
 ### What the principal can rely on

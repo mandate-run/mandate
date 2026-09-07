@@ -51,7 +51,7 @@ run = "cargo build --workspace && pnpm -C sellers build"
 
 [[check]]
 name = "recovery"
-run = "mandate run fixtures/lost-response.yaml --json"
+run = "mandate run fixtures/lost-response.toml --json"
 expect  = { authorizations = 1, submissions = 3, retrievals = 1, payment_state = "settled", delivery_state = "validated", outstanding = "0" }
 observe = { fixture_signed_payloads = 4, fixture_distinct_payloads = 1, fixture_settlements = 1, served_hash_equals_result = true }
 
@@ -63,7 +63,7 @@ observe = { ledger_snapshot_at_crash = true, resumed_payload_hash_equals_snapsho
 
 [live]                        # optional; reported under its own heading
 facilitator = "https://api.testnet.blocky402.com"
-mandate = "fixtures/live-acceptance.yaml"
+mandate = "fixtures/live-acceptance.toml"
 ```
 
 ## Outcomes
@@ -106,7 +106,7 @@ Proctor depends on Mandate core for signing, reconciliation and the ledger. Mand
 - The agent cannot approve changes to its own contract, verifier or fixtures. All are frozen per run. A wrong test is fixed in a separate change, never inside the attempt it would turn green.
 - Infrastructure failure stops the loop. A facilitator outage never causes a rewrite of working payment code.
 - Paid checks spend from a bounded test account under a mandate: allowlist of the endpoint under test, per-payment cap, durable authorizations. Restarting an attempt does not refill the allowance.
-- Payment credentials are not in the agent's environment or the application's. A git worktree contains changes; it is not a security sandbox.
+- Proctor starts every child, the agent adapter and the application under test, with an explicit allowlisted environment: `PATH`, `HOME`, `TERM` and the variables the task names. Payment credentials reach only the process the task names as the buyer, from that process's own env file, never the agent. A git worktree contains changes; it is not a security sandbox.
 
 ## Evidence and the video
 

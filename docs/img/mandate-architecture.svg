@@ -6,7 +6,7 @@
 <text x="30" y="50" font-size="12" text-anchor="start" font-weight="normal" fill="#57534E">Numbers follow the payment flow in the README.</text>
 <rect x="30" y="150" width="160" height="96" rx="6" fill="#F5F5F4" stroke="#78716C" stroke-width="1.5"/>
 <text x="110.0" y="168" font-size="13" text-anchor="middle" font-weight="600" fill="#1C1917">Principal</text>
-<text x="110.0" y="186" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">mandate.yaml</text>
+<text x="110.0" y="186" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">mandate.toml</text>
 <text x="110.0" y="202" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">purpose, service budget,</text>
 <text x="110.0" y="218" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">audit budget, coverage,</text>
 <text x="110.0" y="234" font-size="12" text-anchor="middle" font-weight="normal" fill="#57534E">constraints</text>
