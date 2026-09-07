@@ -1455,6 +1455,8 @@ dependencies = [
  "base64 0.23.1",
  "clap",
  "hedera",
+ "hedera-proto",
+ "prost 0.13.5",
  "reqwest",
  "rusqlite",
  "serde",
