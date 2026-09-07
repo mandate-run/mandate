@@ -86,7 +86,7 @@ From one 402 response: `listing_id, amount, asset, network, pay_to, fee_payer, m
 
 ### 2.6 Receipt
 
-`seq, mandate_id, step, listing_id, seller, amount, asset, tx_id, payment_id_hash, request_hash, response_hash, outcome (paid | refused | failed | unresolved), reason, latency_ms, at`. Receipt 0 carries `mandate_hash`, `manifest_hash` and `spec_version` instead of a purchase. The payment id itself is never published.
+`seq, mandate_id, step, listing_id, seller, amount, asset, tx_id, payment_id_hash, request_hash, response_hash, outcome (start | paid | refused | failed | unresolved), reason, latency_ms, at`. Receipt 0 has outcome `start` and carries `mandate_hash`, `manifest_hash` and `spec_version` instead of a purchase. The payment id itself is never published.
 
 ### 2.7 Refusal reasons
 
