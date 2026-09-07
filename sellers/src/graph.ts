@@ -2,13 +2,17 @@
 //
 // Facts are stated at observation blocks: the last block at or before each
 // window end in which subgraph state changed, read from the `transactions`
-// entity. The screen makes one request per pool plus three shared requests,
-// whatever the pool's activity. Data conditions yield `undetermined`, never
-// a zero. Numeric amounts stay strings; comparisons are exact decimals.
+// entity at the indexed head captured first. Every query of one product is
+// pinned to that head and checked against its deployment. Coverage is a
+// property of the head, not of observation-block age: the state at a boundary
+// equals the state at its observation block whenever the head is past the
+// boundary. Screen windows are hour-aligned so hourly rows lie inside them.
+// The screen makes one request per pool plus three shared requests, whatever
+// the pool's activity. Missing or null data yields `undetermined`, never a
+// zero. Numeric amounts stay strings; comparisons are exact decimals.
 
 export const DEFAULT_GATEWAY_URL = "https://gateway.thegraph.com/api/subgraphs/id";
-/** A window end older than this against its observation block is a coverage shortfall. */
-export const COVERAGE_TOLERANCE_S = 900;
+export const HOUR = 3600;
 export const PAGE_SIZE = 1000;
 
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
@@ -20,7 +24,7 @@ export interface GraphClientConfig {
   gatewayUrl?: string;
 }
 
-export type GraphErrorKind = "http" | "graphql" | "null";
+export type GraphErrorKind = "http" | "graphql" | "null" | "window" | "deployment";
 
 export class GraphError extends Error {
   readonly kind: GraphErrorKind;
@@ -118,6 +122,13 @@ export interface Window {
   to: number;
 }
 
+/** Screen windows are hour-aligned, so `poolHourDatas` rows lie inside them. */
+export function assertHourAligned(window: Window): void {
+  if (!(window.to > window.from) || window.from % HOUR !== 0 || window.to % HOUR !== 0) {
+    throw new GraphError("window", `screen windows must be hour-aligned and non-empty: ${window.from} to ${window.to}`);
+  }
+}
+
 export interface Inputs {
   materiality: string;
   min_event_usd: string;
@@ -169,13 +180,21 @@ export interface MaterialityResult {
   reasons: string[];
 }
 
+/** Event types whose `amountUSD` the schema allows to be null. */
+export interface UnvaluedEvents {
+  mint: boolean;
+  burn: boolean;
+}
+
 export interface PoolFacts {
   start: PoolSnapshot | null;
   end: PoolSnapshot | null;
-  /** The pool did not exist at block_start; its starting TVL is zero by construction. */
-  pool_absent_at_start: boolean;
+  /** The pool entity is absent at block_start. Not a zero: the pool is undetermined until events are held. */
+  absent_at_start: boolean;
   hours: HourRow[];
   large_events: LargeEventHits;
+  /** An event of that type in the window has a null `amountUSD`, so the large-event check is incomplete. */
+  unvalued_events: UnvaluedEvents;
   truncated: boolean;
   coverage_shortfall: boolean;
 }
@@ -208,7 +227,8 @@ export interface ScreenResponse extends ResponseHeader {
 export interface SwapEvent {
   id: string;
   transaction: { id: string };
-  logIndex: number;
+  /** Null when the subgraph has none; a citation then rests on the transaction hash alone. */
+  logIndex: number | null;
   timestamp: number;
   amount0: string;
   amount1: string;
@@ -217,7 +237,8 @@ export interface SwapEvent {
 }
 
 export interface LiquidityEvent extends SwapEvent {
-  owner: string;
+  /** Null for burns without an owner in the subgraph. */
+  owner: string | null;
   tickLower: number;
   tickUpper: number;
 }
@@ -251,13 +272,17 @@ export function materiality(facts: PoolFacts, inputs: Inputs): MaterialityResult
   for (const kind of EVENT_KINDS) {
     if (facts.large_events[kind]) reasons.push(`large_event:${kind}`);
   }
-  const end = facts.end;
-  const startKnown = facts.start !== null || facts.pool_absent_at_start;
-  if (!end || !startKnown) {
+  for (const kind of ["mint", "burn"] as const) {
+    if (facts.unvalued_events[kind]) reasons.push(`undetermined:unvalued_event:${kind}`);
+  }
+  const { start, end } = facts;
+  if (!end) {
     reasons.push("undetermined:pool_absent");
+  } else if (!start) {
+    reasons.push("undetermined:absent_at_start");
   } else {
     for (const i of [0, 1] as const) {
-      const s = facts.start ? tvlOf(facts.start, i) : "0";
+      const s = tvlOf(start, i);
       const e = tvlOf(end, i);
       if (isZeroDec(dec(s))) {
         if (isZeroDec(dec(e))) continue;
@@ -286,11 +311,14 @@ function tvlOf(snap: PoolSnapshot, i: 0 | 1): string {
 // Documents. Timestamps and block numbers are BigInt in this schema and
 // travel as strings; block heights in `block: { number }` are Int.
 
-const OBSERVATION_BLOCK = `query ObservationBlock($ts: BigInt!) {
-  transactions(first: 1, orderBy: timestamp, orderDirection: desc, where: { timestamp_lte: $ts }) {
+const META_FIELDS = `_meta { deployment }`;
+
+const OBSERVATION_BLOCK = `query ObservationBlock($ts: BigInt!, $head: Int!) {
+  transactions(first: 1, orderBy: timestamp, orderDirection: desc, block: { number: $head }, where: { timestamp_lte: $ts }) {
     blockNumber
     timestamp
   }
+  ${META_FIELDS}
 }`;
 
 const META = `query Meta {
@@ -303,6 +331,7 @@ const META = `query Meta {
 
 const SNAPSHOT_FIELDS = `totalValueLockedToken0 totalValueLockedToken1 totalValueLockedUSD liquidity token0 { derivedETH } token1 { derivedETH }`;
 const HIT_WHERE = `where: { pool: $poolStr, timestamp_gte: $from, timestamp_lt: $to, amountUSD_gte: $minUsd }`;
+const UNVALUED_WHERE = `where: { pool: $poolStr, timestamp_gte: $from, timestamp_lt: $to, amountUSD: null }`;
 
 const SCREEN_POOL = `query ScreenPool($pool: ID!, $poolStr: String!, $startBlock: Int!, $endBlock: Int!, $head: Int!, $hourFrom: Int!, $hourTo: Int!, $from: BigInt!, $to: BigInt!, $minUsd: BigDecimal!) {
   start: pool(id: $pool, block: { number: $startBlock }) { ${SNAPSHOT_FIELDS} }
@@ -315,6 +344,9 @@ const SCREEN_POOL = `query ScreenPool($pool: ID!, $poolStr: String!, $startBlock
   swap: swaps(first: 1, orderBy: amountUSD, orderDirection: desc, block: { number: $head }, ${HIT_WHERE}) { transaction { id } amountUSD }
   mint: mints(first: 1, orderBy: amountUSD, orderDirection: desc, block: { number: $head }, ${HIT_WHERE}) { transaction { id } amountUSD }
   burn: burns(first: 1, orderBy: amountUSD, orderDirection: desc, block: { number: $head }, ${HIT_WHERE}) { transaction { id } amountUSD }
+  mintUnvalued: mints(first: 1, block: { number: $head }, ${UNVALUED_WHERE}) { id }
+  burnUnvalued: burns(first: 1, block: { number: $head }, ${UNVALUED_WHERE}) { id }
+  ${META_FIELDS}
 }`;
 
 const SWAP_FIELDS = `id transaction { id } logIndex timestamp amount0 amount1 amountUSD origin`;
@@ -323,6 +355,7 @@ const LIQUIDITY_FIELDS = `${SWAP_FIELDS} owner tickLower tickUpper`;
 function eventsDocument(entity: "swaps" | "mints" | "burns", operation: string, fields: string): string {
   return `query ${operation}($poolStr: String!, $from: BigInt!, $to: BigInt!, $lastId: ID!, $first: Int!, $block: Int!) {
   ${entity}(first: $first, orderBy: id, orderDirection: asc, block: { number: $block }, where: { pool: $poolStr, timestamp_gte: $from, timestamp_lt: $to, id_gt: $lastId }) { ${fields} }
+  ${META_FIELDS}
 }`;
 }
 
@@ -352,12 +385,14 @@ interface RawScreenPool {
   swap: EventHit[];
   mint: EventHit[];
   burn: EventHit[];
+  mintUnvalued?: { id: string }[];
+  burnUnvalued?: { id: string }[];
 }
 
 interface RawSwap {
   id: string;
   transaction: { id: string };
-  logIndex: string;
+  logIndex: string | null;
   timestamp: string;
   amount0: string;
   amount1: string;
@@ -366,7 +401,7 @@ interface RawSwap {
 }
 
 interface RawLiquidity extends RawSwap {
-  owner: string;
+  owner: string | null;
   tickLower: string;
   tickUpper: string;
 }
@@ -386,7 +421,12 @@ export class GraphClient {
     this.fetchImpl = config.fetch ?? ((input, init) => fetch(input, init));
   }
 
-  async query<T>(document: string, variables: Record<string, unknown>, operationName: string): Promise<T> {
+  /**
+   * One gateway request. When `expectDeployment` is given and the response
+   * carries `_meta`, a different deployment is an error: every query of one
+   * product must read the same indexed deployment.
+   */
+  async query<T>(document: string, variables: Record<string, unknown>, operationName: string, expectDeployment?: string): Promise<T> {
     this.requests += 1;
     const response = await this.fetchImpl(`${this.gatewayUrl}/${this.subgraphId}`, {
       method: "POST",
@@ -399,6 +439,12 @@ export class GraphClient {
       throw new GraphError("graphql", `${operationName}: ${json.errors.map((e) => e.message).join("; ")}`);
     }
     if (json.data === null || json.data === undefined) throw new GraphError("null", `${operationName}: no data`);
+    if (expectDeployment !== undefined) {
+      const seen = (json.data as { _meta?: { deployment?: string } | null })._meta?.deployment;
+      if (seen !== undefined && seen !== expectDeployment) {
+        throw new GraphError("deployment", `${operationName}: deployment ${seen} differs from ${expectDeployment}`);
+      }
+    }
     return json.data;
   }
 
@@ -412,41 +458,62 @@ export class GraphClient {
     };
   }
 
-  /** Last block at or before `ts` in which subgraph state changed; null before the first transaction. */
-  async observationBlock(ts: number): Promise<ObservationBlock | null> {
-    const data = await this.query<{ transactions: { blockNumber: string; timestamp: string }[] }>(OBSERVATION_BLOCK, { ts: String(ts) }, "ObservationBlock");
+  /**
+   * Last block at or before `ts` in which subgraph state changed, as seen at
+   * `head`; null before the first transaction.
+   */
+  async observationBlock(ts: number, head: number, deployment?: string): Promise<ObservationBlock | null> {
+    const data = await this.query<{ transactions: { blockNumber: string; timestamp: string }[] }>(
+      OBSERVATION_BLOCK,
+      { ts: String(ts), head },
+      "ObservationBlock",
+      deployment,
+    );
     const row = data.transactions[0];
     if (!row) return null;
-    return { number: Number(row.blockNumber), timestamp: Number(row.timestamp) };
+    const block = { number: Number(row.blockNumber), timestamp: Number(row.timestamp) };
+    if (block.number > head) throw new GraphError("graphql", `ObservationBlock: block ${block.number} is beyond the pinned head ${head}`);
+    return block;
   }
 
-  private async header(window: Window): Promise<{ header: ResponseHeader; head: number }> {
+  /**
+   * Shared header: the head first, then both observation blocks pinned to it.
+   * Coverage falls short when the head has not reached the window end; an
+   * observation block older than its boundary is exact, not stale, because
+   * nothing in the subgraph changed in between.
+   */
+  private async header(window: Window): Promise<{ header: ResponseHeader; head: number; deployment: string }> {
     const meta = await this.meta();
-    const start = await this.observationBlock(window.from);
-    const end = await this.observationBlock(window.to);
+    const head = meta.block.number;
+    const start = await this.observationBlock(window.from, head, meta.deployment);
+    const end = await this.observationBlock(window.to, head, meta.deployment);
     if (!start || !end) throw new GraphError("null", "no observation block at or before the window");
+    const headTs = meta.block.timestamp;
+    const shortfall = headTs === null || headTs < window.to;
     return {
-      head: meta.block.number,
+      head,
+      deployment: meta.deployment,
       header: {
         deployment_id: meta.deployment,
         block_start: start.number,
         block_end: end.number,
         block_end_timestamp: end.timestamp,
-        indexed_block: meta.block.number,
-        indexed_block_timestamp: meta.block.timestamp,
+        indexed_block: head,
+        indexed_block_timestamp: headTs,
         indexing_errors: meta.hasIndexingErrors,
         window_requested: { from: window.from, to: window.to },
-        window_covered: { from: start.timestamp, to: end.timestamp },
-        coverage_shortfall: window.to - end.timestamp > COVERAGE_TOLERANCE_S,
+        window_covered: { from: window.from, to: shortfall ? Math.min(window.to, headTs ?? end.timestamp) : window.to },
+        coverage_shortfall: shortfall,
         truncated: false,
       },
     };
   }
 
-  /** Screening product: three shared requests plus one per pool. */
+  /** Screening product: three shared requests plus one per pool. The window must be hour-aligned. */
   async screen(pools: string[], window: Window, inputs: Inputs): Promise<ScreenResponse> {
+    assertHourAligned(window);
     const before = this.requests;
-    const { header, head } = await this.header(window);
+    const { header, head, deployment } = await this.header(window);
     const out: Record<string, PoolScreen> = {};
     let anyTruncated = false;
     for (const raw of pools) {
@@ -460,13 +527,14 @@ export class GraphClient {
             startBlock: header.block_start,
             endBlock: header.block_end,
             head,
-            hourFrom: window.from - (window.from % 3600),
+            hourFrom: window.from,
             hourTo: window.to,
             from: String(window.from),
             to: String(window.to),
             minUsd: inputs.min_event_usd,
           },
           "ScreenPool",
+          deployment,
         );
         const facts = assemblePoolFacts(data, header.coverage_shortfall);
         const verdict = materiality(facts, inputs);
@@ -477,9 +545,10 @@ export class GraphClient {
         out[pool] = {
           start: null,
           end: null,
-          pool_absent_at_start: false,
+          absent_at_start: false,
           hours: [],
           large_events: { swap: null, mint: null, burn: null },
+          unvalued_events: { mint: false, burn: false },
           truncated: false,
           coverage_shortfall: header.coverage_shortfall,
           verdict: "undetermined",
@@ -494,19 +563,19 @@ export class GraphClient {
   /** Events product: every mint, burn and swap in the window, paginated at one head block. */
   async eventsProduct(pools: string[], window: Window, cap: number): Promise<EventsResponse> {
     const before = this.requests;
-    const { header, head } = await this.header(window);
+    const { header, head, deployment } = await this.header(window);
     const out: Record<string, PoolEvents> = {};
     let anyTruncated = false;
     for (const raw of pools) {
       const pool = raw.toLowerCase();
-      const events = await this.eventsForPool(pool, window, head, cap);
+      const events = await this.eventsForPool(pool, window, head, cap, deployment);
       anyTruncated ||= events.truncated;
       out[pool] = events;
     }
     return { ...header, truncated: anyTruncated, cap, pools: out, requests: this.requests - before };
   }
 
-  async eventsForPool(pool: string, window: Window, head: number, cap: number): Promise<PoolEvents> {
+  async eventsForPool(pool: string, window: Window, head: number, cap: number, deployment?: string): Promise<PoolEvents> {
     const swaps: SwapEvent[] = [];
     const mints: LiquidityEvent[] = [];
     const burns: LiquidityEvent[] = [];
@@ -529,6 +598,7 @@ export class GraphClient {
           doc.document,
           { poolStr: pool, from: String(window.from), to: String(window.to), lastId, first, block: head },
           doc.operation,
+          deployment,
         );
         const rows = data[doc.entity] ?? [];
         for (const row of rows) {
@@ -568,7 +638,7 @@ function toEvent(row: RawSwap): SwapEvent {
   return {
     id: row.id,
     transaction: { id: row.transaction.id },
-    logIndex: Number(row.logIndex),
+    logIndex: row.logIndex === null || row.logIndex === undefined ? null : Number(row.logIndex),
     timestamp: Number(row.timestamp),
     amount0: row.amount0,
     amount1: row.amount1,
@@ -578,7 +648,7 @@ function toEvent(row: RawSwap): SwapEvent {
 }
 
 function toLiquidityEvent(row: RawLiquidity, event: SwapEvent): LiquidityEvent {
-  return { ...event, owner: row.owner, tickLower: Number(row.tickLower), tickUpper: Number(row.tickUpper) };
+  return { ...event, owner: row.owner ?? null, tickLower: Number(row.tickLower), tickUpper: Number(row.tickUpper) };
 }
 
 function priceUSD(derivedETH: string | null | undefined, ethPriceUSD: string | null | undefined): string | null {
@@ -604,9 +674,10 @@ export function assemblePoolFacts(data: RawScreenPool, coverageShortfall: boolea
   return {
     start,
     end,
-    pool_absent_at_start: start === null && end !== null,
+    absent_at_start: start === null && end !== null,
     hours: data.hours.map((h) => ({ periodStartUnix: Number(h.periodStartUnix), tvlUSD: h.tvlUSD, volumeUSD: h.volumeUSD, txCount: h.txCount })),
     large_events: { swap: data.swap[0] ?? null, mint: data.mint[0] ?? null, burn: data.burn[0] ?? null },
+    unvalued_events: { mint: (data.mintUnvalued ?? []).length > 0, burn: (data.burnUnvalued ?? []).length > 0 },
     truncated: data.hours.length >= PAGE_SIZE,
     coverage_shortfall: coverageShortfall,
   };

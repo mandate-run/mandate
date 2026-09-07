@@ -8,7 +8,7 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { GraphClient } from "./graph.js";
+import { GraphClient, HOUR } from "./graph.js";
 
 const EVENTS_CAP = 5000;
 
@@ -33,7 +33,11 @@ async function main(argv: string[]): Promise<number> {
     console.error("GRAPH_API_KEY and GRAPH_SUBGRAPH_ID must be set, see sellers/.env.example");
     return 2;
   }
-  const window = { from: parseWhen(fromArg), to: parseWhen(toArg) };
+  const requested = { from: parseWhen(fromArg), to: parseWhen(toArg) };
+  const window = { from: requested.from - (requested.from % HOUR), to: requested.to - (requested.to % HOUR) };
+  if (window.from !== requested.from || window.to !== requested.to) {
+    console.error(`window aligned down to whole hours: ${window.from} to ${window.to}`);
+  }
   const client = new GraphClient({ subgraphId, apiKey });
 
   const t0 = performance.now();

@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import {
-  COVERAGE_TOLERANCE_S,
   GraphClient,
   type FetchLike,
   type PoolFacts,
+  assertHourAligned,
   cmpDec,
   dec,
   decToString,
@@ -19,6 +19,7 @@ interface Call {
   vars: Record<string, unknown>;
   auth: string | undefined;
   url: string;
+  query: string;
 }
 
 type Handler = (vars: Record<string, unknown>) => unknown;
@@ -26,9 +27,9 @@ type Handler = (vars: Record<string, unknown>) => unknown;
 function fakeFetch(handlers: Record<string, Handler>): FetchLike & { calls: Call[] } {
   const calls: Call[] = [];
   const impl: FetchLike = async (url, init) => {
-    const body = JSON.parse(String(init.body)) as { operationName: string; variables: Record<string, unknown> };
+    const body = JSON.parse(String(init.body)) as { operationName: string; variables: Record<string, unknown>; query: string };
     const headers = init.headers as Record<string, string>;
-    calls.push({ op: body.operationName, vars: body.variables, auth: headers["authorization"], url });
+    calls.push({ op: body.operationName, vars: body.variables, auth: headers["authorization"], url, query: body.query });
     const handler = handlers[body.operationName];
     if (!handler) return json({ errors: [{ message: `no handler for ${body.operationName}` }] });
     const out = handler(body.variables);
@@ -44,8 +45,10 @@ function json(payload: unknown, status = 200): Response {
 
 const POOL = "0x88E6A0C2DDD26FEEB64F039A2C41296FCB3F5640";
 const POOL_LC = POOL.toLowerCase();
-const WINDOW = { from: 1_700_000_000, to: 1_700_086_400 };
+const WINDOW = { from: 1_700_000_000 - (1_700_000_000 % 3600), to: 1_700_000_000 - (1_700_000_000 % 3600) + 86_400 };
 const HEAD = 18_007_100;
+const HEAD_TS = WINDOW.to + 120;
+const DEPLOYMENT = "QmDeployment";
 
 function snapshot(tvl0: string, tvl1: string, over: Partial<Record<string, unknown>> = {}) {
   return {
@@ -59,28 +62,36 @@ function snapshot(tvl0: string, tvl1: string, over: Partial<Record<string, unkno
   };
 }
 
+function screenRows(over: Record<string, unknown> = {}) {
+  return {
+    start: snapshot("1000", "500"),
+    end: snapshot("1060", "500"),
+    bundleStart: { ethPriceUSD: "2000" },
+    bundleEnd: { ethPriceUSD: "2000" },
+    hours: [
+      { periodStartUnix: WINDOW.from, tvlUSD: "1000000", volumeUSD: "50000", txCount: "12" },
+      { periodStartUnix: WINDOW.from + 3600, tvlUSD: "1001000", volumeUSD: "60000", txCount: "15" },
+    ],
+    swap: [],
+    mint: [],
+    burn: [],
+    mintUnvalued: [],
+    burnUnvalued: [],
+    _meta: { deployment: DEPLOYMENT },
+    ...over,
+  };
+}
+
 function shared(overrides: Record<string, Handler> = {}): Record<string, Handler> {
   return {
-    Meta: () => ({ _meta: { block: { number: HEAD, timestamp: WINDOW.to + 120 }, hasIndexingErrors: false, deployment: "QmDeployment" } }),
+    Meta: () => ({ _meta: { block: { number: HEAD, timestamp: HEAD_TS }, hasIndexingErrors: false, deployment: DEPLOYMENT } }),
     ObservationBlock: (vars) => {
       const ts = Number(vars["ts"]);
       return ts === WINDOW.from
-        ? { transactions: [{ blockNumber: "18000000", timestamp: String(WINDOW.from - 7) }] }
-        : { transactions: [{ blockNumber: "18007000", timestamp: String(WINDOW.to - 11) }] };
+        ? { transactions: [{ blockNumber: "18000000", timestamp: String(WINDOW.from - 7) }], _meta: { deployment: DEPLOYMENT } }
+        : { transactions: [{ blockNumber: "18007000", timestamp: String(WINDOW.to - 11) }], _meta: { deployment: DEPLOYMENT } };
     },
-    ScreenPool: () => ({
-      start: snapshot("1000", "500"),
-      end: snapshot("1060", "500"),
-      bundleStart: { ethPriceUSD: "2000" },
-      bundleEnd: { ethPriceUSD: "2000" },
-      hours: [
-        { periodStartUnix: WINDOW.from, tvlUSD: "1000000", volumeUSD: "50000", txCount: "12" },
-        { periodStartUnix: WINDOW.from + 3600, tvlUSD: "1001000", volumeUSD: "60000", txCount: "15" },
-      ],
-      swap: [],
-      mint: [],
-      burn: [],
-    }),
+    ScreenPool: () => screenRows(),
     ...overrides,
   };
 }
@@ -110,13 +121,23 @@ describe("decimals", () => {
   });
 });
 
+describe("window alignment", () => {
+  test("accepts whole hours and rejects anything else", () => {
+    assertHourAligned(WINDOW);
+    assert.throws(() => assertHourAligned({ from: WINDOW.from + 1, to: WINDOW.to }), /hour-aligned/);
+    assert.throws(() => assertHourAligned({ from: WINDOW.from, to: WINDOW.to + 1800 }), /hour-aligned/);
+    assert.throws(() => assertHourAligned({ from: WINDOW.to, to: WINDOW.from }), /hour-aligned/);
+  });
+});
+
 describe("materiality", () => {
   const base: PoolFacts = {
     start: { totalValueLockedToken0: "1000", totalValueLockedToken1: "500", totalValueLockedUSD: "1", liquidity: "1", token0PriceUSD: "1", token1PriceUSD: "2000" },
     end: { totalValueLockedToken0: "1040", totalValueLockedToken1: "500", totalValueLockedUSD: "1", liquidity: "1", token0PriceUSD: "1", token1PriceUSD: "2000" },
-    pool_absent_at_start: false,
+    absent_at_start: false,
     hours: [],
     large_events: { swap: null, mint: null, burn: null },
+    unvalued_events: { mint: false, burn: false },
     truncated: false,
     coverage_shortfall: false,
   };
@@ -145,15 +166,22 @@ describe("materiality", () => {
     assert.deepEqual(materiality(noPrice, INPUTS), { verdict: "undetermined", reasons: ["undetermined:null_usd:token1"] });
   });
 
-  test("a pool absent at block_start starts at zero by construction", () => {
-    const facts = { ...base, start: null, pool_absent_at_start: true, end: { ...base.end!, totalValueLockedToken0: "60", totalValueLockedToken1: "0" } };
-    assert.deepEqual(materiality(facts, INPUTS), { verdict: "non_material", reasons: [] });
-    const rich = { ...facts, end: { ...facts.end, totalValueLockedToken1: "60" } };
-    assert.deepEqual(materiality(rich, INPUTS), { verdict: "material", reasons: ["tvl_change:token1"] });
+  test("a pool absent at block_start is undetermined, never a zero baseline", () => {
+    const facts = { ...base, start: null, absent_at_start: true, end: { ...base.end!, totalValueLockedToken0: "60", totalValueLockedToken1: "60" } };
+    assert.deepEqual(materiality(facts, INPUTS), { verdict: "undetermined", reasons: ["undetermined:absent_at_start"] });
+    const withHit = { ...facts, large_events: { swap: null, mint: { transaction: { id: "0xmint" }, amountUSD: "500000" }, burn: null } };
+    assert.equal(materiality(withHit, INPUTS).verdict, "material");
+  });
+
+  test("an unvalued mint or burn blocks non_material but not material", () => {
+    const unvalued = { ...base, unvalued_events: { mint: true, burn: false } };
+    assert.deepEqual(materiality(unvalued, INPUTS), { verdict: "undetermined", reasons: ["undetermined:unvalued_event:mint"] });
+    const material = { ...unvalued, end: { ...base.end!, totalValueLockedToken0: "2000" } };
+    assert.equal(materiality(material, INPUTS).verdict, "material");
   });
 
   test("absent at both blocks, truncated or short coverage is undetermined", () => {
-    assert.equal(materiality({ ...base, start: null, end: null }, INPUTS).verdict, "undetermined");
+    assert.deepEqual(materiality({ ...base, start: null, end: null }, INPUTS), { verdict: "undetermined", reasons: ["undetermined:pool_absent"] });
     assert.deepEqual(materiality({ ...base, truncated: true }, INPUTS), { verdict: "undetermined", reasons: ["undetermined:truncated"] });
     assert.deepEqual(materiality({ ...base, coverage_shortfall: true }, INPUTS), { verdict: "undetermined", reasons: ["undetermined:coverage_shortfall"] });
   });
@@ -165,7 +193,7 @@ describe("materiality", () => {
 });
 
 describe("GraphClient.screen", () => {
-  test("assembles the section 7 response with one request per pool", async () => {
+  test("assembles the section 7 response with one request per pool, every query pinned to the head", async () => {
     const fetch = fakeFetch(shared());
     const response = await client(fetch).screen([POOL], WINDOW, INPUTS);
 
@@ -173,16 +201,19 @@ describe("GraphClient.screen", () => {
     assert.deepEqual(fetch.calls.map((c) => c.op), ["Meta", "ObservationBlock", "ObservationBlock", "ScreenPool"]);
     assert.equal(fetch.calls[0]?.auth, "Bearer KEY");
     assert.equal(fetch.calls[0]?.url, "https://gateway.thegraph.com/api/subgraphs/id/SUBGRAPH");
+    assert.deepEqual(fetch.calls.slice(1, 3).map((c) => c.vars["head"]), [HEAD, HEAD]);
+    assert.match(fetch.calls[1]?.query ?? "", /block: \{ number: \$head \}/);
+    assert.match(fetch.calls[3]?.query ?? "", /amountUSD: null/);
 
-    assert.equal(response.deployment_id, "QmDeployment");
+    assert.equal(response.deployment_id, DEPLOYMENT);
     assert.equal(response.block_start, 18_000_000);
     assert.equal(response.block_end, 18_007_000);
     assert.equal(response.block_end_timestamp, WINDOW.to - 11);
     assert.equal(response.indexed_block, HEAD);
-    assert.equal(response.indexed_block_timestamp, WINDOW.to + 120);
+    assert.equal(response.indexed_block_timestamp, HEAD_TS);
     assert.equal(response.indexing_errors, false);
     assert.deepEqual(response.window_requested, WINDOW);
-    assert.deepEqual(response.window_covered, { from: WINDOW.from - 7, to: WINDOW.to - 11 });
+    assert.deepEqual(response.window_covered, WINDOW);
     assert.equal(response.coverage_shortfall, false);
     assert.equal(response.truncated, false);
 
@@ -195,29 +226,35 @@ describe("GraphClient.screen", () => {
     assert.equal(pool.end?.token1PriceUSD, "2000");
     assert.equal(pool.hours.length, 2);
     assert.deepEqual(pool.large_events, { swap: null, mint: null, burn: null });
+    assert.deepEqual(pool.unvalued_events, { mint: false, burn: false });
 
     const vars = fetch.calls[3]?.vars;
     assert.equal(vars?.["pool"], POOL_LC);
     assert.equal(vars?.["startBlock"], 18_000_000);
     assert.equal(vars?.["endBlock"], 18_007_000);
     assert.equal(vars?.["head"], HEAD);
+    assert.equal(vars?.["hourFrom"], WINDOW.from);
+    assert.equal(vars?.["hourTo"], WINDOW.to);
     assert.equal(vars?.["from"], String(WINDOW.from));
     assert.equal(vars?.["minUsd"], "100000");
+  });
+
+  test("an unaligned window is rejected before any request", async () => {
+    const fetch = fakeFetch(shared());
+    await assert.rejects(client(fetch).screen([POOL], { from: WINDOW.from + 1800, to: WINDOW.to }, INPUTS), /hour-aligned/);
+    assert.equal(fetch.calls.length, 0);
   });
 
   test("request count does not grow with pool activity", async () => {
     const busy = fakeFetch(
       shared({
-        ScreenPool: () => ({
-          start: snapshot("1000", "500"),
-          end: snapshot("1000", "500"),
-          bundleStart: { ethPriceUSD: "2000" },
-          bundleEnd: { ethPriceUSD: "2000" },
-          hours: Array.from({ length: 24 }, (_, i) => ({ periodStartUnix: WINDOW.from + i * 3600, tvlUSD: "1", volumeUSD: "9999999", txCount: "50000" })),
-          swap: [{ transaction: { id: "0xswap" }, amountUSD: "5000000" }],
-          mint: [{ transaction: { id: "0xmint" }, amountUSD: "120000" }],
-          burn: [],
-        }),
+        ScreenPool: () =>
+          screenRows({
+            end: snapshot("1000", "500"),
+            hours: Array.from({ length: 24 }, (_, i) => ({ periodStartUnix: WINDOW.from + i * 3600, tvlUSD: "1", volumeUSD: "9999999", txCount: "50000" })),
+            swap: [{ transaction: { id: "0xswap" }, amountUSD: "5000000" }],
+            mint: [{ transaction: { id: "0xmint" }, amountUSD: "120000" }],
+          }),
       }),
     );
     const response = await client(busy).screen([POOL, "0x" + "1".repeat(40)], WINDOW, INPUTS);
@@ -228,63 +265,69 @@ describe("GraphClient.screen", () => {
     assert.equal(pool?.large_events.swap?.transaction.id, "0xswap");
   });
 
-  test("a window end beyond the tolerance from its observation block is a coverage shortfall", async () => {
-    const stale = fakeFetch(
+  test("coverage falls short when the head has not reached the window end", async () => {
+    const lagging = fakeFetch(
       shared({
-        ObservationBlock: (vars) =>
-          Number(vars["ts"]) === WINDOW.from
-            ? { transactions: [{ blockNumber: "18000000", timestamp: String(WINDOW.from) }] }
-            : { transactions: [{ blockNumber: "18001000", timestamp: String(WINDOW.to - COVERAGE_TOLERANCE_S - 1) }] },
+        Meta: () => ({ _meta: { block: { number: HEAD, timestamp: WINDOW.to - 600 }, hasIndexingErrors: false, deployment: DEPLOYMENT } }),
+        ScreenPool: () => screenRows({ end: snapshot("1000", "500") }),
       }),
     );
-    const response = await client(stale).screen([POOL], WINDOW, INPUTS);
+    const response = await client(lagging).screen([POOL], WINDOW, INPUTS);
     assert.equal(response.coverage_shortfall, true);
-    assert.equal(response.pools[POOL_LC]?.verdict, "material");
-  });
-
-  test("short coverage with nothing material is undetermined, not non_material", async () => {
-    const stale = fakeFetch(
-      shared({
-        ObservationBlock: (vars) =>
-          Number(vars["ts"]) === WINDOW.from
-            ? { transactions: [{ blockNumber: "18000000", timestamp: String(WINDOW.from) }] }
-            : { transactions: [{ blockNumber: "18001000", timestamp: String(WINDOW.to - 3600) }] },
-        ScreenPool: () => ({
-          start: snapshot("1000", "500"),
-          end: snapshot("1000", "500"),
-          bundleStart: { ethPriceUSD: "2000" },
-          bundleEnd: { ethPriceUSD: "2000" },
-          hours: [],
-          swap: [],
-          mint: [],
-          burn: [],
-        }),
-      }),
-    );
-    const response = await client(stale).screen([POOL], WINDOW, INPUTS);
+    assert.deepEqual(response.window_covered, { from: WINDOW.from, to: WINDOW.to - 600 });
     assert.deepEqual(response.pools[POOL_LC]?.verdict, "undetermined");
     assert.deepEqual(response.pools[POOL_LC]?.reasons, ["undetermined:coverage_shortfall"]);
   });
 
-  test("a pool that does not exist at block_start starts at zero and is flagged", async () => {
-    const created = fakeFetch(
+  test("an old observation block is exact, not a shortfall, once the head is past the boundary", async () => {
+    const quiet = fakeFetch(
       shared({
-        ScreenPool: () => ({
-          start: null,
-          end: snapshot("10", "0"),
-          bundleStart: { ethPriceUSD: "2000" },
-          bundleEnd: { ethPriceUSD: "2000" },
-          hours: [],
-          swap: [],
-          mint: [],
-          burn: [],
-        }),
+        ObservationBlock: (vars) =>
+          Number(vars["ts"]) === WINDOW.from
+            ? { transactions: [{ blockNumber: "17990000", timestamp: String(WINDOW.from - 7200) }], _meta: { deployment: DEPLOYMENT } }
+            : { transactions: [{ blockNumber: "18001000", timestamp: String(WINDOW.to - 5400) }], _meta: { deployment: DEPLOYMENT } },
+        ScreenPool: () => screenRows({ end: snapshot("1000", "500") }),
       }),
     );
+    const response = await client(quiet).screen([POOL], WINDOW, INPUTS);
+    assert.equal(response.coverage_shortfall, false);
+    assert.deepEqual(response.window_covered, WINDOW);
+    assert.equal(response.block_end_timestamp, WINDOW.to - 5400);
+    assert.equal(response.pools[POOL_LC]?.verdict, "non_material");
+  });
+
+  test("an observation block beyond the pinned head is an error", async () => {
+    const racing = fakeFetch(
+      shared({
+        ObservationBlock: () => ({ transactions: [{ blockNumber: String(HEAD + 10), timestamp: String(WINDOW.to - 5) }], _meta: { deployment: DEPLOYMENT } }),
+      }),
+    );
+    await assert.rejects(client(racing).screen([POOL], WINDOW, INPUTS), /beyond the pinned head/);
+  });
+
+  test("a different deployment mid-response marks the pool undetermined", async () => {
+    const drifted = fakeFetch(shared({ ScreenPool: () => screenRows({ _meta: { deployment: "QmOther" } }) }));
+    const pool = (await client(drifted).screen([POOL], WINDOW, INPUTS)).pools[POOL_LC];
+    assert.equal(pool?.verdict, "undetermined");
+    assert.deepEqual(pool?.reasons, ["undetermined:graph_error"]);
+    assert.match(pool?.error ?? "", /deployment QmOther differs/);
+  });
+
+  test("a pool absent at block_start is undetermined and flagged", async () => {
+    const created = fakeFetch(shared({ ScreenPool: () => screenRows({ start: null, end: snapshot("10", "0") }) }));
     const pool = (await client(created).screen([POOL], WINDOW, INPUTS)).pools[POOL_LC];
-    assert.equal(pool?.pool_absent_at_start, true);
+    assert.equal(pool?.absent_at_start, true);
     assert.equal(pool?.start, null);
-    assert.equal(pool?.verdict, "non_material");
+    assert.equal(pool?.verdict, "undetermined");
+    assert.deepEqual(pool?.reasons, ["undetermined:absent_at_start"]);
+  });
+
+  test("an unvalued mint in the window leaves the large-event check incomplete", async () => {
+    const unvalued = fakeFetch(shared({ ScreenPool: () => screenRows({ end: snapshot("1000", "500"), mintUnvalued: [{ id: "m1" }] }) }));
+    const pool = (await client(unvalued).screen([POOL], WINDOW, INPUTS)).pools[POOL_LC];
+    assert.deepEqual(pool?.unvalued_events, { mint: true, burn: false });
+    assert.equal(pool?.verdict, "undetermined");
+    assert.deepEqual(pool?.reasons, ["undetermined:unvalued_event:mint"]);
   });
 
   test("graphql errors and http failures for a pool mark it undetermined", async () => {
@@ -312,19 +355,20 @@ describe("GraphClient.eventsProduct", () => {
       EventsSwaps: (vars) => {
         const first = Number(vars["first"]);
         const lastId = String(vars["lastId"]);
-        const offset = lastId === "" ? 0 : Number(lastId.slice(1)) ;
+        const offset = lastId === "" ? 0 : Number(lastId.slice(1));
         const count = Math.max(0, Math.min(first, total - offset));
         return {
           swaps: Array.from({ length: count }, (_, i) => ({
             id: `s${String(offset + i + 1).padStart(6, "0")}`,
             transaction: { id: `0xtx${offset + i + 1}` },
-            logIndex: String(i),
+            logIndex: offset + i === 1 ? null : String(i),
             timestamp: String(WINDOW.from + offset + i),
             amount0: "1",
             amount1: "-2",
             amountUSD: offset + i === 3 ? null : "10",
             origin: "0xorigin",
           })),
+          _meta: { deployment: DEPLOYMENT },
         };
       },
       EventsMints: () => ({
@@ -343,8 +387,26 @@ describe("GraphClient.eventsProduct", () => {
             tickUpper: "100",
           },
         ],
+        _meta: { deployment: DEPLOYMENT },
       }),
-      EventsBurns: () => ({ burns: [] }),
+      EventsBurns: () => ({
+        burns: [
+          {
+            id: "b000001",
+            transaction: { id: "0xburn" },
+            logIndex: null,
+            timestamp: String(WINDOW.from + 9),
+            amount0: "1",
+            amount1: "1",
+            amountUSD: null,
+            origin: "0xorigin",
+            owner: null,
+            tickLower: "-10",
+            tickUpper: "10",
+          },
+        ],
+        _meta: { deployment: DEPLOYMENT },
+      }),
     };
   }
 
@@ -355,12 +417,12 @@ describe("GraphClient.eventsProduct", () => {
     assert.ok(pool);
     assert.equal(pool.swaps.length, 2005);
     assert.equal(pool.mints.length, 1);
-    assert.equal(pool.burns.length, 0);
+    assert.equal(pool.burns.length, 1);
     assert.equal(pool.truncated, false);
     assert.equal(response.truncated, false);
-    assert.deepEqual(pool.counts, { swap: 2005, mint: 1, burn: 0 });
+    assert.deepEqual(pool.counts, { swap: 2005, mint: 1, burn: 1 });
     assert.deepEqual(pool.sum_amount_usd, { swap: "20040", mint: "120000", burn: "0" });
-    assert.equal(pool.amount_usd_nulls, 1);
+    assert.equal(pool.amount_usd_nulls, 2);
     assert.equal(pool.mints[0]?.tickLower, -100);
     assert.equal(pool.swaps[0]?.transaction.id, "0xtx1");
 
@@ -370,6 +432,22 @@ describe("GraphClient.eventsProduct", () => {
     assert.ok(eventCalls.every((c) => c.vars["block"] === HEAD));
     assert.ok(eventCalls.every((c) => c.vars["first"] === 1000));
     assert.equal(response.requests, 3 + 5);
+  });
+
+  test("null log indices and burn owners are preserved, never zero", async () => {
+    const fetch = fakeFetch({ ...shared(), ...pages(3) });
+    const pool = (await client(fetch).eventsProduct([POOL], WINDOW, 100)).pools[POOL_LC];
+    assert.equal(pool?.swaps[0]?.logIndex, 0);
+    assert.equal(pool?.swaps[1]?.logIndex, null);
+    assert.equal(pool?.burns[0]?.logIndex, null);
+    assert.equal(pool?.burns[0]?.owner, null);
+    assert.equal(pool?.burns[0]?.amountUSD, null);
+    assert.equal(pool?.mints[0]?.owner, "0xowner");
+  });
+
+  test("a deployment change between pages fails the product", async () => {
+    const fetch = fakeFetch({ ...shared(), ...pages(3), EventsMints: () => ({ mints: [], _meta: { deployment: "QmOther" } }) });
+    await assert.rejects(client(fetch).eventsProduct([POOL], WINDOW, 100), /deployment QmOther differs/);
   });
 
   test("stops at the cap and reports truncated", async () => {
