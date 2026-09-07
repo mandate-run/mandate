@@ -11,3 +11,4 @@ pub mod quote;
 pub mod receipts;
 pub mod transcript;
 pub mod validate;
+pub mod x402;
