@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { FileStore } from "./idempotency.js";
 import { Journal } from "./journal.js";
-import { USDC_TESTNET, createSeller } from "./x402.js";
+import { HBAR, USDC_TESTNET, createSeller } from "./x402.js";
 
 try {
   process.loadEnvFile(".env");
@@ -33,7 +33,7 @@ const app = createSeller(
     network: env["HEDERA_NETWORK"] === "mainnet" ? "hedera:mainnet" : "hedera:testnet",
     payTo,
     facilitatorUrl,
-    asset: env["SELLER_ASSET"] ?? USDC_TESTNET,
+    asset: env["SELLER_ASSET"]?.toUpperCase() === "HBAR" ? HBAR : (env["SELLER_ASSET"] ?? USDC_TESTNET),
     store: new FileStore(`${dir}/spike-store.jsonl`),
     journal: new Journal(`${dir}/spike-journal.jsonl`),
     faults,
