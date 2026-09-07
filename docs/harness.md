@@ -106,7 +106,7 @@ Proctor depends on Mandate core for signing, reconciliation and the ledger. Mand
 - The agent cannot approve changes to its own contract, verifier or fixtures. All are frozen per run. A wrong test is fixed in a separate change, never inside the attempt it would turn green.
 - Infrastructure failure stops the loop. A facilitator outage never causes a rewrite of working payment code.
 - Paid checks spend from a bounded test account under a mandate: allowlist of the endpoint under test, per-payment cap, durable authorizations. Restarting an attempt does not refill the allowance.
-- Proctor starts every child, the agent adapter and the application under test, with an explicit allowlisted environment: `PATH`, `HOME`, `TERM` and the variables the task names. Payment credentials reach only the process the task names as the buyer, from that process's own env file, never the agent. A git worktree contains changes; it is not a security sandbox.
+- Proctor starts every child, the agent adapter and the application under test, with an explicit allowlisted environment: `PATH`, `HOME`, `TERM` and the variables the task names. Payment credentials enter only the buyer process, from its own env file; they are never in the agent's environment. Proctor does not restrict the agent's filesystem access, so a coding agent that reads arbitrary paths can still find that file. A git worktree contains changes; it is not a security sandbox.
 
 ## Evidence and the video
 
