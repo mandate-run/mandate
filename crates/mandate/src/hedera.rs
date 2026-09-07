@@ -124,17 +124,36 @@ impl Consensus {
         receipt.topic_id.ok_or(Error::MissingTopicId)
     }
 
-    /// Submits one message and returns its topic sequence number.
-    pub async fn submit_message(&self, topic: TopicId, message: &[u8]) -> Result<u64, Error> {
-        let receipt = TopicMessageSubmitTransaction::new()
+    /// Submits one message under a fee cap in tinybars, reserved from the
+    /// audit budget by the caller, and returns the sequence number and the
+    /// transaction id whose mirror record carries the charged fee.
+    pub async fn submit_message(
+        &self,
+        topic: TopicId,
+        message: &[u8],
+        fee_cap_tinybar: i64,
+    ) -> Result<Submitted, Error> {
+        let response = TopicMessageSubmitTransaction::new()
             .topic_id(topic)
             .message(message.to_vec())
+            .max_transaction_fee(Hbar::from_tinybars(fee_cap_tinybar))
             .execute(&self.client)
-            .await?
-            .get_receipt(&self.client)
             .await?;
-        Ok(receipt.topic_sequence_number)
+        let receipt = response.get_receipt(&self.client).await?;
+        Ok(Submitted {
+            sequence: receipt.topic_sequence_number,
+            transaction_id: response.transaction_id.to_string(),
+            mirror_id: mirror_id(&response.transaction_id),
+        })
     }
+}
+
+/// An accepted HCS submit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Submitted {
+    pub sequence: u64,
+    pub transaction_id: String,
+    pub mirror_id: String,
 }
 
 /// What is being paid: HBAR in tinybars or an HTS token in its atomic units.
@@ -469,6 +488,9 @@ pub fn inspect(bytes: &[u8]) -> Result<Inspected, Error> {
 pub struct MirrorRecord {
     pub transaction_id: String,
     pub result: String,
+    /// Tinybars the payer was charged, for audit reconciliation.
+    #[serde(default)]
+    pub charged_tx_fee: Option<i64>,
     #[serde(default)]
     pub nonce: u32,
     #[serde(default)]

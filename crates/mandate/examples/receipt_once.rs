@@ -43,8 +43,12 @@ async fn main() -> anyhow::Result<()> {
         String::from_utf8_lossy(&message)
     );
 
-    let seq = consensus.submit_message(topic, &message).await?;
-    println!("submitted to {topic_id} as sequence {seq}");
+    let submitted = consensus.submit_message(topic, &message, 5_000_000).await?;
+    let seq = submitted.sequence;
+    println!(
+        "submitted to {topic_id} as sequence {seq}, transaction {}",
+        submitted.transaction_id
+    );
     println!("{}/topic/{topic_id}", cfg.network.hashscan());
 
     let mut seen = None;
