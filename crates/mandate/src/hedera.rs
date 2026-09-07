@@ -83,10 +83,13 @@ pub enum Asset {
     Token(TokenId),
 }
 
+/// The asset id the x402 Hedera scheme uses for HBAR.
+pub const HBAR_ASSET_ID: &str = "0.0.0";
+
 impl Asset {
-    /// Parses an x402 asset field: `HBAR` or a token id.
+    /// Parses an x402 asset field: `0.0.0` or `HBAR` for HBAR, else a token id.
     pub fn parse(asset: &str) -> Result<Self, Error> {
-        if asset.eq_ignore_ascii_case("hbar") {
+        if asset == HBAR_ASSET_ID || asset.eq_ignore_ascii_case("hbar") {
             Ok(Self::Hbar)
         } else {
             Ok(Self::Token(TokenId::from_str(asset)?))
@@ -97,7 +100,7 @@ impl Asset {
 impl std::fmt::Display for Asset {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Hbar => f.write_str("HBAR"),
+            Self::Hbar => f.write_str(HBAR_ASSET_ID),
             Self::Token(id) => write!(f, "{id}"),
         }
     }
@@ -498,7 +501,7 @@ mod tests {
         let t = Transfer {
             fee_payer: acct("0.0.7162784"),
             pay_to: acct("0.0.111"),
-            asset: Asset::parse("HBAR").unwrap(),
+            asset: Asset::parse("0.0.0").unwrap(),
             amount: 250,
             node_account_ids: &nodes,
             valid_start: valid_start_now(),
@@ -511,6 +514,17 @@ mod tests {
             vec![(acct("0.0.111"), 250), (acct("0.0.5"), -250)]
         );
         assert!(seen.tokens.is_empty());
+    }
+
+    #[test]
+    fn hbar_asset_ids() {
+        assert_eq!(Asset::parse("0.0.0").unwrap(), Asset::Hbar);
+        assert_eq!(Asset::parse("HBAR").unwrap(), Asset::Hbar);
+        assert_eq!(Asset::Hbar.to_string(), "0.0.0");
+        assert!(matches!(
+            Asset::parse("0.0.429274").unwrap(),
+            Asset::Token(_)
+        ));
     }
 
     #[test]

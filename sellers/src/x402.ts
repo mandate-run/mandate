@@ -30,6 +30,8 @@ import { Claims, type ResultStore, replayMiddleware, transactionHashOf } from ".
 import { type Journal, type Source, sha256Hex } from "./journal.js";
 
 export const USDC_TESTNET = "0.0.429274";
+/** The asset id the x402 Hedera scheme uses for HBAR. */
+export const HBAR = "0.0.0";
 export const FAULT_DROP_RESPONSE = "drop-response-after-settle";
 
 export interface SellerConfig {
@@ -37,7 +39,7 @@ export interface SellerConfig {
   network: Network;
   payTo: string;
   facilitatorUrl: string;
-  /** HTS token id or `HBAR`. */
+  /** HTS token id, or `0.0.0` for HBAR. */
   asset: string;
   store: ResultStore;
   journal: Journal;
