@@ -22,7 +22,9 @@ const paymentId = generatePaymentId("pay_");
 const decode = (header: string): unknown => JSON.parse(Buffer.from(header, "base64").toString("utf8"));
 
 const signer = createClientHederaSigner(accountId, PrivateKey.fromString(privateKey), { network });
+// Spend controls are the buyer runtime's job, not this probe's; allow any asset the seller quotes.
 const client = new x402Client()
+  .setSpendControls(false)
   .register(network, new ExactHederaScheme(signer))
   .registerExtension({
     key: PAYMENT_IDENTIFIER,
@@ -38,7 +40,8 @@ const client = new x402Client()
 
 const seen = { signature: null as string | null };
 const observing: typeof fetch = async (input, init) => {
-  const headers = new Headers(init?.headers);
+  const headers = new Headers(input instanceof Request ? input.headers : undefined);
+  new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
   const sent = headers.get("PAYMENT-SIGNATURE");
   if (sent !== null) {
     seen.signature = sent;
