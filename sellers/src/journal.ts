@@ -12,6 +12,8 @@ export interface JournalEntry {
   payment_id: string | null;
   signed_payload_hash: string | null;
   settle_called: boolean;
+  /** Settlement was called and the facilitator reported success. */
+  settle_ok: boolean;
   served_hash: string | null;
   status: number;
   source: Source;
