@@ -11,5 +11,6 @@
     "outDir": "dist",
     "types": ["node"]
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
 }
