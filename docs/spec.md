@@ -177,9 +177,11 @@ Rules:
 
 ## 7. Evidence contract
 
-Every evidence response carries `deployment_id`, `block_start`, `block_end`, `block_end_timestamp`, `indexing_errors`, `window_requested`, `window_covered`, `truncated`, and per pool the facts below. A seller MUST NOT report no material change when `truncated` is true or a USD valuation needed for the verdict is null; it reports `undetermined`.
+Every evidence response carries `deployment_id`, `block_start`, `block_end`, `block_end_timestamp`, `indexed_block`, `indexed_block_timestamp`, `indexing_errors`, `window_requested`, `window_covered`, `coverage_shortfall`, `truncated`, and per pool the facts below. A seller MUST NOT report no material change when `truncated` or `coverage_shortfall` is true or a USD valuation needed for the verdict is null; it reports `undetermined`. A GraphQL error or a null USD field yields `undetermined`, never a zero.
 
-Screening facts per pool: `Pool.totalValueLockedToken0`, `totalValueLockedToken1`, `totalValueLockedUSD` and `liquidity` queried at `block_start` and at `block_end` using block-height queries; mint, burn and swap counts and summed `amountUSD` within the window from event queries. Block heights are the last block at or before each window end; the covered window is their timestamps. `liquidity` is in-range liquidity, reported and unused.
+Observation blocks: `block_start` and `block_end` are the last blocks at or before each window end in which subgraph state changed, read from the `transactions` entity; facts are stated at those blocks and the covered window is their timestamps. A window end more than 900 s after its observation block is a `coverage_shortfall`. Events are selected by timestamp range and are exact regardless. Every paginated query is pinned to one head block, `indexed_block`.
+
+Screening facts per pool: `Pool.totalValueLockedToken0`, `totalValueLockedToken1`, `totalValueLockedUSD` and `liquidity` at `block_start` and at `block_end`, with each token's USD price at those blocks; hourly `tvlUSD`, `volumeUSD` and `txCount` from `poolHourDatas` over the window; and per event type the largest mint, burn or swap with `amountUSD >= inputs.min_event_usd`, or none. The screen costs one request per pool whatever the activity. `liquidity` is in-range liquidity, reported and unused.
 
 A pool is material when the relative change in either token TVL is at least `inputs.materiality`, or any single event has `amountUSD >= inputs.min_event_usd`. When a token's starting TVL is zero, its relative change is undefined; that token counts as material when its ending TVL is nonzero and the USD value of the change is at least `min_event_usd`. Zero material pools is a valid, complete result.
 
@@ -189,7 +191,7 @@ A pool is material when the relative change in either token TVL is at least `inp
 | screening | transaction | buy events for pools in `W`; if none affordable, EVIDENCE_INSUFFICIENT |
 | transaction | any | proceed to explain |
 
-Events facts per pool: every mint, burn and swap in the window with `transaction.id`, `logIndex`, `timestamp`, `amount0`, `amount1`, `amountUSD`, `origin`, and for mints and burns `owner`, `tickLower`, `tickUpper`; paginated to completion or `truncated` set.
+Events facts per pool: every mint, burn and swap in the window with `transaction.id`, `logIndex`, `timestamp`, `amount0`, `amount1`, `amountUSD`, `origin`, and for mints and burns `owner`, `tickLower`, `tickUpper`; per type the count and the summed `amountUSD`, with the number of null `amountUSD` values; paginated by id at the head block to completion or `truncated` set at the listing's cap.
 
 ## 8. Analysis
 
@@ -202,7 +204,7 @@ Per-pool outcome:
 | non_material | facts complete and below both thresholds |
 | pending | material by complete screening facts; `requirements.evidence` is `transaction` and no transaction-level evidence is held yet |
 | supported | material and the held evidence meets `requirements.evidence` |
-| undetermined | `truncated` is true, a needed valuation is null, or facts are missing |
+| undetermined | `truncated` or `coverage_shortfall` is true, a needed valuation is null, or facts are missing |
 
 Under `requirements.evidence` `screening`, a material pool with complete screening facts is `supported` immediately.
 
@@ -212,7 +214,7 @@ Claims, each with `type`, `pool`, `values`, `calculation` and `evidence`:
 |---|---|---|
 | tvl_change | `(tvl_end - tvl_start) / tvl_start` per token from block-height facts; `tvl_end - tvl_start` when `tvl_start` is zero | two fact ids |
 | large_event | `amountUSD` of one event, compared with `min_event_usd` | one transaction hash |
-| activity_summary | counts and summed `amountUSD` of mints, burns and swaps in the window | count facts |
+| activity_summary | `volumeUSD` and `txCount` summed over the window's hourly facts, and the largest event per type from screening; per-type counts and summed `amountUSD` once events are held | aggregate fact ids |
 
 Brief format: fixed fields; decimals with at most 18 significant digits, 42-byte addresses, 66-byte hashes, RFC 3339 timestamps. A pool's outcome and its mandatory claims, at most two `tvl_change`, one `large_event` and one `activity_summary`, occupy at most 1024 bytes; the header at most 512 bytes. The mandatory brief bound is therefore `512 + 1024 * |R|` bytes. It is a feasibility condition of the staged plan, section 5, not of the mandate.
 
@@ -227,7 +229,7 @@ For a bundled `investigate` report, the runtime recomputes outcomes and claims f
 - Citations: when `citations` is `required`, every claim carries at least one evidence reference of its permitted kind, and every supported pool has at least one claim. A supported pool whose transaction-level evidence contains at least one event MUST have at least one claim citing a transaction hash.
 - Prose: every number in the prose appears among claim values or fact values.
 - Provenance: from the transaction hashes cited by claims and listed in the brief, `min(provenance_samples, hashes)` are chosen deterministically and checked with `eth_getTransactionReceipt` against `eth_rpc`; each MUST exist with status 1 and list the pool address among its log addresses. When no transaction hash is cited, provenance is `not_applicable`, whatever the setting; a report of non-material pools cites block-height facts and passes on those. When hashes are cited and `provenance_samples` is 0, provenance is `not_run` and the report says so. A positive `provenance_samples` with no `constraints.eth_rpc` fails mandate validation before any purchase; a missing RPC never downgrades a requested check. This verifies existence and pool involvement, not amounts.
-- Freshness: `block_end_timestamp` within `requirements.max_data_age_s` of the quote's `received_at`; `indexing_errors` false.
+- Freshness: `indexed_block_timestamp` within `requirements.max_data_age_s` of the quote's `received_at`; `indexing_errors` false; no pool is `non_material` while `coverage_shortfall` or `truncated` is true.
 - Schema: the response conforms to the listing's output schema.
 
 The guarantee this establishes: validated calculations, evidence references, coverage of the required set, and sampled provenance where transactions are cited. It does not establish causation, completeness beyond the covered window, or amounts beyond what the subgraph reports.
