@@ -23,6 +23,7 @@
     "express": "^5.2.1"
   },
   "devDependencies": {
+    "@hiero-ledger/sdk": "2.85.0",
     "@types/express": "^5.0.0",
     "@types/node": "^24.0.0",
     "@x402/fetch": "2.25.0",
