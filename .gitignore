@@ -10,8 +10,9 @@ target/
 node_modules/
 dist/
 
-# proctor runs and local ledgers
+# proctor runs, seller journals and local ledgers
 .proctor/
+.journal/
 *.sqlite
 *.sqlite-journal
 
