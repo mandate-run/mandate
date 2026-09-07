@@ -35,6 +35,8 @@ pub enum Error {
     MissingTransactionId,
     #[error("transaction bytes are not a transfer")]
     NotATransfer,
+    #[error("transaction bytes are not a TransactionList: {0}")]
+    Proto(#[from] prost::DecodeError),
 }
 
 impl From<hedera::Error> for Error {
@@ -178,12 +180,61 @@ pub fn sign_transfer(signer: &Signer, t: &Transfer<'_>) -> Result<SignedTransfer
         .transaction_valid_duration(t.valid_duration);
     tx.freeze()?;
     tx.sign(signer.key.clone());
-    let bytes = tx.to_bytes()?;
+    let bytes = canonical_transaction_list(&tx.to_bytes()?)?;
     Ok(SignedTransfer {
         transaction_id,
         bytes,
         valid_until: t.valid_start + t.valid_duration,
     })
+}
+
+/// Keeps only `signedTransactionBytes` in every entry of a serialized
+/// `TransactionList`. The Rust SDK also fills the deprecated `bodyBytes` and
+/// `sigMap` fields of each entry; the JavaScript SDK then counts every body
+/// twice and rejects the bytes, so a facilitator or seller built on it would
+/// refuse the payment. The signature covers `bodyBytes` in both forms, so
+/// nothing is re-signed.
+#[allow(
+    deprecated,
+    reason = "the deprecated fields are exactly what gets removed"
+)]
+pub fn canonical_transaction_list(bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    use hedera_proto::services::SignedTransaction;
+    use prost::Message as _;
+    let mut list = hedera_proto::sdk::TransactionList::decode(bytes)?;
+    for tx in &mut list.transaction_list {
+        if tx.signed_transaction_bytes.is_empty() {
+            let signed = SignedTransaction {
+                body_bytes: std::mem::take(&mut tx.body_bytes),
+                sig_map: tx.sig_map.take(),
+                ..Default::default()
+            };
+            tx.signed_transaction_bytes = signed.encode_to_vec();
+        }
+        tx.body_bytes.clear();
+        tx.sig_map = None;
+        tx.body = None;
+        tx.sigs = None;
+    }
+    Ok(list.encode_to_vec())
+}
+
+/// Whether every entry of a serialized `TransactionList` carries only
+/// `signedTransactionBytes`.
+#[allow(
+    deprecated,
+    reason = "the deprecated fields are exactly what is checked"
+)]
+pub fn is_canonical_transaction_list(bytes: &[u8]) -> Result<bool, Error> {
+    use prost::Message as _;
+    let list = hedera_proto::sdk::TransactionList::decode(bytes)?;
+    Ok(list.transaction_list.iter().all(|tx| {
+        !tx.signed_transaction_bytes.is_empty()
+            && tx.body_bytes.is_empty()
+            && tx.sig_map.is_none()
+            && tx.body.is_none()
+            && tx.sigs.is_none()
+    }))
 }
 
 /// One token movement inside a transfer.
@@ -463,6 +514,7 @@ mod tests {
         assert_eq!(signed.valid_until, valid_start + Duration::seconds(120));
         let bytes = STANDARD.decode(signed.base64()).unwrap();
         assert_eq!(bytes, signed.bytes);
+        assert!(is_canonical_transaction_list(&signed.bytes).unwrap());
 
         let seen = inspect(&signed.bytes).unwrap();
         assert_eq!(seen.transaction_id.account_id, acct("0.0.7162784"));
@@ -514,6 +566,55 @@ mod tests {
             vec![(acct("0.0.111"), 250), (acct("0.0.5"), -250)]
         );
         assert!(seen.tokens.is_empty());
+    }
+
+    #[test]
+    #[allow(deprecated, reason = "asserts on the fields the transform removes")]
+    fn canonical_form_drops_legacy_fields_and_keeps_the_signature() {
+        use prost::Message as _;
+        let signer = Signer::ephemeral(acct("0.0.5"));
+        let nodes = [acct("0.0.3")];
+        let t = Transfer {
+            fee_payer: acct("0.0.7162784"),
+            pay_to: acct("0.0.111"),
+            asset: Asset::Hbar,
+            amount: 7,
+            node_account_ids: &nodes,
+            valid_start: valid_start_now(),
+            valid_duration: valid_duration(120),
+        };
+        let mut tx = TransferTransaction::new();
+        tx.hbar_transfer(signer.account_id, Hbar::from_tinybars(-7))
+            .hbar_transfer(t.pay_to, Hbar::from_tinybars(7));
+        let mut id = TransactionId::generate(t.fee_payer);
+        id.valid_start = t.valid_start;
+        tx.transaction_id(id)
+            .node_account_ids(nodes)
+            .transaction_valid_duration(t.valid_duration);
+        tx.freeze().unwrap();
+        tx.sign(signer.key.clone());
+        let raw = tx.to_bytes().unwrap();
+        let raw_list = hedera_proto::sdk::TransactionList::decode(&*raw).unwrap();
+        assert!(!raw_list.transaction_list[0].body_bytes.is_empty());
+        assert!(!is_canonical_transaction_list(&raw).unwrap());
+
+        let canonical = canonical_transaction_list(&raw).unwrap();
+        assert!(is_canonical_transaction_list(&canonical).unwrap());
+        let signed = sign_transfer(&signer, &t).unwrap();
+        let seen = inspect(&signed.bytes).unwrap();
+        assert_eq!(seen.node_account_ids, nodes);
+        assert_eq!(seen.hbar, vec![(acct("0.0.111"), 7), (acct("0.0.5"), -7)]);
+        let raw_body = hedera_proto::services::SignedTransaction::decode(
+            &*raw_list.transaction_list[0].signed_transaction_bytes,
+        )
+        .unwrap();
+        let canonical_list = hedera_proto::sdk::TransactionList::decode(&*canonical).unwrap();
+        let canonical_body = hedera_proto::services::SignedTransaction::decode(
+            &*canonical_list.transaction_list[0].signed_transaction_bytes,
+        )
+        .unwrap();
+        assert_eq!(raw_body.body_bytes, canonical_body.body_bytes);
+        assert_eq!(raw_body.sig_map, canonical_body.sig_map);
     }
 
     #[test]
