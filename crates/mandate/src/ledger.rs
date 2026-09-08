@@ -510,6 +510,10 @@ pub struct MandateRow {
     pub audit_total: i64,
     pub max_single_payment: i64,
     pub deadline: OffsetDateTime,
+    /// The absolute window the run investigates, unix seconds. Fixed at
+    /// start and restored on resume: a task must not move under evidence
+    /// already bought for it.
+    pub window: (u64, u64),
 }
 
 /// One audit budget charge. `reserved` before the transaction id exists,
@@ -540,6 +544,8 @@ CREATE TABLE IF NOT EXISTS mandates (
   audit_total INTEGER NOT NULL,
   max_single_payment INTEGER NOT NULL,
   deadline TEXT NOT NULL,
+  window_from INTEGER NOT NULL DEFAULT 0,
+  window_to INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS reservations (
@@ -593,8 +599,13 @@ CREATE TABLE IF NOT EXISTS receipts (
   hcs_sequence INTEGER,
   hcs_tx_id TEXT,
   published_at TEXT,
+  -- One receipt per transition. A resumed run re-observing a transition it
+  -- already recorded must not write, or publish, a second receipt for it.
+  event_key TEXT,
   PRIMARY KEY (mandate_id, seq)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS receipts_event ON receipts (mandate_id, event_key)
+  WHERE event_key IS NOT NULL;
 CREATE TABLE IF NOT EXISTS audit_charges (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   mandate_id TEXT NOT NULL REFERENCES mandates(id),
@@ -659,8 +670,8 @@ impl Ledger {
             Some(_) => return Err(LedgerError::MandateHashDiffers(m.id.clone())),
             None => {
                 tx.execute(
-                    "INSERT INTO mandates (id, mandate_hash, manifest_hash, service_total, service_asset, audit_total, max_single_payment, deadline, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    "INSERT INTO mandates (id, mandate_hash, manifest_hash, service_total, service_asset, audit_total, max_single_payment, deadline, window_from, window_to, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![
                         m.id,
                         m.mandate_hash,
@@ -670,6 +681,8 @@ impl Ledger {
                         m.audit_total,
                         m.max_single_payment,
                         rfc3339(m.deadline)?,
+                        m.window.0 as i64,
+                        m.window.1 as i64,
                         rfc3339(now)?
                     ],
                 )?;
@@ -682,7 +695,7 @@ impl Ledger {
     pub fn mandate(&self, id: &str) -> Result<MandateRow> {
         self.conn
             .query_row(
-                "SELECT id, mandate_hash, manifest_hash, service_total, service_asset, audit_total, max_single_payment, deadline FROM mandates WHERE id = ?1",
+                "SELECT id, mandate_hash, manifest_hash, service_total, service_asset, audit_total, max_single_payment, deadline, window_from, window_to FROM mandates WHERE id = ?1",
                 [id],
                 |r| {
                     Ok((
@@ -694,12 +707,14 @@ impl Ledger {
                         r.get::<_, i64>(5)?,
                         r.get::<_, i64>(6)?,
                         r.get::<_, String>(7)?,
+                        r.get::<_, i64>(8)?,
+                        r.get::<_, i64>(9)?,
                     ))
                 },
             )
             .optional()?
             .ok_or_else(|| LedgerError::MandateNotFound(id.to_owned()))
-            .and_then(|(id, mandate_hash, manifest_hash, service_total, service_asset, audit_total, max_single_payment, deadline)| {
+            .and_then(|(id, mandate_hash, manifest_hash, service_total, service_asset, audit_total, max_single_payment, deadline, window_from, window_to)| {
                 Ok(MandateRow {
                     id,
                     mandate_hash,
@@ -709,6 +724,7 @@ impl Ledger {
                     audit_total,
                     max_single_payment,
                     deadline: parse_time(&deadline)?,
+                    window: (window_from as u64, window_to as u64),
                 })
             })
     }
@@ -759,6 +775,18 @@ impl Ledger {
         let r = reservation_in(&tx, reservation_id)?;
         tx.commit()?;
         Ok(r)
+    }
+
+    /// Reservations still held for a mandate, so a resumed run adopts what
+    /// an interrupted one left behind instead of holding a second time.
+    pub fn held_reservations(&self, mandate_id: &str) -> Result<Vec<Reservation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM reservations WHERE mandate_id = ?1 AND state = 'held' ORDER BY id",
+        )?;
+        let ids: Vec<i64> = stmt
+            .query_map([mandate_id], |r| r.get::<_, i64>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        ids.into_iter().map(|id| self.reservation(id)).collect()
     }
 
     pub fn reservation(&self, id: i64) -> Result<Reservation> {
@@ -1072,8 +1100,32 @@ impl Ledger {
 
     /// Appends a receipt with the next `seq`, durable before publication (I9).
     pub fn append_receipt(&mut self, mandate_id: &str, receipt: &Receipt) -> Result<Receipt> {
+        self.append_receipt_once(mandate_id, receipt, None)
+            .map(|r| r.expect("a receipt with no event key always writes"))
+    }
+
+    /// Appends a receipt whose `event_key` names the transition it records,
+    /// in one transaction with the sequence it takes. A key already present
+    /// yields `None`: the transition was recorded before, so nothing is
+    /// written and nothing is published twice. I9.
+    pub fn append_receipt_once(
+        &mut self,
+        mandate_id: &str,
+        receipt: &Receipt,
+        event_key: Option<&str>,
+    ) -> Result<Option<Receipt>> {
         let tx = self.conn.transaction()?;
         mandate_in(&tx, mandate_id)?;
+        if let Some(key) = event_key {
+            let seen: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM receipts WHERE mandate_id = ?1 AND event_key = ?2",
+                params![mandate_id, key],
+                |r| r.get(0),
+            )?;
+            if seen > 0 {
+                return Ok(None);
+            }
+        }
         let next: i64 = tx.query_row(
             "SELECT COALESCE(MAX(seq) + 1, 0) FROM receipts WHERE mandate_id = ?1",
             [mandate_id],
@@ -1086,15 +1138,16 @@ impl Ledger {
             .message()
             .map_err(|e| LedgerError::Time(e.to_string()))?;
         tx.execute(
-            "INSERT INTO receipts (mandate_id, seq, json) VALUES (?1, ?2, ?3)",
+            "INSERT INTO receipts (mandate_id, seq, json, event_key) VALUES (?1, ?2, ?3, ?4)",
             params![
                 mandate_id,
                 next,
-                String::from_utf8_lossy(&message).into_owned()
+                String::from_utf8_lossy(&message).into_owned(),
+                event_key
             ],
         )?;
         tx.commit()?;
-        Ok(stored)
+        Ok(Some(stored))
     }
 
     pub fn receipts(&self, mandate_id: &str) -> Result<Vec<(Receipt, Option<u64>)>> {
@@ -1309,7 +1362,7 @@ fn wrong(a: &Authorization, wanted: &'static str) -> LedgerError {
 fn mandate_in(conn: &Connection, id: &str) -> Result<MandateRow> {
     let row = conn
         .query_row(
-            "SELECT id, mandate_hash, manifest_hash, service_total, service_asset, audit_total, max_single_payment, deadline FROM mandates WHERE id = ?1",
+            "SELECT id, mandate_hash, manifest_hash, service_total, service_asset, audit_total, max_single_payment, deadline, window_from, window_to FROM mandates WHERE id = ?1",
             [id],
             |r| {
                 Ok((
@@ -1321,6 +1374,8 @@ fn mandate_in(conn: &Connection, id: &str) -> Result<MandateRow> {
                     r.get::<_, i64>(5)?,
                     r.get::<_, i64>(6)?,
                     r.get::<_, String>(7)?,
+                    r.get::<_, i64>(8)?,
+                    r.get::<_, i64>(9)?,
                 ))
             },
         )
@@ -1335,6 +1390,7 @@ fn mandate_in(conn: &Connection, id: &str) -> Result<MandateRow> {
         audit_total: row.5,
         max_single_payment: row.6,
         deadline: parse_time(&row.7)?,
+        window: (row.8 as u64, row.9 as u64),
     })
 }
 
