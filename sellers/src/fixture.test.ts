@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { outcomesAndClaims } from "./claims.js";
-import { DEPLOYMENT, fixtureFetch, parseFixture, txHash } from "./fixture.js";
+import { DEPLOYMENT, MIXED_MATERIAL, fixtureFetch, parseFixture, txHash } from "./fixture.js";
 import { GraphClient } from "./graph.js";
 
 const POOL = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640";
@@ -10,7 +10,7 @@ const INPUTS = { materiality: "0.05", min_event_usd: "100000" };
 const NOW = 1_788_900_000;
 const WINDOW = { from: NOW - (NOW % 3600) - 86_400, to: NOW - (NOW % 3600) };
 
-function client(name: "material" | "quiet"): GraphClient {
+function client(name: "material" | "quiet" | "mixed"): GraphClient {
   return new GraphClient({ subgraphId: "FIXTURE", apiKey: "fixture", fetch: fixtureFetch(name, () => NOW) });
 }
 
@@ -38,6 +38,17 @@ describe("fixture gateway", () => {
     const { screen, events } = await client("quiet").investigate([POOL], WINDOW, INPUTS, 5000);
     assert.equal(screen.pools[POOL]!.verdict, "non_material");
     assert.equal(events, null);
+  });
+
+  test("mixed: one pool material, the others quiet, in one screen", async () => {
+    const quietPool = "0x4585fe77225b41b697c938b018e2ac67ac5a20c0";
+    const screen = await client("mixed").screen([MIXED_MATERIAL, quietPool], WINDOW, INPUTS);
+    assert.equal(screen.pools[MIXED_MATERIAL]!.verdict, "material");
+    assert.equal(screen.pools[quietPool]!.verdict, "non_material");
+    const { events } = await client("mixed").investigate([MIXED_MATERIAL, quietPool], WINDOW, INPUTS, 5000);
+    assert.deepEqual(Object.keys(events!.pools), [MIXED_MATERIAL]);
+    assert.equal(events!.pools[MIXED_MATERIAL]!.counts.swap, 3);
+    assert.equal(parseFixture("mixed"), "mixed");
   });
 
   test("names are checked", () => {
