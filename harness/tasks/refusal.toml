@@ -1,0 +1,30 @@
+# A budget that cannot cover any plan: the runtime must refuse before it
+# spends anything, and the fixture must show no payment was ever signed.
+# The contract is as much about what the seller never saw as what the buyer
+# printed.
+#
+#   cargo run -p proctor -- check harness/tasks/refusal.toml --dir .
+
+[task]
+name = "refuse before spending when no plan fits the budget"
+attempts = 2
+
+[hooks]
+setup = "harness/scripts/sellers up"
+ready = "harness/scripts/sellers ready"
+teardown = "harness/scripts/sellers down"
+
+[evidence]
+journal = ".proctor/journal/sellers-journal.jsonl"
+ledger = ".proctor/work/refusal.sqlite"
+mandate_id = "proctor-refusal"
+
+[[check]]
+name = "refusal"
+run = "harness/scripts/run-mandate refusal"
+timeout_s = 300
+# A refusal is the contract, so its exit code is the passing one.
+allow_exit = [3]
+expect = { status = "refused", "totals.settled" = "0.00000000", "refusals.0" = "REFUSED REQUIREMENT_UNMEETABLE bound 0.00420000 expected 0.00270000 available 0.00300000; staged: bound 0.00420000 above available 0.00300000 | hybrid: bound 0.00480000 above available 0.00300000 | bundle: bound 0.00440000 above available 0.00300000" }
+# The seller was quoted but never paid: no signed payment, no settlement.
+observe = { fixture_signed_payloads = 0, fixture_settlements = 0, ledger_authorizations = 0 }

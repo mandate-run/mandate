@@ -1,0 +1,34 @@
+# The behavior that decides whether an agent can be trusted with money: the
+# seller settles and the response is lost. The buyer must recover the result
+# it already paid for, with the payment it already signed, and never pay
+# twice. Run from the repo root:
+#
+#   cargo run -p proctor -- check harness/tasks/lost-response.toml --dir .
+
+[task]
+name = "recover a paid request after a lost response"
+attempts = 3
+
+[hooks]
+setup = "harness/scripts/sellers up drop-response-after-settle"
+ready = "harness/scripts/sellers ready"
+teardown = "harness/scripts/sellers down"
+timeout_s = 120
+
+[evidence]
+journal = ".proctor/journal/sellers-journal.jsonl"
+ledger = ".proctor/work/lost-response.sqlite"
+mandate_id = "proctor-lost-response"
+
+[[check]]
+name = "build"
+run = "cargo build -p mandate --quiet"
+timeout_s = 300
+
+# The application's own account of the run, and what Proctor measured.
+[[check]]
+name = "recovery"
+run = "harness/scripts/run-mandate lost-response"
+timeout_s = 300
+expect = { status = "delivered", "totals.outstanding" = "0.00000000", "validation.passed" = true, "validation.complete" = true }
+observe = { fixture_settlements = 3, fixture_distinct_payloads = 3, fixture_payment_ids = 3, fixture_served_from_store = 3, ledger_authorizations = 3, ledger_settled = 3, ledger_retrievals = 3, ledger_held = 0 }
