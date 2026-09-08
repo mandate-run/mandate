@@ -7,10 +7,20 @@
 //
 //   GRAPH_FIXTURE=material   token0 TVL rises 10% and a 250000 USD swap lands
 //   GRAPH_FIXTURE=quiet      nothing material happens
+//   GRAPH_FIXTURE=mixed      the pool in MIXED_MATERIAL is material, every other pool quiet
 import type { FetchLike } from "./graph.js";
 
-export const FIXTURES = ["material", "quiet"] as const;
+export const FIXTURES = ["material", "quiet", "mixed"] as const;
 export type Fixture = (typeof FIXTURES)[number];
+
+/** The one material pool of the mixed fixture: the demo's USDC/WETH 0.05%. */
+export const MIXED_MATERIAL = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640";
+
+/** What a pool looks like under a fixture. */
+export function scenarioFor(fixture: Fixture, pool: string): "material" | "quiet" {
+  if (fixture !== "mixed") return fixture;
+  return pool.toLowerCase() === MIXED_MATERIAL ? "material" : "quiet";
+}
 
 export const DEPLOYMENT = "QmFixtureUniswapV3";
 const HEAD = 23_507_100;
@@ -73,7 +83,7 @@ function liquidity(n: number, from: number, amountUSD: string, index: number) {
 }
 
 /** The fixture's events for one window: every kind, in id order. */
-export function fixtureEvents(fixture: Fixture, from: number) {
+export function fixtureEvents(fixture: "material" | "quiet", from: number) {
   if (fixture === "quiet") {
     return {
       swaps: [swap(1, from, "1200.5", 3), swap(2, from, "980", 7)],
@@ -108,7 +118,8 @@ export function fixtureFetch(fixture: Fixture, now: () => number = () => Math.fl
         const from = Number(vars["hourFrom"]);
         const to = Number(vars["hourTo"]);
         const minUsd = String(vars["minUsd"]);
-        const events = fixtureEvents(fixture, from);
+        const scenario = scenarioFor(fixture, String(vars["pool"]));
+        const events = fixtureEvents(scenario, from);
         const hits = (rows: { amountUSD: string | null; transaction: { id: string } }[]) =>
           rows
             .filter((r) => r.amountUSD !== null && Number(r.amountUSD) >= Number(minUsd))
@@ -118,12 +129,12 @@ export function fixtureFetch(fixture: Fixture, now: () => number = () => Math.fl
         const hours = [];
         for (let t = from; t < to; t += 3600) {
           const i = (t - from) / 3600;
-          hours.push({ periodStartUnix: t, tvlUSD: "4500000", volumeUSD: fixture === "quiet" ? "1500.25" : String(30000 + 250 * i), txCount: String(fixture === "quiet" ? 2 : 40 + i) });
+          hours.push({ periodStartUnix: t, tvlUSD: "4500000", volumeUSD: scenario === "quiet" ? "1500.25" : String(30000 + 250 * i), txCount: String(scenario === "quiet" ? 2 : 40 + i) });
         }
         return json({
           data: {
             start: snapshot("1000", "500"),
-            end: snapshot(fixture === "quiet" ? "1010" : "1100", "500"),
+            end: snapshot(scenario === "quiet" ? "1010" : "1100", "500"),
             bundleStart: { ethPriceUSD: "2222.5" },
             bundleEnd: { ethPriceUSD: "2230" },
             hours,
@@ -142,7 +153,7 @@ export function fixtureFetch(fixture: Fixture, now: () => number = () => Math.fl
         const from = Number(vars["from"]);
         const lastId = String(vars["lastId"]);
         const first = Number(vars["first"]);
-        const events = fixtureEvents(fixture, from);
+        const events = fixtureEvents(scenarioFor(fixture, String(vars["poolStr"])), from);
         const entity = body.operationName === "EventsSwaps" ? "swaps" : body.operationName === "EventsMints" ? "mints" : "burns";
         const rows = events[entity].filter((r) => r.id > lastId).slice(0, first);
         return json({ data: { [entity]: rows, _meta: meta } });
