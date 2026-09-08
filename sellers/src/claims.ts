@@ -1,7 +1,9 @@
 // Spec section 8 for the investigate bundle: per-pool outcomes and claims
 // computed from the seller's own facts, each claim with its calculation and
-// the fact ids or transaction hashes it rests on. The buyer recomputes both
-// from the delivered facts and requires equality.
+// the fact ids or transaction hashes it rests on. Completeness is checked
+// before materiality: incomplete facts are `undetermined` with their reasons,
+// never `supported`. The buyer recomputes both from the delivered facts and
+// requires equality.
 //
 // Fact ids: `<pool>:<field>@<block>` for a block-height snapshot field,
 // `<pool>:hours@<from>-<to>` for the hourly aggregates of a window, and
@@ -11,6 +13,8 @@ import {
   type EventKind,
   EVENT_KINDS,
   type EventsResponse,
+  type PoolEvents,
+  type PoolScreen,
   type ScreenResponse,
   addDec,
   cmpDec,
@@ -30,7 +34,7 @@ export interface PoolOutcome {
 }
 
 export interface Claim {
-  type: "tvl_change" | "large_event" | "activity_summary";
+  type: "tvl_change" | "large_event" | "largest_event" | "activity_summary";
   pool: string;
   values: Record<string, string | number | boolean | null>;
   calculation: string;
@@ -50,6 +54,24 @@ export function divDec(a: Dec, b: Dec): Dec {
   return { m: (an * scale) / bn, e: 18 };
 }
 
+/** Why a pool's facts cannot support a verdict, section 8's undetermined row. */
+export function incompleteness(screen: ScreenResponse, facts: PoolScreen, held: PoolEvents | undefined): string[] {
+  const reasons: string[] = [];
+  if (screen.coverage_shortfall) reasons.push("coverage_shortfall");
+  if (facts.truncated) reasons.push("truncated");
+  if (!facts.start || !facts.end) reasons.push("facts_missing");
+  if (facts.unvalued_events.mint) reasons.push("unvalued_event:mint");
+  if (facts.unvalued_events.burn) reasons.push("unvalued_event:burn");
+  for (const reason of facts.reasons) {
+    if (reason.startsWith("undetermined:")) reasons.push(reason.slice("undetermined:".length));
+  }
+  if (held !== undefined) {
+    if (held.truncated) reasons.push("events_truncated");
+    if (held.amount_usd_nulls > 0) reasons.push("events_unvalued");
+  }
+  return [...new Set(reasons)];
+}
+
 export function outcomesAndClaims(
   screen: ScreenResponse,
   events: EventsResponse | null,
@@ -60,12 +82,20 @@ export function outcomesAndClaims(
   const claims: Claim[] = [];
   for (const [pool, facts] of Object.entries(screen.pools)) {
     const held = events?.pools[pool];
+    const incomplete = incompleteness(screen, facts, held);
     let outcome: Outcome;
-    if (facts.verdict === "undetermined") outcome = "undetermined";
-    else if (facts.verdict === "non_material") outcome = "non_material";
-    else if (evidence === "screening" || held !== undefined) outcome = "supported";
-    else outcome = "pending";
-    outcomes.push({ pool, outcome, reasons: facts.reasons });
+    let reasons: string[];
+    if (incomplete.length > 0) {
+      outcome = "undetermined";
+      reasons = incomplete;
+    } else if (facts.verdict === "material") {
+      outcome = evidence === "screening" || held !== undefined ? "supported" : "pending";
+      reasons = facts.reasons;
+    } else {
+      outcome = "non_material";
+      reasons = facts.reasons;
+    }
+    outcomes.push({ pool, outcome, reasons });
 
     if (facts.start && facts.end) {
       for (const i of [0, 1] as const) {
@@ -106,6 +136,20 @@ export function outcomesAndClaims(
         calculation: "amountUSD >= min_event_usd",
         evidence: [largest.tx],
       });
+    } else if (held !== undefined) {
+      // Section 9: a supported pool with held events must cite a transaction.
+      // When no event reaches the threshold, the largest held event is
+      // cited as exactly that, never as a large event.
+      const top = largestHeld(held);
+      if (top !== null) {
+        claims.push({
+          type: "largest_event",
+          pool,
+          values: { kind: top.kind, amountUSD: top.amountUSD, min_event_usd: minEventUsd, reaches_threshold: false },
+          calculation: "max(amountUSD) over held events, below min_event_usd",
+          evidence: [top.tx],
+        });
+      }
     }
 
     let volume = dec("0");
@@ -134,9 +178,24 @@ export function outcomesAndClaims(
       type: "activity_summary",
       pool,
       values,
-      calculation: held === undefined ? "sum(hours.volumeUSD), sum(hours.txCount)" : "sum(hours.volumeUSD), sum(hours.txCount), count and sum(amountUSD) per event type",
+      calculation:
+        held === undefined
+          ? "sum(hours.volumeUSD), sum(hours.txCount)"
+          : "sum(hours.volumeUSD), sum(hours.txCount), count and sum(amountUSD) per event type",
       evidence: ev,
     });
   }
   return { outcomes, claims };
+}
+
+function largestHeld(held: PoolEvents): { kind: EventKind; amountUSD: string; tx: string } | null {
+  let top: { kind: EventKind; amountUSD: string; tx: string } | null = null;
+  const consider = (kind: EventKind, tx: string, amountUSD: string | null) => {
+    if (amountUSD === null) return;
+    if (top === null || cmpDec(dec(amountUSD), dec(top.amountUSD)) > 0) top = { kind, amountUSD, tx };
+  };
+  for (const e of held.swaps) consider("swap", e.transaction.id, e.amountUSD);
+  for (const e of held.mints) consider("mint", e.transaction.id, e.amountUSD);
+  for (const e of held.burns) consider("burn", e.transaction.id, e.amountUSD);
+  return top;
 }
