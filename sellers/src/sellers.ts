@@ -44,6 +44,9 @@ const graph =
         eventsProduct: async () => {
           throw new Error("GRAPH_API_KEY is not set");
         },
+        investigate: async () => {
+          throw new Error("GRAPH_API_KEY is not set");
+        },
       }
     : new GraphClient({ apiKey, subgraphId });
 const modelKey = env["ANTHROPIC_API_KEY"];
