@@ -79,6 +79,9 @@ pub fn format_amount(atomic: i64, decimals: u32) -> String {
     format!("{sign}{}.{}", &digits[..cut], &digits[cut..])
 }
 
+/// Longest mandate id; the brief header of section 8 budgets for it.
+pub const MAX_ID_LEN: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mandate {
     pub id: String,
@@ -491,6 +494,9 @@ impl Mandate {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
             return Err(bad("id", "letters, digits, hyphen and underscore only"));
+        }
+        if id.len() > MAX_ID_LEN {
+            return Err(bad("id", format!("at most {MAX_ID_LEN} bytes")));
         }
 
         Ok(Self {
