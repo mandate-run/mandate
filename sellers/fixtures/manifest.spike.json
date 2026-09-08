@@ -1,0 +1,29 @@
+{
+  "version": "spike",
+  "listings": [
+    {
+      "id": "spike",
+      "seller": "mandate-sellers",
+      "url": "http://127.0.0.1:4021/spike",
+      "method": "get",
+      "capability": "screen",
+      "produces": "screening",
+      "tariff": {"version": "spike-1", "base": 1000, "unit": "pool", "unit_price": 0, "max_units": 1},
+      "network": "hedera:testnet",
+      "asset": "0.0.0",
+      "pay_to": "0.0.10409989"
+    },
+    {
+      "id": "spike-low-ceiling",
+      "seller": "mandate-sellers",
+      "url": "http://127.0.0.1:4021/spike",
+      "method": "get",
+      "capability": "screen",
+      "produces": "screening",
+      "tariff": {"version": "spike-1", "base": 500, "unit": "pool", "unit_price": 0, "max_units": 1},
+      "network": "hedera:testnet",
+      "asset": "0.0.0",
+      "pay_to": "0.0.10409989"
+    }
+  ]
+}
