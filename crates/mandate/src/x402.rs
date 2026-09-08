@@ -47,7 +47,7 @@ impl Requirement {
 }
 
 /// Decoded `PAYMENT-REQUIRED`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaymentRequired {
     pub x402_version: u32,
