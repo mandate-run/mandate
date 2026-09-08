@@ -10,6 +10,12 @@ use time::{Duration, OffsetDateTime};
 
 use hedera::PrivateKey;
 
+use std::collections::BTreeMap;
+
+use crate::evidence::{
+    Counts, Event, EventHit, EventsResponse, Header, HourRow, LargeEvents, PoolEvents, PoolScreen,
+    ScreenResponse, Snapshot, Sums, TxRef, UnvaluedEvents, Verdict, Window,
+};
 use crate::hedera::{Asset, HederaAccountId, Signer, Transfer, sign_transfer, valid_duration};
 use crate::ledger::{BindingError, MandateRow, PreparedPayment, Request};
 use crate::x402::{PaymentPayload, PaymentRequired, Requirement, encode_header};
@@ -98,4 +104,141 @@ pub fn signed_payment_for(
         &payment_id,
     ));
     PreparedPayment::from_signature(&header, &payment_id)
+}
+
+/// The demo pool and a 24 h window, for evidence fixtures.
+pub const POOL: &str = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640";
+pub const FROM: u64 = 1_788_800_400;
+pub const TO: u64 = 1_788_886_800;
+
+fn snapshot(t0: &str, t1: &str) -> Snapshot {
+    Snapshot {
+        tvl_token0: t0.to_owned(),
+        tvl_token1: t1.to_owned(),
+        tvl_usd: Some("1000".to_owned()),
+        liquidity: "1".to_owned(),
+        token0_price_usd: Some("1".to_owned()),
+        token1_price_usd: Some("2000".to_owned()),
+    }
+}
+
+/// The header every fixture response shares: indexed a minute past the window.
+pub fn header_fixture() -> Header {
+    Header {
+        deployment_id: "Qm".to_owned(),
+        block_start: 100,
+        block_end: 200,
+        block_end_timestamp: TO - 5,
+        indexed_block: 210,
+        indexed_block_timestamp: Some(TO + 60),
+        indexing_errors: false,
+        window_requested: Window { from: FROM, to: TO },
+        window_covered: Window { from: FROM, to: TO },
+        coverage_shortfall: false,
+        truncated: false,
+    }
+}
+
+/// One pool's screen: token0 TVL 1000 to 1100 when `material`, else to 1010;
+/// a 250000 USD swap hit when `large_swap`; two hourly rows.
+pub fn screen_fixture(material: bool, large_swap: bool) -> ScreenResponse {
+    let mut pools = BTreeMap::new();
+    let mut reasons = Vec::new();
+    if material {
+        reasons.push("tvl_change:token0".to_owned());
+    }
+    if large_swap {
+        reasons.push("large_event:swap".to_owned());
+    }
+    pools.insert(
+        POOL.to_owned(),
+        PoolScreen {
+            start: Some(snapshot("1000", "500")),
+            end: Some(snapshot(if material { "1100" } else { "1010" }, "500")),
+            absent_at_start: false,
+            hours: vec![
+                HourRow {
+                    period_start_unix: FROM,
+                    tvl_usd: "1".to_owned(),
+                    volume_usd: "100.5".to_owned(),
+                    tx_count: "3".to_owned(),
+                },
+                HourRow {
+                    period_start_unix: FROM + 3600,
+                    tvl_usd: "1".to_owned(),
+                    volume_usd: "200".to_owned(),
+                    tx_count: "4".to_owned(),
+                },
+            ],
+            large_events: LargeEvents {
+                swap: large_swap.then(|| EventHit {
+                    transaction: TxRef {
+                        id: "0xswap".to_owned(),
+                    },
+                    amount_usd: "250000".to_owned(),
+                }),
+                ..Default::default()
+            },
+            unvalued_events: UnvaluedEvents::default(),
+            truncated: false,
+            coverage_shortfall: false,
+            verdict: if material || large_swap {
+                Verdict::Material
+            } else {
+                Verdict::NonMaterial
+            },
+            reasons,
+            error: None,
+        },
+    );
+    ScreenResponse {
+        header: header_fixture(),
+        pools,
+        requests: 4,
+    }
+}
+
+/// One held swap in transaction `0xswap`, valued at `amount` or unvalued.
+pub fn events_fixture(amount: Option<&str>, truncated: bool) -> EventsResponse {
+    let mut pools = BTreeMap::new();
+    pools.insert(
+        POOL.to_owned(),
+        PoolEvents {
+            swaps: vec![Event {
+                id: "s1".to_owned(),
+                transaction: TxRef {
+                    id: "0xswap".to_owned(),
+                },
+                log_index: Some(1),
+                timestamp: FROM + 1,
+                amount0: "1".to_owned(),
+                amount1: "-1".to_owned(),
+                amount_usd: amount.map(str::to_owned),
+                origin: "0xo".to_owned(),
+                owner: None,
+                tick_lower: None,
+                tick_upper: None,
+            }],
+            mints: vec![],
+            burns: vec![],
+            counts: Counts {
+                swap: 1,
+                mint: 0,
+                burn: 0,
+            },
+            sum_amount_usd: Sums {
+                swap: amount.unwrap_or("0").to_owned(),
+                mint: "0".to_owned(),
+                burn: "0".to_owned(),
+            },
+            amount_usd_nulls: u64::from(amount.is_none()),
+            truncated,
+        },
+    );
+    EventsResponse {
+        header: header_fixture(),
+        cap: 5000,
+        pools,
+        requests: 8,
+    }
 }

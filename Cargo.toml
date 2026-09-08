@@ -16,6 +16,8 @@ clap = { version = "4", features = ["derive"] }
 prost = "0.13"
 hedera = "0.43"
 hedera-proto = "0.20"
+num-bigint = "0.4"
+num-traits = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

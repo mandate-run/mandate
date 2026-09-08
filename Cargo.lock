@@ -1456,6 +1456,8 @@ dependencies = [
  "clap",
  "hedera",
  "hedera-proto",
+ "num-bigint",
+ "num-traits",
  "prost 0.13.5",
  "reqwest",
  "rusqlite",
