@@ -598,8 +598,9 @@ fn compact_claim(c: &Claim) -> Value {
 pub struct BriefInput<'a> {
     pub mandate_id: &'a str,
     pub window: Window,
-    /// `block_start` and `block_end` of the screen, so fact ids are reconstructible.
-    pub blocks: (u64, u64),
+    /// `block_start` and `block_end` per pool, from the purchase that covers
+    /// it, so every fact id is reconstructible.
+    pub blocks: &'a BTreeMap<String, (u64, u64)>,
     pub outcomes: &'a [PoolOutcome],
     pub claims: &'a [Claim],
     pub events: Option<&'a EventsResponse>,
@@ -660,8 +661,13 @@ pub fn build_brief(input: BriefInput<'_>, bound: usize) -> Result<Brief, BriefTo
         let brief = json!({
             "m": mandate_id,
             "w": [window.from, window.to],
-            "b": [blocks.0, blocks.1],
-            "o": outcomes.iter().map(|o| json!({ "p": o.pool, "o": o.outcome.as_str(), "r": o.reasons })).collect::<Vec<_>>(),
+            "o": outcomes
+                .iter()
+                .map(|o| {
+                    let b = blocks.get(&o.pool).map(|b| json!([b.0, b.1])).unwrap_or(Value::Null);
+                    json!({ "p": o.pool, "o": o.outcome.as_str(), "r": o.reasons, "b": b })
+                })
+                .collect::<Vec<_>>(),
             "c": Value::Object(by_pool),
             "e": Value::Object(per_pool),
         });
@@ -987,10 +993,11 @@ mod tests {
         let ev = events(Some("250000"), false);
         let (o, c) = outcomes_and_claims(&screen(true, true), Some(&ev), Evidence::Transaction, T);
         let w = Window { from: FROM, to: TO };
+        let blocks = BTreeMap::from([(POOL.to_owned(), (100u64, 200u64))]);
         let input = BriefInput {
             mandate_id: "m1",
             window: w,
-            blocks: (100, 200),
+            blocks: &blocks,
             outcomes: &o,
             claims: &c,
             events: Some(&ev),
@@ -999,8 +1006,9 @@ mod tests {
         let b = build_brief(input, 8192).unwrap();
         assert_eq!(b.events_used, 5);
         assert_eq!(b.json["e"][POOL].as_array().unwrap().len(), 1);
+        assert_eq!(b.json["o"][0]["b"], json!([100, 200]));
         assert!(
-            b.body.starts_with(br#"{"brief":{"b":[100,200],"c":{"#),
+            b.body.starts_with(br#"{"brief":{"c":{"#),
             "{}",
             String::from_utf8_lossy(&b.body)
         );
@@ -1072,10 +1080,15 @@ mod tests {
             let (o, c) = outcomes_and_claims(&screen, Some(&ev), Evidence::Transaction, T);
             assert_eq!(c.len(), 4 * pools);
             let bound = mandatory_brief_bound(pools);
+            let blocks: BTreeMap<String, (u64, u64)> = screen
+                .pools
+                .keys()
+                .map(|p| (p.clone(), (23_500_000u64, 23_507_000u64)))
+                .collect();
             let input = BriefInput {
                 mandate_id: &id,
                 window: w,
-                blocks: (23_500_000, 23_507_000),
+                blocks: &blocks,
                 outcomes: &o,
                 claims: &c,
                 events: Some(&ev),
@@ -1090,10 +1103,15 @@ mod tests {
         }
         let (screen, ev) = worst_case(5);
         let (o, c) = outcomes_and_claims(&screen, Some(&ev), Evidence::Transaction, T);
+        let blocks: BTreeMap<String, (u64, u64)> = screen
+            .pools
+            .keys()
+            .map(|p| (p.clone(), (1u64, 2u64)))
+            .collect();
         let input = BriefInput {
             mandate_id: &id,
             window: w,
-            blocks: (1, 2),
+            blocks: &blocks,
             outcomes: &o,
             claims: &c,
             events: Some(&ev),
