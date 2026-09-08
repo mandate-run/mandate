@@ -42,8 +42,8 @@ Up to 2 teams, $1,000 each. Design in [harness.md](harness.md).
 
 | Requirement, quoted | Satisfied by | Status |
 |---|---|---|
-| "Submit meaningful contribution to Hedera Harness (PR acceptable) or build new harness inspired by it" | Proctor in `harness/`, a standalone harness with the inspiration and differences documented | todo |
-| "Public GitHub repo/PR with README explaining problem solved" | `harness.md` and the crate README | todo |
+| "Submit meaningful contribution to Hedera Harness (PR acceptable) or build new harness inspired by it" | Proctor in `harness/`: `proctor check` runs task contracts whose `observe` half measures the seller journal and buyer ledger independently; three tasks pass, and a reintroduced recovery defect was caught by the journal, not the application | doing |
+| "Public GitHub repo/PR with README explaining problem solved" | `docs/harness.md` and `harness/README.md` | doing |
 | "Demo video (≤5 minutes) showing improvement" | Segment of the project video | todo |
 
 Extra points pursued: "Harness for uncovered language/framework", "New service coverage", "Tests, documentation, or examples included", "Clear before/after developer experience evidence".
