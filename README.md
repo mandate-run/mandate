@@ -4,7 +4,7 @@ Give your agent a mandate, not a credit card.
 
 Mandate buys the evidence an agent needs, tracks every payment authorization against its budget, and explains when it cannot finish. It is a buyer runtime for agents that pay per request over x402: given a purpose, a budget and hard constraints, it collects live quotes, plans the cheapest path that can cover the task, reserves the final step, pays one signed Hedera transfer per purchase, validates what it bought, and writes a receipt for every decision to Hedera Consensus Service.
 
-Built from scratch for ETHOnline 2026: Hedera AI & Agentic Payments, Hedera Open Source, The Graph AI Use Case From Scratch. Status: specification complete, scaffold only, nothing runs yet, private until submission.
+Built from scratch for ETHOnline 2026: Hedera AI & Agentic Payments, Hedera Open Source, The Graph AI Use Case From Scratch. Status: one-pool runs settle on testnet with receipts on HCS; private until submission.
 
 ## What it does
 
@@ -46,7 +46,21 @@ Proctor, in `harness/`, builds Hedera services from an executable acceptance con
 
 ## Setup
 
-Not runnable yet. Requires a Hedera testnet account associated with USDC `0.0.429274`, holding the service budget in USDC and the audit budget in HBAR; a Subgraph Studio API key; a model API key. Commands are added once the first settlement gate passes.
+Prerequisites: Rust 1.96 with `protoc` on the path, Node 24 with pnpm 11, and a Hedera testnet account funded from the [portal](https://portal.hedera.com). USDC runs need the account associated with `0.0.429274` and funded from [faucet.circle.com](https://faucet.circle.com); HBAR runs need nothing else. Live Graph data needs a Subgraph Studio API key; prose from a model needs an Anthropic key. Without them the sellers serve canned facts and a template explanation, which is enough for every command below.
+
+1. Buyer credentials. Copy `crates/mandate/.env.example` to `crates/mandate/.env`, fill `MANDATE_ACCOUNT_ID` and `MANDATE_PRIVATE_KEY`, and `chmod 600` the file. The key never leaves that process.
+2. Receipts topic. `cargo run -p mandate -- topic create` prints `HCS_TOPIC_ID=...`; add it to `.env` and to `duties.receipts_topic` in your mandate file.
+3. Sellers. `cd sellers && pnpm install`, copy `.env.example` to `.env`, set `SELLER_PAY_TO` to a second testnet account. Start them with canned facts and HBAR pricing: `GRAPH_FIXTURE=material SELLER_ASSET=HBAR pnpm sellers`. `GRAPH_FIXTURE=quiet` serves a pool with nothing material; a `GRAPH_API_KEY` without `GRAPH_FIXTURE` queries the subgraph live; no `SELLER_ASSET` prices in USDC.
+4. Pin the manifest. `curl http://127.0.0.1:4021/manifest.json > examples/manifest.hbar.json`, then put its `sha256sum` into `constraints.manifest.hash` of the mandate file. The shipped examples pin the manifest the fixture sellers serve for `pay_to` `0.0.10409989`; with your own seller account, refetch and re-pin.
+5. Run. From the repo root:
+
+```sh
+cargo run -p mandate -- run examples/one-pool.hbar.toml --id demo-$(date +%s)
+cargo run -p mandate -- run examples/one-pool.hbar.toml --id demo-$(date +%s) --json
+cargo run -p mandate -- run examples/one-pool-short.hbar.toml --id short-$(date +%s)
+```
+
+The first prints the transcript of spec section 12 as it happens: quotes, the three plans with `expected` and `bound`, the explain reserve, each payment with its `pay_` id and `0.0.7162784@` transaction id, settlement from the mirror node record, per-pool outcomes, validation by name, totals and the HCS sequence numbers. The second prints the report and transcript as one JSON document. The third refuses `REQUIREMENT_UNMEETABLE` before any purchase and still publishes its receipts. Exit codes: 0 delivered, 3 refused, 4 delivered with findings, 2 a mandate or manifest that does not load. Every run needs a fresh mandate id, hence `--id`; the ledger is `mandate.sqlite` in the working directory unless `--ledger` says otherwise, and `mandate reconcile <id>` re-reads the mirror node for anything left unresolved.
 
 ## Docs
 

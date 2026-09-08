@@ -24,5 +24,6 @@ dist/
 # agent worktrees
 .claude/worktrees/
 
-# spike outputs
+# spike outputs and per-run mandate copies
 pay_once.json
+examples/.run-*.toml
