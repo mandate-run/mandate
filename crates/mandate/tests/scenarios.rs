@@ -57,6 +57,7 @@ async fn run(m: &Mandate, market: &FakeMarket) -> Report {
         ledger_hint: "memory".to_owned(),
         http: &http,
         quiet: true,
+        resume: false,
     };
     execute(
         inputs,

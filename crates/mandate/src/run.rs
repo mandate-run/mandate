@@ -31,7 +31,7 @@ use crate::mandate::{Citations, Evidence, Mandate, SellerPolicy, format_amount};
 use crate::manifest::{Capability, Listing, Manifest};
 use crate::plan::{self, Plan, PlanKind, Situation};
 use crate::publish::{FEE_CAP_TINYBAR, Published, Publisher};
-use crate::purchase::{PayError, Payer, Purchase, ReconcileError};
+use crate::purchase::{PayError, Payer, Purchase, ReconcileError, Resume, plan_recovery};
 use crate::quote::{Estimate, Quote, QuoteError, Quoter};
 use crate::receipts::{Outcome as ReceiptOutcome, Receipt};
 use crate::refusal::{Code, Refusal};
@@ -98,6 +98,18 @@ pub trait Paying {
         deadline: OffsetDateTime,
         say: &mut dyn FnMut(String),
     ) -> Result<Purchase, PayError>;
+    /// Section 6 recovery for one authorization: reconcile, then drive the
+    /// same transitions. Defaults to `settle`, which already reconciles on
+    /// every pass.
+    async fn resume_one(
+        &self,
+        ledger: &mut Ledger,
+        id: i64,
+        deadline: OffsetDateTime,
+        say: &mut dyn FnMut(String),
+    ) -> Result<Purchase, PayError> {
+        self.settle(ledger, id, deadline, say).await
+    }
 }
 
 impl Paying for Payer<'_> {
@@ -120,6 +132,16 @@ impl Paying for Payer<'_> {
         say: &mut dyn FnMut(String),
     ) -> Result<Purchase, PayError> {
         Payer::settle(self, ledger, id, deadline, say).await
+    }
+
+    async fn resume_one(
+        &self,
+        ledger: &mut Ledger,
+        id: i64,
+        deadline: OffsetDateTime,
+        say: &mut dyn FnMut(String),
+    ) -> Result<Purchase, PayError> {
+        Payer::resume_one(self, ledger, id, deadline, say).await
     }
 }
 
@@ -194,6 +216,9 @@ pub enum Status {
     Refused,
     /// `anchor_before_delivery` is set and a receipt is not on HCS: the report is withheld.
     NotAnchored,
+    /// A payment is neither settled nor failed: the exposure is still held,
+    /// section 2.7 PAYMENT_UNRESOLVED. `mandate reconcile` is the only way out.
+    Unresolved,
 }
 
 impl Status {
@@ -203,6 +228,7 @@ impl Status {
             Self::DeliveredWithFindings => 4,
             Self::Refused => 3,
             Self::NotAnchored => 5,
+            Self::Unresolved => 6,
         }
     }
 }
@@ -216,7 +242,13 @@ pub fn final_status(
     explained: bool,
     incomplete: bool,
     anchored: bool,
+    unresolved: bool,
 ) -> Status {
+    // Exposure that no record has decided outranks every other outcome: the
+    // amount is neither spent nor free until `mandate reconcile` says.
+    if unresolved {
+        return Status::Unresolved;
+    }
     if refused {
         return Status::Refused;
     }
@@ -354,6 +386,9 @@ pub struct Inputs<'a> {
     /// The client provenance checks use; unused when no sample is chosen.
     pub http: &'a reqwest::Client,
     pub quiet: bool,
+    /// Section 6: recover the authorizations this ledger already holds for
+    /// the mandate, then carry on, instead of refusing a second run.
+    pub resume: bool,
 }
 
 /// One purchase's evidence as the run holds it.
@@ -473,6 +508,7 @@ pub async fn run(
     ledger_path: &Path,
     id: Option<&str>,
     quiet: bool,
+    resume: bool,
 ) -> Result<Report, RunError> {
     let started = OffsetDateTime::now_utc();
     let mut mandate = Mandate::from_path(mandate_path, started)?;
@@ -523,6 +559,7 @@ pub async fn run(
         ledger_hint: ledger_path.display().to_string(),
         http: &http,
         quiet,
+        resume,
     };
     execute(inputs, ledger, &quoter, &payer, &publisher).await
 }
@@ -579,7 +616,13 @@ pub async fn execute<Q: Quoting, P: Paying, U: Publishing>(
         max_single_payment: mandate.constraints.max_single_payment,
         deadline: mandate.constraints.deadline,
     };
-    if ledger.mandate(&mandate.id).is_ok() && !ledger.authorizations(&mandate.id)?.is_empty() {
+    let existing = ledger
+        .mandate(&mandate.id)
+        .ok()
+        .map(|_| ledger.authorizations(&mandate.id))
+        .transpose()?
+        .unwrap_or_default();
+    if !existing.is_empty() && !inputs.resume {
         return Err(RunError::AlreadyRan(mandate.id.clone()));
     }
     ledger.insert_mandate(&row, now)?;
@@ -719,6 +762,24 @@ pub async fn execute<Q: Quoting, P: Paying, U: Publishing>(
                     ),
                 },
             )?;
+            return finish(st, inputs.hashscan, inputs.ledger_hint).await;
+        }
+    }
+
+    // Section 6: recover what the ledger already holds, before anything new
+    // is quoted or bought. A resumed authorization is never re-signed and
+    // never acquires a second payment id.
+    if !existing.is_empty() {
+        st.out.say(format!(
+            "resuming {} authorization(s) from the ledger",
+            existing.len()
+        ));
+        if let Err(e) = recover(&mut st, &existing).await {
+            match e {
+                Stop::Refused(r) => refuse(&mut st, r)?,
+                Stop::Error(e) => return Err(e),
+                Stop::Replan => {}
+            }
             return finish(st, inputs.hashscan, inputs.ledger_hint).await;
         }
     }
@@ -915,6 +976,7 @@ async fn finish<Q, P: Paying, U: Publishing>(
         st.explanation.is_some(),
         st.incomplete,
         anchored,
+        !unresolved.is_empty(),
     );
     if status == Status::NotAnchored {
         st.out.say(format!(
@@ -936,6 +998,98 @@ async fn finish<Q, P: Paying, U: Publishing>(
     st.report.brief_events_used = st.brief.as_ref().map(|b| b.events_used);
     st.report.transcript = std::mem::take(&mut st.out.lines);
     Ok(st.report)
+}
+
+/// Section 6 recovery over every authorization the ledger already holds.
+/// Each is reconciled and driven to a terminal payment state with its
+/// delivery; a recovered delivery is taken into evidence exactly as a fresh
+/// one, so the run continues through the same loop. Unresolved exposure
+/// stops the run: the amount is neither spent nor free until a record says.
+async fn recover<Q, P: Paying, U: Publishing>(
+    st: &mut State<'_, Q, P, U>,
+    existing: &[Authorization],
+) -> Result<(), Stop> {
+    let plan = plan_recovery(&st.ledger, &st.mandate.id, OffsetDateTime::now_utc())?;
+    for r in &plan {
+        let a = r.authorization();
+        st.out.say(format!(
+            "  {} {}: {} (payment {}, delivery {}, submissions {}, retrievals {})",
+            a.step,
+            a.tx_id,
+            match r {
+                Resume::Resend(_) => "resend the stored bytes",
+                Resume::Backoff(..) => "wait for the 30 s spacing",
+                Resume::AwaitRecord(_) => "wait for the record set",
+                Resume::Unresolved(_) => "unresolved: exposure kept",
+                Resume::Retrieve(_) => "retrieve with the original payment",
+                Resume::Validate(_) => "validate the stored delivery",
+            },
+            a.payment_state.as_str(),
+            a.delivery_state.as_str(),
+            a.submissions,
+            a.retrievals
+        ));
+    }
+    for a in existing {
+        if !a.needs_resume() {
+            continue;
+        }
+        st.step_no += 1;
+        let mut lines = Vec::new();
+        let purchase = st
+            .payer
+            .resume_one(
+                &mut st.ledger,
+                a.id,
+                st.mandate.constraints.deadline,
+                &mut |l| lines.push(l),
+            )
+            .await?;
+        for l in lines {
+            st.out.say(l);
+        }
+        let decimals = st.decimals();
+        record_purchase(st, purchase.clone(), decimals).await?;
+        let row = &purchase.authorization;
+        if row.payment_state == PaymentState::Unresolved {
+            return Err(Stop::Refused(Refusal {
+                code: Code::PaymentUnresolved,
+                detail: format!(
+                    "{} {}: no record by {}; exposure kept",
+                    row.step, row.tx_id, row.valid_until
+                ),
+            }));
+        }
+        if row.payment_state != PaymentState::Settled || row.delivery_state == DeliveryState::None {
+            return Err(Stop::Refused(Refusal {
+                code: Code::EvidenceInsufficient,
+                detail: format!(
+                    "{} payment {} delivery {}",
+                    row.step,
+                    row.payment_state.as_str(),
+                    row.delivery_state.as_str()
+                ),
+            }));
+        }
+        // The recovered body is evidence like any other delivery.
+        let Some(listing) = st
+            .manifest
+            .listings
+            .iter()
+            .find(|l| l.id == row.step)
+            .cloned()
+        else {
+            continue;
+        };
+        let quote: Quote = serde_json::from_str(&row.quote_json).map_err(|e| {
+            Stop::Refused(Refusal {
+                code: Code::EvidenceInsufficient,
+                detail: format!("{}: stored quote does not parse: {e}", row.step),
+            })
+        })?;
+        accept(st, &listing, &quote, &purchase).await?;
+    }
+    Ok(())
 }
 
 /// Records a terminal refusal: transcript, report, receipt.
@@ -1902,45 +2056,7 @@ async fn buy<Q, P: Paying, U: Publishing>(
         st.out.say(l);
     }
     let a = &purchase.authorization;
-    st.report.steps.push(StepReport {
-        step: st.step_no,
-        listing_id: listing.id.clone(),
-        payment_id: a.payment_id.clone(),
-        tx_id: a.tx_id.clone(),
-        amount: format_amount(a.amount, quote.decimals),
-        submissions: a.submissions,
-        retrievals: a.retrievals,
-        payment_state: a.payment_state.as_str().to_owned(),
-        delivery_state: a.delivery_state.as_str().to_owned(),
-        records: purchase.records,
-        duplicates_ignored: a.duplicates_ignored,
-        latency_ms: purchase.latency_ms,
-        consensus_timestamp: a.consensus_timestamp.clone(),
-    });
-    let outcome = match (&purchase.settlement, a.payment_state) {
-        (Settlement::Settled { .. }, _) => ReceiptOutcome::Paid,
-        (Settlement::Failed { .. } | Settlement::Anomaly { .. }, _) => ReceiptOutcome::Failed,
-        (Settlement::Absent { .. }, _) => ReceiptOutcome::Unresolved,
-    };
-    let reason = match &purchase.settlement {
-        Settlement::Failed { results, .. } => Some(results.join(",")),
-        Settlement::Anomaly { results, .. } => Some(format!("anomaly {}", results.join(","))),
-        Settlement::Absent { .. } => Some("no record".to_owned()),
-        Settlement::Settled { .. } if a.delivery_state == DeliveryState::None => {
-            Some("settled without delivery".to_owned())
-        }
-        Settlement::Settled { .. } => None,
-    };
-    let receipt = purchase_receipt(st, a, outcome, purchase.latency_ms, reason);
-    st.ledger
-        .append_receipt(&st.mandate.id, &receipt)
-        .map_err(RunError::from)?;
-    publish(st).await?;
-    if a.payment_state == PaymentState::Failed && a.delivery_state != DeliveryState::None {
-        st.report
-            .anomalies
-            .push(format!("unpaid_delivery {} {}", listing.id, a.tx_id));
-    }
+    record_purchase(st, purchase.clone(), quote.decimals).await?;
     if a.payment_state != PaymentState::Settled || a.delivery_state == DeliveryState::None {
         return Err(Stop::Refused(Refusal {
             code: if a.payment_state == PaymentState::Unresolved {
@@ -1957,6 +2073,55 @@ async fn buy<Q, P: Paying, U: Publishing>(
         }));
     }
     Ok(purchase)
+}
+
+/// The step row, the receipt and the anomaly note every settled or failed
+/// purchase leaves behind, whether it was bought this run or recovered from
+/// the ledger. Exactly one receipt per terminal transition.
+async fn record_purchase<Q, P, U: Publishing>(
+    st: &mut State<'_, Q, P, U>,
+    purchase: Purchase,
+    decimals: u32,
+) -> Result<(), RunError> {
+    let a = &purchase.authorization;
+    st.report.steps.push(StepReport {
+        step: st.step_no,
+        listing_id: a.step.clone(),
+        payment_id: a.payment_id.clone(),
+        tx_id: a.tx_id.clone(),
+        amount: format_amount(a.amount, decimals),
+        submissions: a.submissions,
+        retrievals: a.retrievals,
+        payment_state: a.payment_state.as_str().to_owned(),
+        delivery_state: a.delivery_state.as_str().to_owned(),
+        records: purchase.records,
+        duplicates_ignored: a.duplicates_ignored,
+        latency_ms: purchase.latency_ms,
+        consensus_timestamp: a.consensus_timestamp.clone(),
+    });
+    let outcome = match &purchase.settlement {
+        Settlement::Settled { .. } => ReceiptOutcome::Paid,
+        Settlement::Failed { .. } | Settlement::Anomaly { .. } => ReceiptOutcome::Failed,
+        Settlement::Absent { .. } => ReceiptOutcome::Unresolved,
+    };
+    let reason = match &purchase.settlement {
+        Settlement::Failed { results, .. } => Some(results.join(",")),
+        Settlement::Anomaly { results, .. } => Some(format!("anomaly {}", results.join(","))),
+        Settlement::Absent { .. } => Some("no record".to_owned()),
+        Settlement::Settled { .. } if a.delivery_state == DeliveryState::None => {
+            Some("settled without delivery".to_owned())
+        }
+        Settlement::Settled { .. } => None,
+    };
+    let receipt = purchase_receipt(st, a, outcome, purchase.latency_ms, reason);
+    st.ledger.append_receipt(&st.mandate.id, &receipt)?;
+    publish(st).await?;
+    if a.payment_state == PaymentState::Failed && a.delivery_state != DeliveryState::None {
+        st.report
+            .anomalies
+            .push(format!("unpaid_delivery {} {}", a.step, a.tx_id));
+    }
+    Ok(())
 }
 
 fn purchase_receipt<Q, P, U>(
@@ -2040,37 +2205,61 @@ mod tests {
     fn a_refusal_is_terminal_and_a_delivery_needs_the_explanation() {
         let ok = validation(true, true);
         assert_eq!(
-            final_status(true, Some(&ok), false, false, true),
+            final_status(true, Some(&ok), false, false, true, false),
             Status::Refused
         );
         assert_eq!(
-            final_status(false, Some(&ok), false, false, true),
+            final_status(false, Some(&ok), false, false, true, false),
             Status::DeliveredWithFindings
         );
         assert_eq!(
-            final_status(false, Some(&ok), true, false, true),
+            final_status(false, Some(&ok), true, false, true, false),
             Status::Delivered
         );
         assert_eq!(
-            final_status(false, Some(&validation(false, true)), true, false, true),
+            final_status(
+                false,
+                Some(&validation(false, true)),
+                true,
+                false,
+                true,
+                false
+            ),
             Status::DeliveredWithFindings
         );
         assert_eq!(
-            final_status(false, Some(&validation(true, false)), true, false, true),
+            final_status(
+                false,
+                Some(&validation(true, false)),
+                true,
+                false,
+                true,
+                false
+            ),
             Status::DeliveredWithFindings
         );
         assert_eq!(
-            final_status(false, Some(&ok), true, true, true),
+            final_status(false, Some(&ok), true, true, true, false),
             Status::DeliveredWithFindings
         );
         assert_eq!(
-            final_status(false, None, false, false, true),
+            final_status(false, None, false, false, true, false),
             Status::DeliveredWithFindings
         );
         assert_eq!(
-            final_status(false, Some(&ok), true, false, false),
+            final_status(false, Some(&ok), true, false, false, false),
             Status::NotAnchored
         );
+        // Unresolved exposure outranks a refusal and a delivery alike.
+        assert_eq!(
+            final_status(true, Some(&ok), true, false, true, true),
+            Status::Unresolved
+        );
+        assert_eq!(
+            final_status(false, Some(&ok), true, false, true, true),
+            Status::Unresolved
+        );
+        assert_eq!(Status::Unresolved.exit_code(), 6);
         assert_eq!(Status::NotAnchored.exit_code(), 5);
         assert_eq!(Status::Refused.exit_code(), 3);
     }
