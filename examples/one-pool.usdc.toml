@@ -1,0 +1,36 @@
+[mandate]
+principal = "0.0.10399984"
+purpose = "Explain any material liquidity change in the listed pool over the last 24 hours."
+coverage = "all_material"
+
+[mandate.budget]
+service = { total = "0.0100", asset = "0.0.429274" }
+audit = { total = "0.5", asset = "HBAR" }
+reserve_completion = true
+
+[mandate.constraints]
+networks = ["hedera:testnet"]
+facilitator = "https://api.testnet.blocky402.com/"
+manifest = { path = "manifest.usdc.json", hash = "50c4cb50c38381469e19a36fac927136266f6f51da09383b8f67edbe3d7367d4" }
+sellers = "allowlist"
+allowlist = ["mandate-sellers"]
+max_single_payment = "0.0090"
+deadline = 2026-09-13T16:00:00Z
+eth_rpc = "https://ethereum-rpc.publicnode.com"
+
+[mandate.requirements]
+evidence = "transaction"
+citations = "required"
+max_data_age_s = 3600
+provenance_samples = 3
+degrade = false
+
+[mandate.duties]
+receipts_topic = "0.0.10410389"
+report_refusals = true
+
+[mandate.inputs]
+pools = ["0x4585fe77225b41b697c938b018e2ac67ac5a20c0"]
+window_h = 24
+materiality = "0.05"
+min_event_usd = "100000"
