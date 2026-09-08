@@ -276,8 +276,13 @@ fn is_hex(s: &str, len: usize) -> bool {
     s.len() == len && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// An absolute http(s) URL with a host.
 fn is_url(s: &str) -> bool {
-    s.starts_with("https://") || s.starts_with("http://")
+    url::Url::parse(s)
+        .map(|u| {
+            matches!(u.scheme(), "http" | "https") && u.host_str().is_some_and(|h| !h.is_empty())
+        })
+        .unwrap_or(false)
 }
 
 fn is_decimal(s: &str) -> bool {
@@ -376,11 +381,8 @@ impl Mandate {
         };
         let max_single_payment = parse_amount(&c.max_single_payment, service_decimals)
             .map_err(|e| bad("constraints.max_single_payment", e))?;
-        if max_single_payment <= 0 || max_single_payment > service_total {
-            return Err(bad(
-                "constraints.max_single_payment",
-                "must be positive and at most budget.service.total",
-            ));
+        if max_single_payment <= 0 {
+            return Err(bad("constraints.max_single_payment", "must be positive"));
         }
         let deadline_text = match &c.deadline {
             When::Date(d) => d.to_string(),
@@ -674,9 +676,23 @@ min_event_usd = "100000"
         assert_eq!(
             field_of(with(
                 "max_single_payment = \"0.0090\"",
-                "max_single_payment = \"0.0200\""
+                "max_single_payment = \"0\""
             )),
             "constraints.max_single_payment"
+        );
+        assert_eq!(
+            field_of(with(
+                "eth_rpc = \"https://ethereum-rpc.publicnode.com\"",
+                "eth_rpc = \"https://\""
+            )),
+            "constraints.eth_rpc"
+        );
+        assert_eq!(
+            field_of(with(
+                "facilitator = \"https://api.testnet.blocky402.com/\"",
+                "facilitator = \"ftp://api.testnet.blocky402.com\""
+            )),
+            "constraints.facilitator"
         );
         assert_eq!(
             field_of(with(
@@ -747,6 +763,21 @@ min_event_usd = "100000"
             Mandate::from_toml("not toml", NOW),
             Err(MandateError::Toml(_))
         ));
+    }
+
+    #[test]
+    fn a_payment_cap_above_the_budget_is_allowed() {
+        // Scenario 3: service 0.0030 with a 0.0090 cap must reach planning and
+        // be refused there, not at load.
+        let m = with(
+            "service = { total = \"0.0100\"",
+            "service = { total = \"0.0030\"",
+        )
+        .unwrap();
+        assert_eq!(
+            (m.budget.service_total, m.constraints.max_single_payment),
+            (3_000, 9_000)
+        );
     }
 
     #[test]
