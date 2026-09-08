@@ -68,7 +68,7 @@ The tariff is a price ceiling. For `n` units, `n <= max_units`, the ceiling is `
 
 ### 2.3 Quote
 
-From one 402 response: `listing_id, amount, asset, network, pay_to, fee_payer, max_timeout_s, received_at, ceiling, within_tariff, listing_match, fee_payer_ok`, plus Mandate's own request binding `method, url, body_hash`, which is local metadata and not part of x402 `ResourceInfo`. `listing_match` is true only when network, asset, `pay_to` and URL all equal the pinned listing. A quote is used only within `received_at + max_timeout_s`; `maxTimeoutSeconds` is the payment completion window, so this is a conservative heuristic, not a seller commitment.
+From one 402 response: `listing_id, amount, asset, network, pay_to, fee_payer, max_timeout_s, received_at, ceiling, within_tariff, listing_match, fee_payer_ok`, plus Mandate's own request binding `method, url, body_hash`, which is local metadata and not part of x402 `ResourceInfo`. `listing_match` is true only when network, asset, `pay_to` and URL all equal the pinned listing. A quote is used only within `received_at + min(max_timeout_s, 120 s)`; `maxTimeoutSeconds` is the payment completion window and stays on the wire requirement, so this is a conservative heuristic, not a seller commitment. The runtime quotes only listings on its own network and only responses with `x402Version` 2.
 
 ### 2.4 Reservation
 
