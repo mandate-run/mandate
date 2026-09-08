@@ -82,8 +82,55 @@ async fn run_with(m: &Mandate, market: &FakeMarket, ledger: Ledger, resume: bool
         .expect("run completes")
 }
 
-/// Scenario 5: the seller settles and drops the response to every
-/// submission; the retrieval with the original payment recovers the result.
+/// The general requirement: whatever the mirror node's timing, the original
+/// payment is reused, submissions never exceed three, and the retrieval
+/// happens as soon as settlement is known. Here the record appears at once,
+/// so one submission and one retrieval suffice.
+#[tokio::test]
+async fn a_lost_response_never_pays_twice_whatever_the_timing() {
+    let mut market = FakeMarket::new(vec![POOLS[1].to_owned()]);
+    market.drop_responses.insert("events".to_owned(), 1);
+    let scratch = Scratch::new("lost-fast");
+    let m = mandate("lost-fast");
+    let r = run_with(&m, &market, scratch.ledger(), false).await;
+    assert_eq!(r.status, Status::Delivered, "{:?}", r.transcript);
+
+    let events = r.steps.iter().find(|s| s.listing_id == "events").unwrap();
+    assert!(
+        events.submissions <= 3,
+        "I8's cap holds: {}",
+        events.submissions
+    );
+    assert_eq!(
+        events.retrievals, 1,
+        "settlement known, so retrieve at once"
+    );
+    assert_eq!(events.delivery_state, "received");
+    let sent: std::collections::BTreeSet<String> = market
+        .transmissions
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(step, _)| step == "events")
+        .map(|(_, sig)| sig.clone())
+        .collect();
+    assert_eq!(sent.len(), 1, "one signed payload throughout");
+    assert_eq!(
+        scratch
+            .ledger()
+            .authorizations("lost-fast")
+            .unwrap()
+            .iter()
+            .filter(|a| a.step == "events")
+            .count(),
+        1,
+        "one authorization, I6"
+    );
+}
+
+/// Scenario 5 with a delayed record: the seller settles and drops the
+/// response, and the record lags, so the buyer exhausts I8's three
+/// submissions before the retrieval recovers the result.
 #[tokio::test]
 async fn lost_response_is_recovered_by_one_retrieval() {
     let mut market = FakeMarket::new(vec![POOLS[1].to_owned()]);
@@ -309,4 +356,136 @@ async fn a_crash_after_a_delivery_keeps_the_evidence() {
     assert!(v.passed && v.complete, "{:?}", v.failures);
     assert!(r.explanation.is_some());
     assert_eq!(r.totals.as_ref().unwrap().outstanding, "0.000000");
+}
+
+// The review's probes, as tests. Each asserts what the ledger holds after a
+// second run, because that is where double spending would show.
+
+/// Resuming a run that already finished buys nothing and reports the same
+/// thing again. The evidence is restored from the ledger, not repurchased.
+#[tokio::test]
+async fn resuming_a_finished_run_buys_nothing() {
+    let market = FakeMarket::new(vec![POOLS[1].to_owned()]);
+    let scratch = Scratch::new("resume-complete");
+    let m = mandate("resume-complete");
+
+    let first = run_with(&m, &market, scratch.ledger(), false).await;
+    assert_eq!(first.status, Status::Delivered, "{:?}", first.transcript);
+    let bought = market.authorized.lock().unwrap().len();
+    assert_eq!(bought, 3, "screen, events, explain");
+    let receipts_before = first.receipts.len();
+
+    let second = run_with(&m, &market, scratch.ledger(), true).await;
+    assert_eq!(second.status, Status::Delivered, "{:?}", second.transcript);
+    assert_eq!(
+        market.authorized.lock().unwrap().len(),
+        bought,
+        "a finished run authorizes nothing on resume"
+    );
+    let ledger = scratch.ledger();
+    assert_eq!(
+        ledger.authorizations("resume-complete").unwrap().len(),
+        3,
+        "no purchase was made twice"
+    );
+    // The report is whole again, from the ledger alone.
+    let v = second.validation.as_ref().unwrap();
+    assert!(v.passed && v.complete, "{:?}", v.failures);
+    assert_eq!(second.outcomes.len(), 2);
+    assert!(second.explanation.is_some(), "the explanation was restored");
+    assert_eq!(
+        second.receipts.len(),
+        receipts_before,
+        "no receipt was written twice"
+    );
+    assert_eq!(
+        second
+            .receipts
+            .iter()
+            .filter(|r| r.outcome == "start")
+            .count(),
+        1,
+        "one start receipt for the run"
+    );
+    assert_eq!(
+        second.totals.as_ref().unwrap().settled,
+        first.totals.as_ref().unwrap().settled
+    );
+}
+
+/// A crash after the final response is persisted: the resumed run validates
+/// what it already paid for and buys no second explanation.
+#[tokio::test]
+async fn a_crash_after_the_last_response_buys_no_second_explanation() {
+    let market = FakeMarket::new(vec![POOLS[1].to_owned()]);
+    let scratch = Scratch::new("crash-final");
+    let m = mandate("crash-final");
+    // Stop once all three purchases exist, with the last body persisted.
+    crash_after(&scratch, &m, &market, 3).await;
+
+    let before = scratch.ledger().authorizations("crash-final").unwrap();
+    assert_eq!(before.len(), 3);
+
+    let r = run_with(&m, &market, scratch.ledger(), true).await;
+    assert_eq!(r.status, Status::Delivered, "{:?}", r.transcript);
+    let after = scratch.ledger().authorizations("crash-final").unwrap();
+    assert_eq!(after.len(), 3, "no fourth authorization");
+    assert_eq!(
+        after.iter().filter(|a| a.step == "explain").count(),
+        1,
+        "the explanation was never bought twice"
+    );
+    assert!(r.explanation.is_some());
+    assert_eq!(r.totals.as_ref().unwrap().outstanding, "0.000000");
+}
+
+/// A crash leaves the completion hold in the ledger. The resumed run adopts
+/// it rather than holding a second time, and completion leaves nothing held.
+#[tokio::test]
+async fn a_resumed_run_adopts_the_completion_reserve() {
+    let market = FakeMarket::new(vec![POOLS[1].to_owned()]);
+    let scratch = Scratch::new("reserve");
+    let m = mandate("reserve");
+    crash_after(&scratch, &m, &market, 1).await;
+
+    // The interrupted run held the explanation reserve.
+    let held = scratch.ledger().accounts("reserve").unwrap().held;
+    assert!(held > 0, "the crash left a completion hold");
+
+    let r = run_with(&m, &market, scratch.ledger(), true).await;
+    assert_eq!(r.status, Status::Delivered, "{:?}", r.transcript);
+    assert!(
+        r.transcript
+            .iter()
+            .any(|l| l.contains("adopting the completion reserve")),
+        "{:?}",
+        r.transcript
+    );
+    assert_eq!(
+        r.totals.as_ref().unwrap().held,
+        "0.000000",
+        "completion leaves nothing held"
+    );
+    let accounts = scratch.ledger().accounts("reserve").unwrap();
+    assert_eq!(accounts.held, 0, "the budget is not stranded");
+}
+
+/// The window is the task: a resume restores the one the purchases were made
+/// for, whatever the clock says now.
+#[tokio::test]
+async fn a_resume_keeps_the_original_window() {
+    let market = FakeMarket::new(vec![POOLS[1].to_owned()]);
+    let scratch = Scratch::new("window");
+    let m = mandate("window");
+    crash_after(&scratch, &m, &market, 1).await;
+    let stored = scratch.ledger().mandate("window").unwrap().window;
+    assert!(stored.1 > stored.0, "the window was persisted");
+
+    let r = run_with(&m, &market, scratch.ledger(), true).await;
+    assert_eq!(
+        (r.window.from, r.window.to),
+        stored,
+        "the resumed run investigates the window it already paid for"
+    );
+    assert_eq!(r.status, Status::Delivered, "{:?}", r.transcript);
 }
