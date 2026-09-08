@@ -1,2 +1,61 @@
-// Listing explain: prose from a bounded brief of claims the runtime computed. Only module that holds a model key.
-export {};
+// Listing explain: prose from a bounded brief of claims the buyer computed.
+// The only module that holds a model key. The model may use nothing but the
+// brief; the buyer checks every number in the prose against it.
+
+export interface Explanation {
+  prose: string;
+  model: string;
+  input_bytes: number;
+}
+
+export type Explainer = (brief: Record<string, unknown>) => Promise<Explanation>;
+
+export const DEFAULT_MODEL = "claude-sonnet-5";
+
+const SYSTEM = [
+  "You explain DeFi liquidity findings to an analyst.",
+  "You receive a brief: per-pool outcomes, claims with their values and evidence, and supporting events.",
+  "Write at most 200 words of plain prose.",
+  "Use only numbers, addresses and transaction hashes that appear in the brief, copied exactly.",
+  "Do not add figures, estimates, causes or advice. If the brief holds no material pool, say so.",
+].join(" ");
+
+/** The Anthropic Messages API over fetch. */
+export function anthropicExplainer(apiKey: string, model = DEFAULT_MODEL, fetchImpl: typeof fetch = fetch): Explainer {
+  return async (brief) => {
+    const input = JSON.stringify(brief);
+    const response = await fetchImpl("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 600,
+        system: SYSTEM,
+        messages: [{ role: "user", content: `Brief:\n${input}` }],
+      }),
+    });
+    if (!response.ok) throw new Error(`model api answered ${response.status}`);
+    const json = (await response.json()) as { content?: { type: string; text?: string }[] };
+    const prose = (json.content ?? [])
+      .filter((c) => c.type === "text" && typeof c.text === "string")
+      .map((c) => c.text as string)
+      .join("\n")
+      .trim();
+    if (prose === "") throw new Error("model returned no text");
+    return { prose, model, input_bytes: Buffer.byteLength(input) };
+  };
+}
+
+/** For runs without a key: a fixed sentence built only from the brief's outcomes. */
+export function templateExplainer(): Explainer {
+  return async (brief) => {
+    const outcomes = Array.isArray(brief["outcomes"]) ? (brief["outcomes"] as { pool?: string; outcome?: string }[]) : [];
+    const lines = outcomes.map((o) => `Pool ${o.pool ?? "?"} is ${o.outcome ?? "?"}.`);
+    const prose = lines.length > 0 ? lines.join(" ") : "The brief holds no pool outcomes.";
+    return { prose, model: "template", input_bytes: Buffer.byteLength(JSON.stringify(brief)) };
+  };
+}

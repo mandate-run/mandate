@@ -12,7 +12,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "tsc -p tsconfig.test.json && node --import tsx --test 'src/**/*.test.ts'",
-    "facts": "tsx src/facts.ts"
+    "facts": "tsx src/facts.ts",
+    "sellers": "tsx src/sellers.ts",
+    "spike": "tsx src/spike.ts"
   },
   "dependencies": {
     "@x402/core": "2.25.0",
