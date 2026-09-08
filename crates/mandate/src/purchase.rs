@@ -112,6 +112,47 @@ pub async fn reconcile(
         let records = mirror.records(&a.mirror_id).await?;
         let settlement = hedera::settlement(&records, &expected);
         let after = ledger.record_settlement(a.id, &settlement, now)?;
+        // A late resolution is an event of its own. The `unresolved` receipt
+        // stands as the record of what was known then; this one records what
+        // the ledger decided, so the audit trail shows both.
+        if after.payment_state != a.payment_state && after.payment_state.is_terminal() {
+            let outcome = match after.payment_state {
+                PaymentState::Settled => crate::receipts::Outcome::Paid,
+                _ => crate::receipts::Outcome::Failed,
+            };
+            let receipt = crate::receipts::Receipt {
+                seq: 0,
+                mandate_id: mandate_id.to_owned(),
+                outcome,
+                at: now
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default(),
+                step: None,
+                listing_id: Some(a.step.clone()),
+                seller: None,
+                amount: Some(a.amount.to_string()),
+                asset: Some(a.asset.clone()),
+                tx_id: Some(a.tx_id.clone()),
+                payment_id_hash: Some(crate::x402::sha256_hex(a.payment_id.as_bytes())),
+                request_hash: Some(a.request.hash()),
+                response_hash: a.response_hash.clone(),
+                reason: Some(format!(
+                    "reconciled {} to {}",
+                    a.payment_state.as_str(),
+                    after.payment_state.as_str()
+                )),
+                latency_ms: None,
+                mandate_hash: None,
+                manifest_hash: None,
+                spec_version: None,
+            };
+            let key = format!(
+                "{}:reconciled:{}",
+                a.payment_id,
+                after.payment_state.as_str()
+            );
+            ledger.append_receipt_once(mandate_id, &receipt, Some(&key))?;
+        }
         out.push(Reconciled {
             id: a.id,
             tx_id: a.tx_id.clone(),
@@ -632,7 +673,20 @@ impl Payer<'_> {
             a.payment_state.as_str(),
             a.delivery_state.as_str()
         ));
-        self.settle(ledger, id, deadline, say).await
+        // The row may already be complete, in which case `settle` transmits
+        // nothing and has no settlement of its own to report. What this
+        // reconciliation just observed is the truth, so it is what the
+        // caller receives; a receipt must never call a settled payment
+        // unresolved because a later pass saw no records.
+        let purchase = self.settle(ledger, id, deadline, say).await?;
+        if purchase.records == 0 && !records.is_empty() {
+            return Ok(Purchase {
+                settlement,
+                records: records.len(),
+                ..purchase
+            });
+        }
+        Ok(purchase)
     }
 
     /// One transmission of the stored request. Never re-signs, never follows redirects.
