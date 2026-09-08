@@ -10,6 +10,8 @@ pub mod plan;
 pub mod purchase;
 pub mod quote;
 pub mod receipts;
+#[doc(hidden)]
+pub mod testing;
 pub mod transcript;
 pub mod validate;
 pub mod x402;
