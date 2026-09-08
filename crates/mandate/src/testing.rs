@@ -37,6 +37,7 @@ pub fn mandate_row() -> MandateRow {
         audit_total: 50_000_000,
         max_single_payment: 9_000,
         deadline: time::macros::datetime!(2026-09-13 16:00 UTC),
+        window: (FROM, TO),
     }
 }
 
