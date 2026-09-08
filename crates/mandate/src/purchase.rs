@@ -318,6 +318,9 @@ pub enum PayError {
     QuoteExpired(String),
     #[error("the mirror node listed no consensus nodes")]
     NoNodes,
+    /// A test-only crash point, never reachable in a real run.
+    #[error("stopped at a test crash point")]
+    Crashed,
 }
 
 /// What one purchase ended as. The authorization row is the record; the body
@@ -598,6 +601,38 @@ impl Payer<'_> {
             latency_ms,
             records,
         })
+    }
+
+    /// Section 6 recovery for one authorization: reconcile first, so a
+    /// settlement observed before any HTTP response is applied, then drive
+    /// the same loop `settle` uses. The stored bytes and payment id are
+    /// reused; nothing is re-signed and no second authorization is taken.
+    pub async fn resume_one(
+        &self,
+        ledger: &mut Ledger,
+        id: i64,
+        deadline: OffsetDateTime,
+        say: Say<'_>,
+    ) -> Result<Purchase, PayError> {
+        let a = ledger.authorization(id)?;
+        let expected = Expected {
+            asset: Asset::parse(&a.asset)?,
+            from: a.payer.parse().map_err(hedera::Error::from)?,
+            to: a.pay_to.parse().map_err(hedera::Error::from)?,
+            amount: a.amount,
+        };
+        let records = self.mirror.records(&a.mirror_id).await?;
+        let settlement = hedera::settlement(&records, &expected);
+        let a = ledger.record_settlement(a.id, &settlement, OffsetDateTime::now_utc())?;
+        say(format!(
+            "{} {}: reconciled {} record(s) before resuming; payment {} delivery {}",
+            a.step,
+            a.tx_id,
+            records.len(),
+            a.payment_state.as_str(),
+            a.delivery_state.as_str()
+        ));
+        self.settle(ledger, id, deadline, say).await
     }
 
     /// One transmission of the stored request. Never re-signs, never follows redirects.
