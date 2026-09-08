@@ -33,6 +33,7 @@ import { FAULT_DROP_RESPONSE } from "./faults.js";
 import { Claims, type ResultStore, replayMiddleware, transactionHashOf } from "./idempotency.js";
 import { type Journal, type Source, sha256Hex } from "./journal.js";
 import { RequestError } from "./requests.js";
+import { TariffError } from "./tariffs.js";
 
 export const USDC_TESTNET = "0.0.429274";
 /** The asset id the x402 Hedera scheme uses for HBAR. */
@@ -138,6 +139,8 @@ export function createSeller(cfg: SellerConfig, listings: Listing[]): Express {
 
   const app = express();
   app.disable("x-powered-by");
+  app.set("case sensitive routing", true);
+  app.set("strict routing", true);
   if (cfg.manifest !== undefined) {
     const manifest = cfg.manifest;
     app.get("/manifest.json", (_req, res) => {
@@ -147,8 +150,10 @@ export function createSeller(cfg: SellerConfig, listings: Listing[]): Express {
   app.use(capture(cfg, faults, attempts));
   app.use(express.raw({ type: () => true, limit: "1mb" }));
   app.use(bodyHash());
-  app.use(pricing(listings));
+  // Replay before pricing: a stored result is served, and a conflict refused,
+  // under the terms that were paid, whatever the tariff says today.
   app.use(replayMiddleware(cfg.store, claims));
+  app.use(pricing(listings));
   app.use(paymentMiddleware(routes, server, undefined, undefined, cfg.syncFacilitatorOnStart ?? true));
   for (const listing of listings) {
     if ((listing.method ?? "GET") === "GET") app.get(listing.path, listing.handler);
@@ -158,14 +163,22 @@ export function createSeller(cfg: SellerConfig, listings: Listing[]): Express {
 }
 
 /**
- * Validates and prices the request before anything else sees it. A
- * `RequestError` is a 400 with no 402 and no work; anything else runs the
- * rest of the chain inside the priced context.
+ * Validates and prices a new purchase before the payment layer sees it. A
+ * `RequestError` or `TariffError` is a 400 with no 402 and no work. Paths
+ * are matched exactly; a case or trailing-slash variant of a listing path
+ * is refused with 404 rather than reaching the payment layer unpriced.
  */
 function pricing(listings: Listing[]): RequestHandler {
+  const canonical = (path: string) => path.toLowerCase().replace(/\/+$/, "");
   return (req: Request, res: Response, next: NextFunction) => {
     const listing = listings.find((l) => l.path === req.path && (l.method ?? "GET") === req.method);
     if (listing === undefined) {
+      const variant = listings.find((l) => canonical(l.path) === canonical(req.path));
+      if (variant !== undefined) {
+        res.locals.source = "rejected";
+        res.status(404).json({ error: `no such path; the listing is ${variant.method ?? "GET"} ${variant.path}` });
+        return;
+      }
       next();
       return;
     }
@@ -173,9 +186,9 @@ function pricing(listings: Listing[]): RequestHandler {
     try {
       amount = listing.price(req.body, (res.locals.bodyBytes as number | undefined) ?? 0);
     } catch (err) {
-      if (err instanceof RequestError) {
+      if (err instanceof RequestError || err instanceof TariffError) {
         res.locals.source = "rejected";
-        res.status(err.status).json({ error: err.message });
+        res.status(400).json({ error: err.message });
         return;
       }
       throw err;
