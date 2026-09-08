@@ -582,10 +582,19 @@ pub async fn execute<Q: Quoting, P: Paying, U: Publishing>(
         .iter()
         .map(|p| p.to_lowercase())
         .collect();
-    let to = now.unix_timestamp() as u64 / 3600 * 3600;
-    let window = Window {
-        from: to - u64::from(mandate.inputs.window_h) * 3600,
-        to,
+    // The window is the task. A first run fixes it from the clock, hour
+    // aligned; a resume restores what the ledger holds, so evidence already
+    // bought is never judged against a window that moved under it.
+    let stored = ledger.mandate(&mandate.id).ok().map(|m| m.window);
+    let window = match stored {
+        Some((from, to)) if inputs.resume && to > from => Window { from, to },
+        _ => {
+            let to = now.unix_timestamp() as u64 / 3600 * 3600;
+            Window {
+                from: to - u64::from(mandate.inputs.window_h) * 3600,
+                to,
+            }
+        }
     };
 
     // Section 4 step 1: listings outside the constraints are never contacted.
@@ -615,6 +624,7 @@ pub async fn execute<Q: Quoting, P: Paying, U: Publishing>(
         audit_total: mandate.budget.audit_total,
         max_single_payment: mandate.constraints.max_single_payment,
         deadline: mandate.constraints.deadline,
+        window: (window.from, window.to),
     };
     let existing = ledger
         .mandate(&mandate.id)
@@ -739,7 +749,8 @@ pub async fn execute<Q: Quoting, P: Paying, U: Publishing>(
     // Receipt 0, durable then published. When delivery must be anchored and
     // receipt 0 cannot be, nothing is bought.
     let r0 = Receipt::start(&mandate.id, &mandate.hash, &manifest.hash, &now_rfc3339());
-    st.ledger.append_receipt(&mandate.id, &r0)?;
+    st.ledger
+        .append_receipt_once(&mandate.id, &r0, Some("start"))?;
     publish(&mut st).await?;
     if mandate.duties.anchor_before_delivery {
         for _ in 1..ANCHOR_ATTEMPTS {
@@ -769,27 +780,40 @@ pub async fn execute<Q: Quoting, P: Paying, U: Publishing>(
     // Section 6: recover what the ledger already holds, before anything new
     // is quoted or bought. A resumed authorization is never re-signed and
     // never acquires a second payment id.
+    let mut complete = false;
     if !existing.is_empty() {
         st.out.say(format!(
             "resuming {} authorization(s) from the ledger",
             existing.len()
         ));
-        if let Err(e) = recover(&mut st, &existing).await {
-            match e {
-                Stop::Refused(r) => refuse(&mut st, r)?,
-                Stop::Error(e) => return Err(e),
-                Stop::Replan => {}
+        match recover(&mut st, &existing).await {
+            // The recovered job already holds its final deliverable: it goes
+            // straight to validation, never back into planning.
+            Ok(true) => {
+                st.out
+                    .say("recovery complete: the report was already bought".to_owned());
+                complete = true;
             }
-            return finish(st, inputs.hashscan, inputs.ledger_hint).await;
+            Ok(false) => {}
+            Err(e) => {
+                match e {
+                    Stop::Refused(r) => refuse(&mut st, r)?,
+                    Stop::Error(e) => return Err(e),
+                    Stop::Replan => {}
+                }
+                return finish(st, inputs.hashscan, inputs.ledger_hint).await;
+            }
         }
     }
 
     // Sections 4 to 8: the decision loop.
-    match drive(&mut st).await {
-        Ok(()) => {}
-        Err(Stop::Refused(r)) => refuse(&mut st, r)?,
-        Err(Stop::Replan) => {}
-        Err(Stop::Error(e)) => return Err(e),
+    if !complete {
+        match drive(&mut st).await {
+            Ok(()) => {}
+            Err(Stop::Refused(r)) => refuse(&mut st, r)?,
+            Err(Stop::Replan) => {}
+            Err(Stop::Error(e)) => return Err(e),
+        }
     }
 
     // Section 9 over R, when anything was delivered and accepted.
@@ -855,7 +879,8 @@ pub async fn execute<Q: Quoting, P: Paying, U: Publishing>(
                     .mark_rejected(a.id, &reason, OffsetDateTime::now_utc())?;
                 let mut r = purchase_receipt(&st, a, ReceiptOutcome::Failed, None, None);
                 r.reason = Some(format!("validation {reason}"));
-                st.ledger.append_receipt(&mandate.id, &r)?;
+                let key = format!("{}:rejected", a.payment_id);
+                st.ledger.append_receipt_once(&mandate.id, &r, Some(&key))?;
             }
         }
         if !v.complete || st.incomplete {
@@ -1008,7 +1033,7 @@ async fn finish<Q, P: Paying, U: Publishing>(
 async fn recover<Q, P: Paying, U: Publishing>(
     st: &mut State<'_, Q, P, U>,
     existing: &[Authorization],
-) -> Result<(), Stop> {
+) -> Result<bool, Stop> {
     let plan = plan_recovery(&st.ledger, &st.mandate.id, OffsetDateTime::now_utc())?;
     for r in &plan {
         let a = r.authorization();
@@ -1030,8 +1055,31 @@ async fn recover<Q, P: Paying, U: Publishing>(
             a.retrievals
         ));
     }
+    // An interrupted run may have left a completion hold; adopt it rather
+    // than holding a second time and stranding the first.
+    if let Some(r) = st
+        .ledger
+        .held_reservations(&st.mandate.id)?
+        .into_iter()
+        .next()
+    {
+        st.out.say(format!(
+            "adopting the completion reserve for {}: {}",
+            r.step,
+            format_amount(r.amount, st.decimals())
+        ));
+        st.reservation = Some((r.id, r.amount, r.step));
+    }
+    let mut complete = false;
     for a in existing {
+        // A delivery already accepted is evidence, not work: restore it so
+        // the run knows what it owns before it plans anything else.
         if !a.needs_resume() {
+            if a.delivery_state == DeliveryState::Validated
+                || a.delivery_state == DeliveryState::Received
+            {
+                complete |= restore(st, a).await?;
+            }
             continue;
         }
         st.step_no += 1;
@@ -1087,9 +1135,62 @@ async fn recover<Q, P: Paying, U: Publishing>(
                 detail: format!("{}: stored quote does not parse: {e}", row.step),
             })
         })?;
-        accept(st, &listing, &quote, &purchase).await?;
+        let _ = listing;
+        let l = quote_listing_of(st, &row.step)?;
+        complete |= accept(st, &l, &quote, &purchase).await?;
     }
-    Ok(())
+    Ok(complete)
+}
+
+/// The listing a stored step names, still in the pinned manifest.
+fn quote_listing_of<Q, P, U>(st: &State<'_, Q, P, U>, step: &str) -> Result<Listing, Stop> {
+    st.manifest
+        .listings
+        .iter()
+        .find(|l| l.id == step)
+        .cloned()
+        .ok_or_else(|| {
+            Stop::Refused(Refusal {
+                code: Code::OutsideConstraints,
+                detail: format!("{step}: the purchase's listing is not in the pinned manifest"),
+            })
+        })
+}
+
+/// Takes a delivery the ledger already holds back into runtime state: the
+/// body it paid for, and the explanation when that was the final step. The
+/// stored response is authoritative, so nothing is fetched or bought again.
+async fn restore<Q, P, U: Publishing>(
+    st: &mut State<'_, Q, P, U>,
+    a: &Authorization,
+) -> Result<bool, Stop> {
+    let Some(body) = a.response_body.clone() else {
+        return Ok(false);
+    };
+    let listing = quote_listing_of(st, &a.step)?;
+    let quote: Quote = serde_json::from_str(&a.quote_json).map_err(|e| {
+        Stop::Refused(Refusal {
+            code: Code::EvidenceInsufficient,
+            detail: format!("{}: stored quote does not parse: {e}", a.step),
+        })
+    })?;
+    st.out.say(format!(
+        "{} restored from the ledger: {} bytes, delivery {}",
+        a.step,
+        body.len(),
+        a.delivery_state.as_str()
+    ));
+    let purchase = Purchase {
+        authorization: a.clone(),
+        settlement: Settlement::Settled {
+            consensus_timestamp: a.consensus_timestamp.clone().unwrap_or_default(),
+            duplicates_ignored: a.duplicates_ignored as usize,
+        },
+        body: Some(body),
+        latency_ms: None,
+        records: 1,
+    };
+    accept(st, &listing, &quote, &purchase).await
 }
 
 /// Records a terminal refusal: transcript, report, receipt.
@@ -1668,7 +1769,9 @@ async fn reject_delivery<Q, P, U: Publishing>(
         "validation {reason}: {}",
         failures.first().map(|f| f.detail.as_str()).unwrap_or("")
     ));
-    st.ledger.append_receipt(&st.mandate.id, &r)?;
+    let key = format!("{}:rejected", a.payment_id);
+    st.ledger
+        .append_receipt_once(&st.mandate.id, &r, Some(&key))?;
     publish(st).await?;
     st.report
         .rejected_deliveries
@@ -2114,7 +2217,17 @@ async fn record_purchase<Q, P, U: Publishing>(
         Settlement::Settled { .. } => None,
     };
     let receipt = purchase_receipt(st, a, outcome, purchase.latency_ms, reason);
-    st.ledger.append_receipt(&st.mandate.id, &receipt)?;
+    let key = format!("{}:{}", a.payment_id, receipt.outcome_str());
+    let written = st
+        .ledger
+        .append_receipt_once(&st.mandate.id, &receipt, Some(&key))?;
+    if written.is_none() {
+        st.out.say(format!(
+            "{} {}: receipt already recorded",
+            a.step,
+            receipt.outcome_str()
+        ));
+    }
     publish(st).await?;
     if a.payment_state == PaymentState::Failed && a.delivery_state != DeliveryState::None {
         st.report
