@@ -204,7 +204,7 @@ Per-pool outcome:
 | non_material | facts complete and below both thresholds |
 | pending | material by complete screening facts; `requirements.evidence` is `transaction` and no transaction-level evidence is held yet |
 | supported | material and the held evidence meets `requirements.evidence` |
-| undetermined | `truncated` or `coverage_shortfall` is true, a needed valuation is null, an event in the window has no valuation, or facts are missing |
+| undetermined | `truncated` or `coverage_shortfall` is true, a needed valuation is null, an event in the window has no valuation, or facts are missing; checked before materiality, so incomplete facts are never `supported` |
 
 Under `requirements.evidence` `screening`, a material pool with complete screening facts is `supported` immediately.
 
@@ -214,9 +214,10 @@ Claims, each with `type`, `pool`, `values`, `calculation` and `evidence`:
 |---|---|---|
 | tvl_change | `(tvl_end - tvl_start) / tvl_start` per token from block-height facts; `tvl_end - tvl_start` when `tvl_start` is zero | two fact ids |
 | large_event | `amountUSD` of one event, compared with `min_event_usd` | one transaction hash |
+| largest_event | when events are held and none reaches `min_event_usd`: `amountUSD` of the largest held event, stated as below the threshold; it gives a supported pool the transaction citation section 9 requires | one transaction hash |
 | activity_summary | `volumeUSD` and `txCount` summed over the window's hourly facts, and the largest event per type from screening; per-type counts and summed `amountUSD` once events are held | aggregate fact ids |
 
-Brief format: fixed fields; decimals with at most 18 significant digits, 42-byte addresses, 66-byte hashes, RFC 3339 timestamps. A pool's outcome and its mandatory claims, at most two `tvl_change`, one `large_event` and one `activity_summary`, occupy at most 1024 bytes; the header at most 512 bytes. The mandatory brief bound is therefore `512 + 1024 * |R|` bytes. It is a feasibility condition of the staged plan, section 5, not of the mandate.
+Brief format: fixed fields; decimals with at most 18 significant digits, 42-byte addresses, 66-byte hashes, RFC 3339 timestamps. A pool's outcome and its mandatory claims, at most two `tvl_change`, one `large_event` or `largest_event`, and one `activity_summary`, occupy at most 1024 bytes; the header at most 512 bytes. The mandatory brief bound is therefore `512 + 1024 * |R|` bytes. It is a feasibility condition of the staged plan, section 5, not of the mandate.
 
 Brief content: the per-pool outcomes for `R`, the claims, and for each supported pool up to `brief_events` supporting events ordered by `amountUSD`, with fact ids and transaction hashes. `brief_events` is reduced one at a time until the brief fits; the loop ends at zero, which is valid. Coverage lives in outcomes and claims, never in the event list. The brief is the only input the explain step receives.
 
