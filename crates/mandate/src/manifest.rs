@@ -25,8 +25,14 @@ pub enum ManifestError {
 pub enum TariffError {
     #[error("{units} units exceed max_units {max_units}")]
     AboveMaxUnits { units: u64, max_units: u64 },
-    #[error("ceiling overflows")]
+    #[error("unit count or ceiling overflows")]
     Overflow,
+    #[error("request body has no pools array; the {0:?} tariff counts pools")]
+    MissingPools(Unit),
+    #[error("request body has no window; the pool_window tariff counts windows")]
+    MissingWindow,
+    #[error("request body: {0}")]
+    Body(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,24 +140,78 @@ impl Listing {
     }
 }
 
-/// The request shape unit counting needs. Shared with the sellers:
-/// `pool` counts pools, `pool_window` counts pools times
-/// `ceil(window_seconds / 86400)`, `input_kb` counts `ceil(body_bytes / 1024)`.
+/// The request shape unit counting needs, read from the body that is sent.
+/// Shared with the sellers: `pool` counts pools, `pool_window` counts pools
+/// times `ceil(window_seconds / 86400)`, `input_kb` counts
+/// `ceil(body_bytes / 1024)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RequestShape {
-    pub pools: u64,
-    pub window_seconds: u64,
+    /// Length of the body's `pools` array, when the body is JSON with one.
+    pub pools: Option<u64>,
+    /// `window.to - window.from` when the body carries a window.
+    pub window_seconds: Option<u64>,
     pub body_bytes: u64,
 }
 
 pub const WINDOW_SECONDS: u64 = 86_400;
 pub const KB: u64 = 1024;
 
-pub fn units_for(unit: Unit, shape: &RequestShape) -> u64 {
+impl RequestShape {
+    /// Reads pools and window from a JSON body; an empty body is a shape with
+    /// neither. A body that is not JSON, or whose window is not two integers
+    /// with `to` after `from`, is an error, never a guess.
+    pub fn from_body(body: &[u8]) -> Result<Self, TariffError> {
+        let body_bytes = body.len() as u64;
+        if body.is_empty() {
+            return Ok(Self {
+                pools: None,
+                window_seconds: None,
+                body_bytes,
+            });
+        }
+        let json: serde_json::Value = serde_json::from_slice(body)
+            .map_err(|e| TariffError::Body(format!("not JSON: {e}")))?;
+        let pools = match json.get("pools") {
+            None => None,
+            Some(serde_json::Value::Array(a)) => Some(a.len() as u64),
+            Some(_) => return Err(TariffError::Body("pools must be an array".to_owned())),
+        };
+        let window_seconds = match json.get("window") {
+            None => None,
+            Some(w) => {
+                let from = w.get("from").and_then(serde_json::Value::as_u64);
+                let to = w.get("to").and_then(serde_json::Value::as_u64);
+                match (from, to) {
+                    (Some(from), Some(to)) if to > from => Some(to - from),
+                    _ => {
+                        return Err(TariffError::Body(
+                            "window must have integer from and to with to after from".to_owned(),
+                        ));
+                    }
+                }
+            }
+        };
+        Ok(Self {
+            pools,
+            window_seconds,
+            body_bytes,
+        })
+    }
+}
+
+/// Units under a tariff for a request shape, with checked arithmetic. A
+/// tariff that counts pools needs a body with pools; one that counts windows
+/// also needs a window.
+pub fn units_for(unit: Unit, shape: &RequestShape) -> Result<u64, TariffError> {
     match unit {
-        Unit::Pool => shape.pools,
-        Unit::PoolWindow => shape.pools * shape.window_seconds.div_ceil(WINDOW_SECONDS),
-        Unit::InputKb => shape.body_bytes.div_ceil(KB),
+        Unit::Pool => shape.pools.ok_or(TariffError::MissingPools(unit)),
+        Unit::PoolWindow => {
+            let pools = shape.pools.ok_or(TariffError::MissingPools(unit))?;
+            let seconds = shape.window_seconds.ok_or(TariffError::MissingWindow)?;
+            let windows = seconds.div_ceil(WINDOW_SECONDS).max(1);
+            pools.checked_mul(windows).ok_or(TariffError::Overflow)
+        }
+        Unit::InputKb => Ok(shape.body_bytes.div_ceil(KB)),
     }
 }
 
@@ -325,73 +385,88 @@ mod tests {
     }
 
     #[test]
-    fn unit_counting_is_the_shared_definition() {
-        let shape = RequestShape {
-            pools: 5,
-            window_seconds: 86_400,
-            body_bytes: 0,
+    fn unit_counting_is_the_shared_definition_and_checked() {
+        let body = |pools: usize, from: u64, to: u64| -> Vec<u8> {
+            let list: Vec<String> = (0..pools).map(|i| format!("\"0x{i:040x}\"")).collect();
+            format!(
+                r#"{{"pools":[{}],"window":{{"from":{from},"to":{to}}}}}"#,
+                list.join(",")
+            )
+            .into_bytes()
         };
-        assert_eq!(units_for(Unit::Pool, &shape), 5);
-        assert_eq!(units_for(Unit::PoolWindow, &shape), 5);
-        assert_eq!(
-            units_for(
-                Unit::PoolWindow,
-                &RequestShape {
-                    window_seconds: 86_401,
-                    ..shape
-                }
-            ),
-            10
-        );
-        assert_eq!(
-            units_for(
-                Unit::PoolWindow,
-                &RequestShape {
-                    window_seconds: 3_600,
-                    ..shape
-                }
-            ),
-            5
-        );
+        let day = RequestShape::from_body(&body(5, 0, 86_400)).unwrap();
+        assert_eq!((day.pools, day.window_seconds), (Some(5), Some(86_400)));
+        assert_eq!(units_for(Unit::Pool, &day), Ok(5));
+        assert_eq!(units_for(Unit::PoolWindow, &day), Ok(5));
+        let over = RequestShape::from_body(&body(5, 0, 86_401)).unwrap();
+        assert_eq!(units_for(Unit::PoolWindow, &over), Ok(10));
+        let hour = RequestShape::from_body(&body(5, 0, 3_600)).unwrap();
+        assert_eq!(units_for(Unit::PoolWindow, &hour), Ok(5));
         assert_eq!(
             units_for(
                 Unit::InputKb,
                 &RequestShape {
                     body_bytes: 1,
-                    ..shape
+                    ..Default::default()
                 }
             ),
-            1
+            Ok(1)
         );
         assert_eq!(
             units_for(
                 Unit::InputKb,
                 &RequestShape {
                     body_bytes: 1024,
-                    ..shape
+                    ..Default::default()
                 }
             ),
-            1
+            Ok(1)
         );
         assert_eq!(
             units_for(
                 Unit::InputKb,
                 &RequestShape {
                     body_bytes: 1025,
-                    ..shape
+                    ..Default::default()
                 }
             ),
-            2
+            Ok(2)
         );
         assert_eq!(
-            units_for(
-                Unit::InputKb,
-                &RequestShape {
-                    body_bytes: 0,
-                    ..shape
-                }
-            ),
-            0
+            units_for(Unit::InputKb, &RequestShape::from_body(b"").unwrap()),
+            Ok(0)
+        );
+
+        let empty = RequestShape::from_body(b"").unwrap();
+        assert_eq!(
+            units_for(Unit::Pool, &empty),
+            Err(TariffError::MissingPools(Unit::Pool))
+        );
+        let no_window = RequestShape::from_body(br#"{"pools":["0xa"]}"#).unwrap();
+        assert_eq!(
+            units_for(Unit::PoolWindow, &no_window),
+            Err(TariffError::MissingWindow)
+        );
+        assert!(matches!(
+            RequestShape::from_body(b"not json"),
+            Err(TariffError::Body(_))
+        ));
+        assert!(matches!(
+            RequestShape::from_body(br#"{"pools":"x"}"#),
+            Err(TariffError::Body(_))
+        ));
+        assert!(matches!(
+            RequestShape::from_body(br#"{"pools":[],"window":{"from":5,"to":5}}"#),
+            Err(TariffError::Body(_))
+        ));
+        let huge = RequestShape {
+            pools: Some(u64::MAX / 2 + 1),
+            window_seconds: Some(2 * 86_400),
+            body_bytes: 0,
+        };
+        assert_eq!(
+            units_for(Unit::PoolWindow, &huge),
+            Err(TariffError::Overflow)
         );
     }
 

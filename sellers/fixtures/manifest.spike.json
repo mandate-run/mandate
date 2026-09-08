@@ -8,7 +8,7 @@
       "method": "get",
       "capability": "screen",
       "produces": "screening",
-      "tariff": {"version": "spike-1", "base": 1000, "unit": "pool", "unit_price": 0, "max_units": 1},
+      "tariff": {"version": "spike-1", "base": 1000, "unit": "input_kb", "unit_price": 0, "max_units": 1},
       "network": "hedera:testnet",
       "asset": "0.0.0",
       "pay_to": "0.0.10409989"
@@ -20,7 +20,7 @@
       "method": "get",
       "capability": "screen",
       "produces": "screening",
-      "tariff": {"version": "spike-1", "base": 500, "unit": "pool", "unit_price": 0, "max_units": 1},
+      "tariff": {"version": "spike-1", "base": 500, "unit": "input_kb", "unit_price": 0, "max_units": 1},
       "network": "hedera:testnet",
       "asset": "0.0.0",
       "pay_to": "0.0.10409989"

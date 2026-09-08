@@ -9,9 +9,9 @@ use mandate::config::{Config, PublicConfig};
 use mandate::hedera::MirrorNode;
 use mandate::ledger::Ledger;
 use mandate::mandate::asset_decimals;
-use mandate::manifest::{Manifest, RequestShape, units_for};
+use mandate::manifest::Manifest;
 use mandate::purchase;
-use mandate::quote::{DEFAULT_QUOTE_TIMEOUT, QuoteRequest, Quoter};
+use mandate::quote::{DEFAULT_QUOTE_TIMEOUT, Quoter};
 use mandate::transcript::quotes_table;
 
 /// Buyer runtime: purchases evidence under a mandate and accounts for every payment.
@@ -48,15 +48,9 @@ enum Command {
         /// Listing id in the manifest.
         #[arg(long)]
         listing: String,
-        /// Request body as JSON text; empty for GET listings.
+        /// Request body as JSON text; empty for GET listings. The unit count is read from it.
         #[arg(long, default_value = "")]
         body: String,
-        /// Pools in the request, for unit counting.
-        #[arg(long, default_value_t = 1)]
-        pools: u64,
-        /// Window in hours, for unit counting.
-        #[arg(long, default_value_t = 24)]
-        window_h: u64,
     },
     /// HCS receipts topic.
     Topic {
@@ -80,10 +74,8 @@ async fn main() -> ExitCode {
             manifest,
             listing,
             body,
-            pools,
-            window_h,
         } => {
-            return match quote(&manifest, &listing, body, pools, window_h).await {
+            return match quote(&manifest, &listing, body).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("mandate quote: {e:#}");
@@ -121,33 +113,11 @@ async fn quote(
     manifest_path: &std::path::Path,
     listing_id: &str,
     body: String,
-    pools: u64,
-    window_h: u64,
 ) -> anyhow::Result<()> {
     let cfg = PublicConfig::load()?;
     let text = std::fs::read_to_string(manifest_path)?;
     let manifest = Manifest::from_json(&text)?;
     let listing = manifest.listing(listing_id)?;
-    // The body decides the unit count when it carries pools and a window;
-    // the flags only fill in what the body does not say.
-    let parsed: Option<serde_json::Value> = serde_json::from_str(&body).ok();
-    let body_pools = parsed
-        .as_ref()
-        .and_then(|v| v.get("pools"))
-        .and_then(|p| p.as_array())
-        .map(|p| p.len() as u64);
-    let body_window = parsed.as_ref().and_then(|v| v.get("window")).and_then(|w| {
-        let from = w.get("from")?.as_u64()?;
-        let to = w.get("to")?.as_u64()?;
-        Some(to.saturating_sub(from))
-    });
-    let shape = RequestShape {
-        pools: body_pools.unwrap_or(pools),
-        window_seconds: body_window.unwrap_or(window_h * 3600),
-        body_bytes: body.len() as u64,
-    };
-    let units = units_for(listing.tariff.unit, &shape);
-    let request = QuoteRequest::new(listing, body.into_bytes(), units);
     let quoter = Quoter::from_config(&cfg, DEFAULT_QUOTE_TIMEOUT).await?;
     println!(
         "facilitator signers for {}: {:?}",
@@ -156,7 +126,7 @@ async fn quote(
     );
     let now = time::OffsetDateTime::now_utc();
     let decimals = asset_decimals(&listing.asset).unwrap_or(0);
-    match quoter.quote(listing, &request, now).await {
+    match quoter.quote(listing, body.into_bytes(), now).await {
         Ok(q) => {
             print!("{}", quotes_table(std::slice::from_ref(&q), &[], decimals));
             match q.refusal() {
@@ -164,7 +134,7 @@ async fn quote(
                 None => println!(
                     "quote usable until {} for {} units",
                     q.valid_until(),
-                    request.units
+                    q.request.units
                 ),
             }
             Ok(())
