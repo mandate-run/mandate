@@ -151,6 +151,52 @@ mod tests {
     }
 
     #[test]
+    fn signing_reads_the_clock_after_the_await_and_refuses_past_the_deadline() {
+        use crate::testing::{quote_fixture, test_signer};
+        let mut l = Ledger::in_memory().unwrap();
+        let mut row = mandate_row();
+        row.deadline = OffsetDateTime::now_utc() - Duration::seconds(1);
+        l.insert_mandate(&row, NOW).unwrap();
+        let signer = test_signer();
+        let http = reqwest::Client::new();
+        let mirror = MirrorNode::new(http.clone(), "http://127.0.0.1:9");
+        let payer = Payer {
+            signer: &signer,
+            mirror: &mirror,
+            http: &http,
+            poll: std::time::Duration::from_secs(1),
+            max_retrievals: 1,
+        };
+        let nodes = ["0.0.3".parse().unwrap()];
+        let quote = quote_fixture(1_000, OffsetDateTime::now_utc());
+        let err = payer
+            .sign_and_persist(&mut l, "m1", "events", None, &quote, &nodes)
+            .unwrap_err();
+        assert!(
+            matches!(err, PayError::Ledger(LedgerError::PastDeadline { .. })),
+            "{err}"
+        );
+        assert!(
+            l.authorizations("m1").unwrap().is_empty(),
+            "nothing was persisted"
+        );
+
+        let mut l = Ledger::in_memory().unwrap();
+        l.insert_mandate(&mandate_row(), NOW).unwrap();
+        let stale = quote_fixture(1_000, OffsetDateTime::now_utc() - Duration::seconds(130));
+        let err = payer
+            .sign_and_persist(&mut l, "m1", "events", None, &stale, &nodes)
+            .unwrap_err();
+        assert!(matches!(err, PayError::QuoteExpired(_)), "{err}");
+        let fresh = quote_fixture(1_000, OffsetDateTime::now_utc());
+        let a = payer
+            .sign_and_persist(&mut l, "m1", "events", None, &fresh, &nodes)
+            .unwrap();
+        assert!(a.valid_start <= OffsetDateTime::now_utc());
+        assert!(a.valid_start > OffsetDateTime::now_utc() - Duration::seconds(10));
+    }
+
+    #[test]
     fn recovery_names_the_next_step_for_every_resumable_row() {
         let mut l = ledger();
         let _ = l
@@ -270,6 +316,8 @@ pub enum PayError {
     Binding(#[from] crate::ledger::BindingError),
     #[error("quote for {0} expired before it was paid")]
     QuoteExpired(String),
+    #[error("the mirror node listed no consensus nodes")]
+    NoNodes,
 }
 
 /// What one purchase ended as. The authorization row is the record; the body
@@ -302,7 +350,9 @@ pub struct Payer<'a> {
 
 impl Payer<'_> {
     /// Signs and persists the authorization for `quote`, section 6's first
-    /// row. Nothing is sent. The quote must be usable and unrefused.
+    /// row. Nothing is sent. The consensus node ids come from the mirror
+    /// node first; the clock is read after that, so the deadline and the
+    /// quote's validity are judged at signing time, never before an await.
     pub async fn prepare(
         &self,
         ledger: &mut Ledger,
@@ -310,13 +360,42 @@ impl Payer<'_> {
         step: &str,
         reservation_id: Option<i64>,
         quote: &crate::quote::Quote,
-        now: OffsetDateTime,
     ) -> Result<Authorization, PayError> {
         if let Some(r) = quote.refusal() {
             return Err(PayError::Refused(r));
         }
+        let nodes = self.mirror.node_account_ids(5).await?;
+        self.sign_and_persist(ledger, mandate_id, step, reservation_id, quote, &nodes)
+    }
+
+    /// The synchronous half of [`Payer::prepare`]: reads the clock, checks
+    /// the quote is still usable and the mandate deadline has not passed,
+    /// signs, binds, and persists. I12 is enforced here with the same
+    /// instant the transfer's `valid_start` is derived from.
+    pub fn sign_and_persist(
+        &self,
+        ledger: &mut Ledger,
+        mandate_id: &str,
+        step: &str,
+        reservation_id: Option<i64>,
+        quote: &crate::quote::Quote,
+        nodes: &[hedera::HederaAccountId],
+    ) -> Result<Authorization, PayError> {
+        if let Some(r) = quote.refusal() {
+            return Err(PayError::Refused(r));
+        }
+        let now = OffsetDateTime::now_utc();
         if !quote.usable_at(now) {
             return Err(PayError::QuoteExpired(quote.listing_id.clone()));
+        }
+        let mandate = ledger.mandate(mandate_id)?;
+        if now >= mandate.deadline {
+            return Err(PayError::Ledger(LedgerError::PastDeadline {
+                deadline: mandate
+                    .deadline
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default(),
+            }));
         }
         let fee_payer = quote.fee_payer.as_deref().ok_or_else(|| {
             PayError::Refused(crate::refusal::Refusal {
@@ -324,13 +403,15 @@ impl Payer<'_> {
                 detail: format!("{}: quote names no fee payer", quote.listing_id),
             })
         })?;
-        let nodes = self.mirror.node_account_ids(5).await?;
+        if nodes.is_empty() {
+            return Err(PayError::NoNodes);
+        }
         let transfer = hedera::Transfer {
             fee_payer: fee_payer.parse().map_err(hedera::Error::from)?,
             pay_to: quote.pay_to.parse().map_err(hedera::Error::from)?,
             asset: Asset::parse(&quote.asset)?,
             amount: quote.amount,
-            node_account_ids: &nodes,
+            node_account_ids: nodes,
             valid_start: now - hedera::VALID_START_SKEW,
             valid_duration: hedera::valid_duration(quote.max_timeout_s),
         };

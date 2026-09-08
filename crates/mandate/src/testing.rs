@@ -49,6 +49,63 @@ pub fn request() -> Request {
     }
 }
 
+/// The fixed-seed signer, for tests that sign without a network.
+pub fn test_signer() -> Signer {
+    Signer::new(
+        HederaAccountId::from_str(PAYER).unwrap(),
+        PrivateKey::from_str(SEED_DER).expect("fixed key"),
+    )
+}
+
+/// A within-tariff quote for the events listing, received at `received_at`.
+pub fn quote_fixture(amount: i64, received_at: OffsetDateTime) -> crate::quote::Quote {
+    let accepted = Requirement {
+        scheme: "exact".to_owned(),
+        network: "hedera:testnet".to_owned(),
+        amount: amount.to_string(),
+        pay_to: PAY_TO.to_owned(),
+        max_timeout_seconds: 120,
+        asset: "0.0.429274".to_owned(),
+        extra: Some(json!({ "feePayer": FEE_PAYER })),
+    };
+    let required = PaymentRequired {
+        x402_version: 2,
+        error: None,
+        resource: None,
+        accepts: vec![accepted.clone()],
+        extensions: Map::new(),
+    };
+    let body = br#"{"pools":["0xabc"]}"#.to_vec();
+    crate::quote::Quote {
+        listing_id: "events".to_owned(),
+        amount,
+        asset: "0.0.429274".to_owned(),
+        network: "hedera:testnet".to_owned(),
+        pay_to: PAY_TO.to_owned(),
+        fee_payer: Some(FEE_PAYER.to_owned()),
+        max_timeout_s: 120,
+        received_at: received_at
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap(),
+        latency_ms: 1,
+        ceiling: amount,
+        within_tariff: true,
+        listing_match: true,
+        fee_payer_ok: true,
+        tariff_version: "t".to_owned(),
+        decimals: 6,
+        request: crate::quote::QuoteRequest {
+            method: "POST".to_owned(),
+            url: "http://127.0.0.1:4021/events".to_owned(),
+            body_hash: crate::x402::sha256_hex(&body),
+            body,
+            units: 1,
+        },
+        required,
+        accepted,
+    }
+}
+
 /// A real signed transfer of `amount` in `asset`, distinct per `n`, wrapped
 /// in a `PAYMENT-SIGNATURE` header whose accepted terms match the bytes.
 pub fn signed_payment(n: u32, amount: i64, asset: &str, now: OffsetDateTime) -> PreparedPayment {
@@ -106,6 +163,46 @@ pub fn signed_payment_for(
     PreparedPayment::from_signature(&header, &payment_id)
 }
 
+/// The example mandate, as `docs/spec.md` section 2.1 shows it.
+pub const MANDATE_TOML: &str = r#"
+[mandate]
+id = "demo-1"
+principal = "0.0.10399984"
+purpose = "Explain any material liquidity change in the listed pools over the last 24 hours."
+coverage = "all_material"
+
+[mandate.budget]
+service = { total = "0.0100", asset = "0.0.429274" }
+audit = { total = "0.5", asset = "HBAR" }
+reserve_completion = true
+
+[mandate.constraints]
+networks = ["hedera:testnet"]
+facilitator = "https://api.testnet.blocky402.com/"
+manifest = { path = "manifest.json", hash = "8d804a9bc82dd7ec447a446e2379f13719b9a69dceff82487e87051d469e645c" }
+sellers = "allowlist"
+allowlist = ["mandate-sellers"]
+max_single_payment = "0.0090"
+deadline = 2026-09-13T16:00:00Z
+eth_rpc = "https://ethereum-rpc.publicnode.com"
+
+[mandate.requirements]
+evidence = "transaction"
+citations = "required"
+max_data_age_s = 3600
+degrade = false
+
+[mandate.duties]
+receipts_topic = "0.0.10410389"
+report_refusals = true
+
+[mandate.inputs]
+pools = ["0x88E6A0C2DDD26FEEB64F039A2C41296FCB3F5640"]
+window_h = 24
+materiality = "0.05"
+min_event_usd = "100000"
+"#;
+
 /// The demo pool and a 24 h window, for evidence fixtures.
 pub const POOL: &str = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640";
 pub const FROM: u64 = 1_788_800_400;
@@ -143,12 +240,13 @@ pub fn header_fixture() -> Header {
 /// a 250000 USD swap hit when `large_swap`; two hourly rows.
 pub fn screen_fixture(material: bool, large_swap: bool) -> ScreenResponse {
     let mut pools = BTreeMap::new();
+    // The sellers' order: large_event reasons first, then tvl_change.
     let mut reasons = Vec::new();
-    if material {
-        reasons.push("tvl_change:token0".to_owned());
-    }
     if large_swap {
         reasons.push("large_event:swap".to_owned());
+    }
+    if material {
+        reasons.push("tvl_change:token0".to_owned());
     }
     pools.insert(
         POOL.to_owned(),
