@@ -1,0 +1,14 @@
+#!/bin/sh
+# Runs a mandate, then resumes it over the same ledger, and prints the
+# resumed run's report. A correct runtime restores what it already bought;
+# a broken one buys it again, which the journal and ledger both show.
+set -eu
+root=$(cd "$(dirname "$0")/../.." && pwd)
+name=${1:?usage: run-resume <fixture>}
+work="$root/.proctor/work"
+mkdir -p "$work"
+rm -f "$work/$name.sqlite" "$work/$name.sqlite-wal" "$work/$name.sqlite-shm"
+"$root/target/debug/mandate" run "$root/harness/fixtures/$name.toml" \
+  --ledger "$work/$name.sqlite" --id "proctor-$name" --json > "$work/$name.first.json"
+exec "$root/target/debug/mandate" resume "$root/harness/fixtures/$name.toml" \
+  --ledger "$work/$name.sqlite" --id "proctor-$name" --json

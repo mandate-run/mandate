@@ -1,0 +1,14 @@
+#!/bin/sh
+# Runs one fixture mandate through the buyer under test and prints its JSON
+# report, so a task's `expect` reads the application's own account of what it
+# did. The ledger is per task, so a run never inherits another's state.
+set -eu
+root=$(cd "$(dirname "$0")/../.." && pwd)
+name=${1:?usage: run-mandate <fixture>}
+work="$root/.proctor/work"
+mkdir -p "$work"
+rm -f "$work/$name.sqlite" "$work/$name.sqlite-wal" "$work/$name.sqlite-shm"
+exec "$root/target/debug/mandate" run "$root/harness/fixtures/$name.toml" \
+  --ledger "$work/$name.sqlite" \
+  --id "proctor-$name" \
+  --json

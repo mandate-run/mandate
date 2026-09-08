@@ -1,0 +1,31 @@
+# A run that stops mid-purchase must finish without paying twice. This task
+# runs a mandate to completion, then resumes it over the same ledger. The
+# resumed run must restore what it already bought, so the seller sees no new
+# payment and the ledger gains no authorization.
+#
+#   cargo run -p proctor -- check harness/tasks/resume.toml --dir .
+
+[task]
+name = "resume without buying completed work again"
+attempts = 3
+
+[hooks]
+setup = "harness/scripts/sellers up"
+ready = "harness/scripts/sellers ready"
+teardown = "harness/scripts/sellers down"
+
+[evidence]
+journal = ".proctor/journal/sellers-journal.jsonl"
+ledger = ".proctor/work/resume.sqlite"
+mandate_id = "proctor-resume"
+
+[[check]]
+name = "resume"
+run = "harness/scripts/run-resume resume"
+timeout_s = 300
+# The explanation is priced by the brief's size, so the total is an outcome,
+# not a constant. What must hold is that the resumed run spent nothing more.
+expect = { status = "delivered", "validation.passed" = true, "validation.complete" = true, "totals.outstanding" = "0.00000000", "totals.held" = "0.00000000" }
+# The whole point: three purchases across both runs, never six. The seller
+# saw three signed payments and settled three times, whatever the buyer says.
+observe = { fixture_distinct_payloads = 3, fixture_payment_ids = 3, fixture_settlements = 3, ledger_authorizations = 3, ledger_settled = 3 }

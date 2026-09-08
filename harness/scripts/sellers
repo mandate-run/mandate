@@ -1,0 +1,33 @@
+#!/bin/sh
+# The fixture the tasks run against: the reference sellers with a fault
+# switch, canned Graph facts, and a journal Proctor reads. Never the
+# application under test, so its failures are infrastructure, not findings.
+set -eu
+root=$(cd "$(dirname "$0")/../.." && pwd)
+port=${PROCTOR_PORT:-4021}
+
+case "${1:-}" in
+  up)
+    fault=${2:-}
+    mkdir -p "$root/.proctor/journal"
+    rm -f "$root/.proctor/journal/sellers-journal.jsonl"
+    pkill -f "src/sellers.ts" 2>/dev/null || true
+    cd "$root/sellers"
+    GRAPH_FIXTURE=${PROCTOR_FIXTURE:-mixed} \
+    SELLER_ASSET=${PROCTOR_ASSET:-HBAR} \
+    JOURNAL_DIR="$root/.proctor/journal" \
+    FAULT="$fault" \
+    PORT="$port" \
+      nohup pnpm -s sellers > "$root/.proctor/sellers.log" 2>&1 &
+    ;;
+  ready)
+    curl -sf "http://127.0.0.1:$port/manifest.json" > /dev/null
+    ;;
+  down)
+    pkill -f "src/sellers.ts" 2>/dev/null || true
+    ;;
+  *)
+    echo "usage: sellers up [fault] | ready | down" >&2
+    exit 2
+    ;;
+esac
