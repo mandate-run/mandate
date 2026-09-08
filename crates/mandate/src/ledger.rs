@@ -14,11 +14,16 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::hedera::{RECORD_GRACE, Settlement};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+
+use crate::hedera::{self, RECORD_GRACE, Settlement};
 use crate::receipts::Receipt;
-use crate::x402::sha256_hex;
+use crate::x402::{self, PaymentPayload, sha256_hex};
 
 pub const MAX_SUBMISSIONS: u32 = 3;
+/// Section 6: resends and retrievals at most once per 30 seconds.
+pub const RETRY_SPACING: time::Duration = time::Duration::seconds(30);
 
 #[derive(Debug, thiserror::Error)]
 pub enum LedgerError {
@@ -69,6 +74,47 @@ pub enum LedgerError {
         state: String,
         wanted: &'static str,
     },
+    #[error("OUTSIDE_CONSTRAINTS: payment asset {asset} is not the service asset {service_asset}")]
+    AssetMismatch {
+        asset: String,
+        service_asset: String,
+    },
+    #[error("authorization {id}: next {what} allowed at {next_at}")]
+    TooSoon {
+        id: i64,
+        what: &'static str,
+        next_at: String,
+    },
+    #[error("audit charge {id}: a charge cannot be negative")]
+    AuditChargeNegative { id: i64 },
+    #[error("audit charge {id} is still within its validity until {valid_until}")]
+    AuditStillValid { id: i64, valid_until: String },
+}
+
+/// Why a signature header cannot become a `PreparedPayment`.
+#[derive(Debug, thiserror::Error)]
+pub enum BindingError {
+    #[error("signature header: {0}")]
+    Header(#[from] x402::HeaderError),
+    #[error("signed transaction is not base64: {0}")]
+    Base64(#[from] base64::DecodeError),
+    #[error("signed transaction: {0}")]
+    Bytes(#[from] hedera::Error),
+    #[error("header carries payment id {header:?}, expected {expected}")]
+    PaymentId {
+        header: Option<String>,
+        expected: String,
+    },
+    #[error("signed transfer {0}")]
+    Shape(&'static str),
+    #[error("accepted {field} {accepted} differs from the signed {signed}")]
+    Accepted {
+        field: &'static str,
+        accepted: String,
+        signed: String,
+    },
+    #[error("quote json: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 type Result<T> = std::result::Result<T, LedgerError>;
@@ -217,8 +263,12 @@ impl Request {
     }
 }
 
-/// What the signer produced for an approved quote, section 2.5.
+/// What the signer produced for an approved quote, section 2.5. Every
+/// accounting field is read from the signed bytes and the accepted terms in
+/// the header; nothing here is caller supplied, and the type cannot be built
+/// any other way.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PreparedPayment {
     pub payment_id: String,
     pub tx_id: String,
@@ -233,8 +283,130 @@ pub struct PreparedPayment {
     pub valid_until: OffsetDateTime,
     /// The exact `PAYMENT-SIGNATURE` header value.
     pub signature: String,
-    /// The approved quote, section 2.3, as JSON.
+    /// The approved quote, section 2.3, as JSON; the accepted terms by default.
     pub quote_json: String,
+}
+
+impl PreparedPayment {
+    /// Decodes the header, inspects the signed transaction, and binds the two:
+    /// one debit, one credit of the same amount in one asset, the accepted
+    /// amount, asset, recipient and fee payer equal to the signed ones, and
+    /// the payment id in the extension equal to `payment_id`.
+    pub fn from_signature(
+        signature: &str,
+        payment_id: &str,
+    ) -> std::result::Result<Self, BindingError> {
+        let payload: PaymentPayload = x402::decode_header(signature)?;
+        if payload.payment_id() != Some(payment_id) {
+            return Err(BindingError::PaymentId {
+                header: payload.payment_id().map(str::to_owned),
+                expected: payment_id.to_owned(),
+            });
+        }
+        let bytes = STANDARD.decode(payload.payload.transaction.trim())?;
+        let seen = hedera::inspect(&bytes)?;
+        let (asset, debit, credit) = match (seen.hbar.as_slice(), seen.tokens.as_slice()) {
+            ([a, b], []) => {
+                let (d, c) = if a.1 < 0 { (a, b) } else { (b, a) };
+                (
+                    hedera::HBAR_ASSET_ID.to_owned(),
+                    (d.0.to_string(), d.1),
+                    (c.0.to_string(), c.1),
+                )
+            }
+            ([], [a, b]) => {
+                if a.token != b.token {
+                    return Err(BindingError::Shape("moves two different tokens"));
+                }
+                let (d, c) = if a.amount < 0 { (a, b) } else { (b, a) };
+                (
+                    a.token.to_string(),
+                    (d.account.to_string(), d.amount),
+                    (c.account.to_string(), c.amount),
+                )
+            }
+            _ => {
+                return Err(BindingError::Shape(
+                    "must be exactly one debit and one credit",
+                ));
+            }
+        };
+        if debit.1 >= 0 || credit.1 <= 0 || debit.1 != -credit.1 {
+            return Err(BindingError::Shape(
+                "debit and credit must be equal and opposite",
+            ));
+        }
+        let amount = credit.1;
+        let accepted = &payload.accepted;
+        let accepted_amount: i64 = accepted
+            .amount
+            .parse()
+            .map_err(|_| BindingError::Accepted {
+                field: "amount",
+                accepted: accepted.amount.clone(),
+                signed: amount.to_string(),
+            })?;
+        if accepted_amount != amount {
+            return Err(BindingError::Accepted {
+                field: "amount",
+                accepted: accepted.amount.clone(),
+                signed: amount.to_string(),
+            });
+        }
+        let accepted_asset = if accepted.asset.eq_ignore_ascii_case("hbar") {
+            hedera::HBAR_ASSET_ID.to_owned()
+        } else {
+            accepted.asset.clone()
+        };
+        if accepted_asset != asset {
+            return Err(BindingError::Accepted {
+                field: "asset",
+                accepted: accepted.asset.clone(),
+                signed: asset,
+            });
+        }
+        if accepted.pay_to != credit.0 {
+            return Err(BindingError::Accepted {
+                field: "payTo",
+                accepted: accepted.pay_to.clone(),
+                signed: credit.0,
+            });
+        }
+        let fee_payer = seen.transaction_id.account_id.to_string();
+        if let Some(declared) = accepted.fee_payer()
+            && declared != fee_payer
+        {
+            return Err(BindingError::Accepted {
+                field: "feePayer",
+                accepted: declared.to_owned(),
+                signed: fee_payer,
+            });
+        }
+        let valid_start = seen.transaction_id.valid_start;
+        let duration = seen
+            .valid_duration
+            .unwrap_or(time::Duration::seconds(hedera::MAX_VALID_SECONDS as i64));
+        Ok(Self {
+            payment_id: payment_id.to_owned(),
+            tx_id: seen.transaction_id.to_string(),
+            mirror_id: hedera::mirror_id(&seen.transaction_id),
+            payer: debit.0,
+            amount,
+            asset,
+            pay_to: credit.0,
+            fee_payer,
+            valid_start,
+            valid_until: valid_start + duration,
+            signature: signature.to_owned(),
+            quote_json: serde_json::to_string(accepted)?,
+        })
+    }
+
+    /// Replaces the stored quote with the full section 2.3 quote.
+    pub fn with_quote(mut self, quote_json: String) -> Self {
+        self.quote_json = quote_json;
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,6 +430,8 @@ pub struct Authorization {
     pub request: Request,
     pub submissions: u32,
     pub retrievals: u32,
+    pub last_submission_at: Option<OffsetDateTime>,
+    pub last_retrieval_at: Option<OffsetDateTime>,
     pub payment_state: PaymentState,
     pub delivery_state: DeliveryState,
     pub response_body: Option<Vec<u8>>,
@@ -270,6 +444,16 @@ pub struct Authorization {
 }
 
 impl Authorization {
+    /// When the next submission may go out under the 30 s spacing.
+    pub fn next_submission_at(&self) -> Option<OffsetDateTime> {
+        self.last_submission_at.map(|t| t + RETRY_SPACING)
+    }
+
+    /// When the next retrieval may go out under the 30 s spacing.
+    pub fn next_retrieval_at(&self) -> Option<OffsetDateTime> {
+        self.last_retrieval_at.map(|t| t + RETRY_SPACING)
+    }
+
     /// Section 6 recovery: not terminal, or settled without a validated delivery.
     pub fn needs_resume(&self) -> bool {
         !self.payment_state.is_terminal()
@@ -328,6 +512,11 @@ pub struct MandateRow {
     pub deadline: OffsetDateTime,
 }
 
+/// One audit budget charge. `reserved` before the transaction id exists,
+/// `submitted` once the id is known and until the mirror record decides,
+/// `reconciled` at the charged fee, `overrun` when the record charged more
+/// than the cap, `released` when nothing was ever sent or nothing was recorded
+/// after the validity plus grace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditCharge {
     pub id: i64,
@@ -336,6 +525,8 @@ pub struct AuditCharge {
     pub cap: i64,
     pub charged: Option<i64>,
     pub tx_id: Option<String>,
+    pub mirror_id: Option<String>,
+    pub valid_until: Option<OffsetDateTime>,
     pub state: String,
 }
 
@@ -379,8 +570,10 @@ CREATE TABLE IF NOT EXISTS authorizations (
   valid_until TEXT NOT NULL,
   signature TEXT NOT NULL,
   request_json TEXT NOT NULL,
-  submissions INTEGER NOT NULL DEFAULT 0 CHECK (submissions BETWEEN 0 AND 3),
+    submissions INTEGER NOT NULL DEFAULT 0 CHECK (submissions BETWEEN 0 AND 3),
   retrievals INTEGER NOT NULL DEFAULT 0,
+  last_submission_at TEXT,
+  last_retrieval_at TEXT,
   payment_state TEXT NOT NULL CHECK (payment_state IN ('prepared', 'sent', 'settled', 'failed', 'unresolved')),
   delivery_state TEXT NOT NULL CHECK (delivery_state IN ('none', 'received', 'validated', 'rejected')),
   response_body BLOB,
@@ -406,10 +599,12 @@ CREATE TABLE IF NOT EXISTS audit_charges (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   mandate_id TEXT NOT NULL REFERENCES mandates(id),
   purpose TEXT NOT NULL,
-  cap INTEGER NOT NULL CHECK (cap >= 0),
-  charged INTEGER,
+    cap INTEGER NOT NULL CHECK (cap >= 0),
+  charged INTEGER CHECK (charged IS NULL OR charged >= 0),
   tx_id TEXT,
-  state TEXT NOT NULL CHECK (state IN ('reserved', 'submitted', 'reconciled', 'released')),
+  mirror_id TEXT,
+  valid_until TEXT,
+  state TEXT NOT NULL CHECK (state IN ('reserved', 'submitted', 'reconciled', 'overrun', 'released')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -595,6 +790,12 @@ impl Ledger {
                 cap: mandate.max_single_payment,
             });
         }
+        if payment.asset != mandate.service_asset {
+            return Err(LedgerError::AssetMismatch {
+                asset: payment.asset.clone(),
+                service_asset: mandate.service_asset,
+            });
+        }
         let accounts = accounts_in(&tx, mandate_id)?;
         let mut freed = 0;
         if let Some(rid) = reservation_id {
@@ -676,8 +877,17 @@ impl Ledger {
         if a.submissions >= MAX_SUBMISSIONS {
             return Err(LedgerError::SubmissionsExhausted { id });
         }
+        if let Some(next) = a.next_submission_at()
+            && now < next
+        {
+            return Err(LedgerError::TooSoon {
+                id,
+                what: "submission",
+                next_at: rfc3339(next)?,
+            });
+        }
         tx.execute(
-            "UPDATE authorizations SET submissions = submissions + 1, payment_state = 'sent', updated_at = ?2 WHERE id = ?1",
+            "UPDATE authorizations SET submissions = submissions + 1, payment_state = 'sent', last_submission_at = ?2, updated_at = ?2 WHERE id = ?1",
             params![id, rfc3339(now)?],
         )?;
         let a = authorization_in(&tx, id)?;
@@ -699,8 +909,17 @@ impl Ledger {
                 deadline: rfc3339(mandate.deadline)?,
             });
         }
+        if let Some(next) = a.next_retrieval_at()
+            && now < next
+        {
+            return Err(LedgerError::TooSoon {
+                id,
+                what: "retrieval",
+                next_at: rfc3339(next)?,
+            });
+        }
         tx.execute(
-            "UPDATE authorizations SET retrievals = retrievals + 1, updated_at = ?2 WHERE id = ?1",
+            "UPDATE authorizations SET retrievals = retrievals + 1, last_retrieval_at = ?2, updated_at = ?2 WHERE id = ?1",
             params![id, rfc3339(now)?],
         )?;
         let a = authorization_in(&tx, id)?;
@@ -950,56 +1169,131 @@ impl Ledger {
         Ok(c)
     }
 
-    /// The submit went out; the transaction id is what reconciliation reads.
+    /// The transaction id is known and about to be sent. From here the charge
+    /// can only be reconciled from the mirror node, or released once the
+    /// validity plus grace has passed with no record.
     pub fn audit_submitted(
         &mut self,
         id: i64,
         tx_id: &str,
+        mirror_id: &str,
+        valid_until: OffsetDateTime,
         now: OffsetDateTime,
     ) -> Result<AuditCharge> {
-        self.audit_transition(id, "reserved", "submitted", Some(tx_id), None, now)
+        let tx = self.conn.transaction()?;
+        let c = audit_charge_in(&tx, id)?;
+        if c.state != "reserved" {
+            return Err(LedgerError::AuditWrongState {
+                id,
+                state: c.state,
+                wanted: "reserved",
+            });
+        }
+        tx.execute(
+            "UPDATE audit_charges SET state = 'submitted', tx_id = ?2, mirror_id = ?3, valid_until = ?4, updated_at = ?5 WHERE id = ?1",
+            params![id, tx_id, mirror_id, rfc3339(valid_until)?, rfc3339(now)?],
+        )?;
+        let c = audit_charge_in(&tx, id)?;
+        tx.commit()?;
+        Ok(c)
     }
 
-    /// The charged fee from the mirror node record replaces the cap.
+    /// The charged fee from the mirror node record replaces the cap. A charge
+    /// above the cap is recorded as `overrun` rather than hidden; a negative
+    /// charge is refused.
     pub fn audit_reconciled(
         &mut self,
         id: i64,
         charged: i64,
         now: OffsetDateTime,
     ) -> Result<AuditCharge> {
-        self.audit_transition(id, "submitted", "reconciled", None, Some(charged), now)
-    }
-
-    /// The submit never went out; the cap goes back to the budget.
-    pub fn release_audit(&mut self, id: i64, now: OffsetDateTime) -> Result<AuditCharge> {
-        self.audit_transition(id, "reserved", "released", None, None, now)
-    }
-
-    fn audit_transition(
-        &mut self,
-        id: i64,
-        from: &'static str,
-        to: &str,
-        tx_id: Option<&str>,
-        charged: Option<i64>,
-        now: OffsetDateTime,
-    ) -> Result<AuditCharge> {
+        if charged < 0 {
+            return Err(LedgerError::AuditChargeNegative { id });
+        }
         let tx = self.conn.transaction()?;
         let c = audit_charge_in(&tx, id)?;
-        if c.state != from {
+        if c.state != "submitted" {
             return Err(LedgerError::AuditWrongState {
                 id,
                 state: c.state,
-                wanted: from,
+                wanted: "submitted",
             });
         }
+        let to = if charged > c.cap {
+            "overrun"
+        } else {
+            "reconciled"
+        };
         tx.execute(
-            "UPDATE audit_charges SET state = ?2, tx_id = COALESCE(?3, tx_id), charged = COALESCE(?4, charged), updated_at = ?5 WHERE id = ?1",
-            params![id, to, tx_id, charged, rfc3339(now)?],
+            "UPDATE audit_charges SET state = ?2, charged = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, to, charged, rfc3339(now)?],
         )?;
         let c = audit_charge_in(&tx, id)?;
         tx.commit()?;
         Ok(c)
+    }
+
+    /// No record after the validity plus grace: the network never charged.
+    pub fn audit_not_recorded(&mut self, id: i64, now: OffsetDateTime) -> Result<AuditCharge> {
+        let tx = self.conn.transaction()?;
+        let c = audit_charge_in(&tx, id)?;
+        if c.state != "submitted" {
+            return Err(LedgerError::AuditWrongState {
+                id,
+                state: c.state,
+                wanted: "submitted",
+            });
+        }
+        let valid_until = c.valid_until.ok_or(LedgerError::NotFound {
+            what: "audit validity",
+            id,
+        })?;
+        if now <= valid_until + RECORD_GRACE {
+            return Err(LedgerError::AuditStillValid {
+                id,
+                valid_until: rfc3339(valid_until)?,
+            });
+        }
+        tx.execute(
+            "UPDATE audit_charges SET state = 'released', updated_at = ?2 WHERE id = ?1",
+            params![id, rfc3339(now)?],
+        )?;
+        let c = audit_charge_in(&tx, id)?;
+        tx.commit()?;
+        Ok(c)
+    }
+
+    /// Nothing was ever sent; the cap goes back to the budget. Only from `reserved`.
+    pub fn release_audit(&mut self, id: i64, now: OffsetDateTime) -> Result<AuditCharge> {
+        let tx = self.conn.transaction()?;
+        let c = audit_charge_in(&tx, id)?;
+        if c.state != "reserved" {
+            return Err(LedgerError::AuditWrongState {
+                id,
+                state: c.state,
+                wanted: "reserved",
+            });
+        }
+        tx.execute(
+            "UPDATE audit_charges SET state = 'released', updated_at = ?2 WHERE id = ?1",
+            params![id, rfc3339(now)?],
+        )?;
+        let c = audit_charge_in(&tx, id)?;
+        tx.commit()?;
+        Ok(c)
+    }
+
+    /// Charges whose transaction is known and undecided, for reconciliation.
+    pub fn audit_submitted_charges(&self, mandate_id: &str) -> Result<Vec<AuditCharge>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM audit_charges WHERE mandate_id = ?1 AND state = 'submitted' ORDER BY id",
+        )?;
+        let ids: Vec<i64> = stmt
+            .query_map([mandate_id], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        ids.into_iter()
+            .map(|id| audit_charge_in(&self.conn, id))
+            .collect()
     }
 }
 
@@ -1077,7 +1371,7 @@ fn audit_in(conn: &Connection, mandate_id: &str) -> Result<AuditAccounts> {
         |r| r.get(0),
     )?;
     let charged: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(charged), 0) FROM audit_charges WHERE mandate_id = ?1 AND state = 'reconciled'",
+        "SELECT COALESCE(SUM(charged), 0) FROM audit_charges WHERE mandate_id = ?1 AND state IN ('reconciled', 'overrun')",
         [mandate_id],
         |r| r.get(0),
     )?;
@@ -1115,29 +1409,43 @@ fn reservation_in(conn: &Connection, id: i64) -> Result<Reservation> {
 }
 
 fn audit_charge_in(conn: &Connection, id: i64) -> Result<AuditCharge> {
-    conn.query_row(
-        "SELECT id, mandate_id, purpose, cap, charged, tx_id, state FROM audit_charges WHERE id = ?1",
-        [id],
-        |r| {
-            Ok(AuditCharge {
-                id: r.get(0)?,
-                mandate_id: r.get(1)?,
-                purpose: r.get(2)?,
-                cap: r.get(3)?,
-                charged: r.get(4)?,
-                tx_id: r.get(5)?,
-                state: r.get(6)?,
-            })
-        },
-    )
-    .optional()?
-    .ok_or(LedgerError::NotFound {
-        what: "audit charge",
-        id,
+    let row = conn
+        .query_row(
+            "SELECT id, mandate_id, purpose, cap, charged, tx_id, mirror_id, valid_until, state FROM audit_charges WHERE id = ?1",
+            [id],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, String>(8)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(LedgerError::NotFound {
+            what: "audit charge",
+            id,
+        })?;
+    Ok(AuditCharge {
+        id: row.0,
+        mandate_id: row.1,
+        purpose: row.2,
+        cap: row.3,
+        charged: row.4,
+        tx_id: row.5,
+        mirror_id: row.6,
+        valid_until: row.7.as_deref().map(parse_time).transpose()?,
+        state: row.8,
     })
 }
 
-const AUTH_COLUMNS: &str = "id, mandate_id, step, reservation_id, quote_json, payment_id, tx_id, mirror_id, amount, asset, pay_to, fee_payer, valid_start, valid_until, signature, request_json, submissions, retrievals, payment_state, delivery_state, response_body, response_hash, payment_response, consensus_timestamp, duplicates_ignored, failure_results, reject_reason, payer";
+const AUTH_COLUMNS: &str = "id, mandate_id, step, reservation_id, quote_json, payment_id, tx_id, mirror_id, amount, asset, pay_to, fee_payer, valid_start, valid_until, signature, request_json, submissions, retrievals, payment_state, delivery_state, response_body, response_hash, payment_response, consensus_timestamp, duplicates_ignored, failure_results, reject_reason, payer, last_submission_at, last_retrieval_at";
 
 fn authorization_from_row(r: &Row<'_>) -> rusqlite::Result<Result<Authorization>> {
     let valid_start: String = r.get(12)?;
@@ -1145,6 +1453,8 @@ fn authorization_from_row(r: &Row<'_>) -> rusqlite::Result<Result<Authorization>
     let request_json: String = r.get(15)?;
     let payment_state: String = r.get(18)?;
     let delivery_state: String = r.get(19)?;
+    let last_submission_at: Option<String> = r.get(28)?;
+    let last_retrieval_at: Option<String> = r.get(29)?;
     let built = (|| -> Result<Authorization> {
         Ok(Authorization {
             id: r.get(0)?,
@@ -1165,6 +1475,8 @@ fn authorization_from_row(r: &Row<'_>) -> rusqlite::Result<Result<Authorization>
             request: serde_json::from_str(&request_json)?,
             submissions: r.get::<_, i64>(16)? as u32,
             retrievals: r.get::<_, i64>(17)? as u32,
+            last_submission_at: last_submission_at.as_deref().map(parse_time).transpose()?,
+            last_retrieval_at: last_retrieval_at.as_deref().map(parse_time).transpose()?,
             payment_state: PaymentState::parse(&payment_state),
             delivery_state: DeliveryState::parse(&delivery_state),
             response_body: r.get(20)?,
@@ -1196,53 +1508,21 @@ fn authorization_in(conn: &Connection, id: i64) -> Result<Authorization> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{mandate_row, request, signed_payment, signed_payment_for};
+    use time::Duration;
     use time::macros::datetime;
 
     const NOW: OffsetDateTime = datetime!(2026-09-08 09:00 UTC);
-
-    pub fn row() -> MandateRow {
-        MandateRow {
-            id: "m1".to_owned(),
-            mandate_hash: "a".repeat(64),
-            manifest_hash: "b".repeat(64),
-            service_total: 10_000,
-            service_asset: "0.0.429274".to_owned(),
-            audit_total: 50_000_000,
-            max_single_payment: 9_000,
-            deadline: datetime!(2026-09-13 16:00 UTC),
-        }
-    }
-
-    pub fn payment(n: u32, amount: i64) -> PreparedPayment {
-        PreparedPayment {
-            payment_id: format!("pay_{n:0>32}"),
-            tx_id: format!("0.0.7162784@1788800000.{n:0>9}"),
-            mirror_id: format!("0.0.7162784-1788800000-{n:0>9}"),
-            payer: "0.0.10399984".to_owned(),
-            amount,
-            asset: "0.0.429274".to_owned(),
-            pay_to: "0.0.10409989".to_owned(),
-            fee_payer: "0.0.7162784".to_owned(),
-            valid_start: NOW - time::Duration::seconds(5),
-            valid_until: NOW + time::Duration::seconds(115),
-            signature: format!("sig-{n}"),
-            quote_json: "{}".to_owned(),
-        }
-    }
-
-    pub fn request() -> Request {
-        Request {
-            method: "POST".to_owned(),
-            url: "http://127.0.0.1:4021/events".to_owned(),
-            headers: vec![("content-type".to_owned(), "application/json".to_owned())],
-            body: br#"{"pools":["0xabc"]}"#.to_vec(),
-        }
-    }
+    const USDC: &str = "0.0.429274";
 
     fn ledger() -> Ledger {
         let mut l = Ledger::in_memory().unwrap();
-        l.insert_mandate(&row(), NOW).unwrap();
+        l.insert_mandate(&mandate_row(), NOW).unwrap();
         l
+    }
+
+    fn payment(n: u32, amount: i64) -> PreparedPayment {
+        signed_payment(n, amount, USDC, NOW)
     }
 
     fn settled() -> Settlement {
@@ -1250,6 +1530,68 @@ mod tests {
             consensus_timestamp: "1788800010.000000001".to_owned(),
             duplicates_ignored: 1,
         }
+    }
+
+    #[test]
+    fn a_prepared_payment_reads_everything_from_the_signed_bytes() {
+        let p = payment(7, 1_234);
+        assert_eq!(p.amount, 1_234);
+        assert_eq!(p.asset, USDC);
+        assert_eq!(p.payer, "0.0.10399984");
+        assert_eq!(p.pay_to, "0.0.10409989");
+        assert_eq!(p.fee_payer, "0.0.7162784");
+        assert!(p.tx_id.starts_with("0.0.7162784@"));
+        assert!(p.mirror_id.starts_with("0.0.7162784-"));
+        assert_eq!(p.valid_until - p.valid_start, Duration::seconds(120));
+        assert!(p.quote_json.contains("\"payTo\":\"0.0.10409989\""));
+    }
+
+    #[test]
+    fn a_header_whose_terms_disagree_with_the_bytes_is_refused() {
+        let forged = signed_payment_for(1, 16_000, USDC, NOW, |accepted| {
+            accepted.amount = "1000".to_owned()
+        });
+        assert!(matches!(
+            forged,
+            Err(BindingError::Accepted {
+                field: "amount",
+                ..
+            })
+        ));
+        let wrong_recipient = signed_payment_for(2, 1_000, USDC, NOW, |accepted| {
+            accepted.pay_to = "0.0.5".to_owned()
+        });
+        assert!(matches!(
+            wrong_recipient,
+            Err(BindingError::Accepted { field: "payTo", .. })
+        ));
+        let wrong_asset = signed_payment_for(3, 1_000, USDC, NOW, |accepted| {
+            accepted.asset = "0.0.0".to_owned()
+        });
+        assert!(matches!(
+            wrong_asset,
+            Err(BindingError::Accepted { field: "asset", .. })
+        ));
+        let good = payment(4, 1_000);
+        assert!(matches!(
+            PreparedPayment::from_signature(&good.signature, "pay_other_id_0000000000000000000"),
+            Err(BindingError::PaymentId { .. })
+        ));
+        assert!(matches!(
+            PreparedPayment::from_signature("bm90IGpzb24=", "pay_x"),
+            Err(BindingError::Header(_))
+        ));
+    }
+
+    #[test]
+    fn the_payment_asset_must_be_the_service_asset() {
+        let mut l = ledger();
+        let hbar = signed_payment(1, 1_000, "0.0.0", NOW);
+        assert!(matches!(
+            l.prepare("m1", "screen", None, &hbar, &request(), NOW),
+            Err(LedgerError::AssetMismatch { .. })
+        ));
+        assert_eq!(l.accounts("m1").unwrap().outstanding, 0);
     }
 
     #[test]
@@ -1311,9 +1653,10 @@ mod tests {
     }
 
     #[test]
-    fn i1_refuses_what_does_not_fit() {
+    fn i1_refuses_what_does_not_fit_by_the_signed_amount() {
         let mut l = ledger();
-        l.hold("m1", "explain", 9_000, ReservationSource::CeilingAtMax, NOW)
+        let r = l
+            .hold("m1", "explain", 9_000, ReservationSource::CeilingAtMax, NOW)
             .unwrap();
         assert!(matches!(
             l.hold("m1", "events", 1_001, ReservationSource::Quote, NOW),
@@ -1329,25 +1672,29 @@ mod tests {
         l.prepare("m1", "events", None, &payment(2, 1_000), &request(), NOW)
             .unwrap();
         assert_eq!(l.accounts("m1").unwrap().free(), 0);
-    }
-
-    #[test]
-    fn i2_cap_and_i12_deadline_are_enforced_at_prepare() {
-        let mut l = ledger();
+        l.release(r.id, NOW).unwrap();
         assert!(matches!(
-            l.prepare(
-                "m1",
-                "investigate",
-                None,
-                &payment(1, 9_001),
-                &request(),
-                NOW
-            ),
+            l.prepare("m1", "events", None, &payment(3, 9_001), &request(), NOW),
             Err(LedgerError::AboveSinglePayment {
                 amount: 9_001,
                 cap: 9_000
             })
         ));
+        l.prepare("m1", "a", None, &payment(4, 8_000), &request(), NOW)
+            .unwrap();
+        assert!(matches!(
+            l.prepare("m1", "b", None, &payment(5, 8_000), &request(), NOW),
+            Err(LedgerError::OverBudget {
+                amount: 8_000,
+                free: 1_000
+            })
+        ));
+        assert_eq!(l.accounts("m1").unwrap().outstanding, 9_000);
+    }
+
+    #[test]
+    fn i12_deadline_is_enforced_at_prepare() {
+        let mut l = ledger();
         assert!(matches!(
             l.prepare(
                 "m1",
@@ -1416,33 +1763,44 @@ mod tests {
     }
 
     #[test]
-    fn i8_counters_commit_first_and_cap_at_three() {
+    fn i8_counters_commit_first_cap_at_three_and_keep_30_seconds_apart() {
         let mut l = ledger();
         let a = l
             .prepare("m1", "screen", None, &payment(1, 1_000), &request(), NOW)
             .unwrap();
         let s1 = l.commit_submission(a.id, NOW).unwrap();
         assert_eq!((s1.submissions, s1.payment_state), (1, PaymentState::Sent));
-        assert_eq!(s1.signature, "sig-1");
+        assert_eq!(s1.signature, payment(1, 1_000).signature);
         assert_eq!(s1.request, request());
-        l.commit_submission(a.id, NOW).unwrap();
-        let s3 = l.commit_submission(a.id, NOW).unwrap();
+        assert_eq!(s1.next_submission_at(), Some(NOW + Duration::seconds(30)));
+        assert!(matches!(
+            l.commit_submission(a.id, NOW + Duration::seconds(29)),
+            Err(LedgerError::TooSoon {
+                what: "submission",
+                ..
+            })
+        ));
+        l.commit_submission(a.id, NOW + Duration::seconds(30))
+            .unwrap();
+        let s3 = l
+            .commit_submission(a.id, NOW + Duration::seconds(60))
+            .unwrap();
         assert_eq!(s3.submissions, 3);
         assert!(matches!(
-            l.commit_submission(a.id, NOW),
+            l.commit_submission(a.id, NOW + Duration::seconds(90)),
             Err(LedgerError::SubmissionsExhausted { .. })
         ));
         let late = l
             .prepare("m1", "events", None, &payment(2, 1_000), &request(), NOW)
             .unwrap();
         assert!(matches!(
-            l.commit_submission(late.id, NOW + time::Duration::seconds(200)),
+            l.commit_submission(late.id, NOW + Duration::seconds(200)),
             Err(LedgerError::Expired { .. })
         ));
     }
 
     #[test]
-    fn retrievals_need_settlement_and_the_deadline() {
+    fn retrievals_need_settlement_the_deadline_and_spacing() {
         let mut l = ledger();
         let a = l
             .prepare("m1", "screen", None, &payment(1, 1_000), &request(), NOW)
@@ -1456,12 +1814,23 @@ mod tests {
         let r = l.commit_retrieval(a.id, NOW).unwrap();
         assert_eq!(r.retrievals, 1);
         assert!(matches!(
+            l.commit_retrieval(a.id, NOW + Duration::seconds(10)),
+            Err(LedgerError::TooSoon {
+                what: "retrieval",
+                ..
+            })
+        ));
+        let r2 = l
+            .commit_retrieval(a.id, NOW + Duration::seconds(30))
+            .unwrap();
+        assert_eq!(r2.retrievals, 2);
+        assert!(matches!(
             l.commit_retrieval(a.id, datetime!(2026-09-14 00:00 UTC)),
             Err(LedgerError::PastDeadline { .. })
         ));
         l.record_delivery(a.id, b"{}", Some("resp"), NOW).unwrap();
         assert!(matches!(
-            l.commit_retrieval(a.id, NOW),
+            l.commit_retrieval(a.id, NOW + Duration::seconds(60)),
             Err(LedgerError::WrongState { .. })
         ));
     }
@@ -1477,12 +1846,12 @@ mod tests {
             duplicates_ignored: 1,
         };
         let still = l
-            .record_settlement(a.id, &absent, NOW + time::Duration::seconds(60))
+            .record_settlement(a.id, &absent, NOW + Duration::seconds(60))
             .unwrap();
         assert_eq!(still.payment_state, PaymentState::Sent);
         assert_eq!(l.accounts("m1").unwrap().outstanding, 1_000);
         let late = l
-            .record_settlement(a.id, &absent, NOW + time::Duration::seconds(200))
+            .record_settlement(a.id, &absent, NOW + Duration::seconds(200))
             .unwrap();
         assert_eq!(late.payment_state, PaymentState::Unresolved);
         assert_eq!(
@@ -1491,12 +1860,12 @@ mod tests {
             "unresolved keeps the exposure"
         );
         let s = l
-            .record_settlement(a.id, &settled(), NOW + time::Duration::seconds(300))
+            .record_settlement(a.id, &settled(), NOW + Duration::seconds(300))
             .unwrap();
         assert_eq!(s.payment_state, PaymentState::Settled);
         assert_eq!(s.duplicates_ignored, 1);
         let again = l
-            .record_settlement(a.id, &settled(), NOW + time::Duration::seconds(400))
+            .record_settlement(a.id, &settled(), NOW + Duration::seconds(400))
             .unwrap();
         assert_eq!(again, s, "a second observation changes nothing");
         assert_eq!(
@@ -1694,8 +2063,9 @@ mod tests {
     }
 
     #[test]
-    fn audit_caps_are_reserved_reconciled_or_released_within_i10() {
+    fn audit_charges_keep_their_identity_and_never_create_budget() {
         let mut l = ledger();
+        let valid_until = NOW + Duration::seconds(120);
         let c = l.reserve_audit("m1", "receipt:0", 5_000_000, NOW).unwrap();
         assert_eq!(l.audit_accounts("m1").unwrap().spent(), 5_000_000);
         assert!(matches!(
@@ -1705,10 +2075,38 @@ mod tests {
                 free: 45_000_000
             })
         ));
-        l.audit_submitted(c.id, "0.0.10399984@1.2", NOW).unwrap();
+        let s = l
+            .audit_submitted(
+                c.id,
+                "0.0.10399984@1788800000.1",
+                "0.0.10399984-1788800000-000000001",
+                valid_until,
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(
+            (s.state.as_str(), s.tx_id.as_deref(), s.valid_until),
+            (
+                "submitted",
+                Some("0.0.10399984@1788800000.1"),
+                Some(valid_until)
+            )
+        );
+        assert!(
+            matches!(
+                l.release_audit(c.id, NOW),
+                Err(LedgerError::AuditWrongState { .. })
+            ),
+            "identity known: never releasable by hand"
+        );
+        assert_eq!(l.audit_submitted_charges("m1").unwrap().len(), 1);
         assert!(matches!(
-            l.release_audit(c.id, NOW),
-            Err(LedgerError::AuditWrongState { .. })
+            l.audit_reconciled(c.id, -50, NOW),
+            Err(LedgerError::AuditChargeNegative { .. })
+        ));
+        assert!(matches!(
+            l.audit_not_recorded(c.id, valid_until + Duration::seconds(30)),
+            Err(LedgerError::AuditStillValid { .. })
         ));
         let done = l.audit_reconciled(c.id, 61_000, NOW).unwrap();
         assert_eq!(
@@ -1723,9 +2121,35 @@ mod tests {
                 charged: 61_000
             }
         );
-        let d = l.reserve_audit("m1", "receipt:1", 5_000_000, NOW).unwrap();
+        assert!(
+            matches!(
+                l.audit_reconciled(c.id, 1, NOW),
+                Err(LedgerError::AuditWrongState { .. })
+            ),
+            "reconciled once"
+        );
+
+        let o = l.reserve_audit("m1", "receipt:1", 1_000, NOW).unwrap();
+        l.audit_submitted(o.id, "t2", "m2", valid_until, NOW)
+            .unwrap();
+        let over = l.audit_reconciled(o.id, 2_500, NOW).unwrap();
+        assert_eq!(
+            (over.state.as_str(), over.charged),
+            ("overrun", Some(2_500))
+        );
+        assert_eq!(l.audit_accounts("m1").unwrap().charged, 63_500);
+
+        let n = l.reserve_audit("m1", "receipt:2", 5_000_000, NOW).unwrap();
+        l.audit_submitted(n.id, "t3", "m3", valid_until, NOW)
+            .unwrap();
+        let released = l
+            .audit_not_recorded(n.id, valid_until + Duration::seconds(31))
+            .unwrap();
+        assert_eq!(released.state, "released");
+
+        let d = l.reserve_audit("m1", "receipt:3", 5_000_000, NOW).unwrap();
         l.release_audit(d.id, NOW).unwrap();
-        assert_eq!(l.audit_accounts("m1").unwrap().spent(), 61_000);
+        assert_eq!(l.audit_accounts("m1").unwrap().spent(), 63_500);
     }
 
     #[test]
@@ -1739,7 +2163,7 @@ mod tests {
         let path = dir.join("ledger.sqlite");
         let (auth_id, res_id) = {
             let mut l = Ledger::open(&path).unwrap();
-            l.insert_mandate(&row(), NOW).unwrap();
+            l.insert_mandate(&mandate_row(), NOW).unwrap();
             let r = l
                 .hold("m1", "explain", 800, ReservationSource::CeilingAtMax, NOW)
                 .unwrap();
@@ -1752,12 +2176,13 @@ mod tests {
             (a.id, r.id)
         };
         let mut l = Ledger::open(&path).unwrap();
-        l.insert_mandate(&row(), NOW).unwrap();
+        l.insert_mandate(&mandate_row(), NOW).unwrap();
         let a = l.authorization(auth_id).unwrap();
         assert_eq!(
-            (a.payment_state, a.submissions, a.signature.as_str()),
-            (PaymentState::Sent, 1, "sig-1")
+            (a.payment_state, a.submissions, a.last_submission_at),
+            (PaymentState::Sent, 1, Some(NOW))
         );
+        assert_eq!(a.signature, payment(1, 1_500).signature);
         assert_eq!(l.reservation(res_id).unwrap().state, ReservationState::Held);
         assert_eq!(
             l.accounts("m1").unwrap(),
@@ -1769,7 +2194,7 @@ mod tests {
             }
         );
         assert_eq!(l.unpublished("m1").unwrap(), vec![0]);
-        let mut other = row();
+        let mut other = mandate_row();
         other.mandate_hash = "z".repeat(64);
         assert!(matches!(
             l.insert_mandate(&other, NOW),

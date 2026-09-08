@@ -12,8 +12,10 @@ use crate::ledger::{
 /// What a resumed authorization needs next.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resume {
-    /// Not settled, still valid, submissions left: commit and send the same bytes.
+    /// Not settled, still valid, submissions left, spacing elapsed: commit and send the same bytes.
     Resend(Authorization),
+    /// The next send or retrieval is allowed at `at`, section 6's 30 s spacing.
+    Backoff(Authorization, OffsetDateTime),
     /// Not settled and no send is allowed: wait for the record set.
     AwaitRecord(Authorization),
     /// Past the grace with no record: exposure kept until `mandate reconcile` finds one.
@@ -28,6 +30,7 @@ impl Resume {
     pub fn authorization(&self) -> &Authorization {
         match self {
             Self::Resend(a)
+            | Self::Backoff(a, _)
             | Self::AwaitRecord(a)
             | Self::Unresolved(a)
             | Self::Retrieve(a)
@@ -47,14 +50,20 @@ pub fn plan_recovery(
         .resumable(mandate_id)?
         .into_iter()
         .map(|a| match (a.payment_state, a.delivery_state) {
-            (PaymentState::Settled, DeliveryState::None) => Resume::Retrieve(a),
+            (PaymentState::Settled, DeliveryState::None) => match a.next_retrieval_at() {
+                Some(at) if now < at => Resume::Backoff(a, at),
+                _ => Resume::Retrieve(a),
+            },
             (PaymentState::Settled, _) => Resume::Validate(a),
             (PaymentState::Unresolved, _) => Resume::Unresolved(a),
             _ if a.delivery_state == DeliveryState::None
                 && now < a.valid_until
                 && a.submissions < MAX_SUBMISSIONS =>
             {
-                Resume::Resend(a)
+                match a.next_submission_at() {
+                    Some(at) if now < at => Resume::Backoff(a, at),
+                    _ => Resume::Resend(a),
+                }
             }
             _ => Resume::AwaitRecord(a),
         })
@@ -117,7 +126,8 @@ pub async fn reconcile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ledger::{MandateRow, PreparedPayment, Request, ReservationSource};
+    use crate::ledger::{PreparedPayment, ReservationSource};
+    use crate::testing::{mandate_row, request, signed_payment};
     use time::Duration;
     use time::macros::datetime;
 
@@ -125,47 +135,12 @@ mod tests {
 
     fn ledger() -> Ledger {
         let mut l = Ledger::in_memory().unwrap();
-        l.insert_mandate(
-            &MandateRow {
-                id: "m1".to_owned(),
-                mandate_hash: "a".repeat(64),
-                manifest_hash: "b".repeat(64),
-                service_total: 10_000,
-                service_asset: "0.0.429274".to_owned(),
-                audit_total: 50_000_000,
-                max_single_payment: 9_000,
-                deadline: datetime!(2026-09-13 16:00 UTC),
-            },
-            NOW,
-        )
-        .unwrap();
+        l.insert_mandate(&mandate_row(), NOW).unwrap();
         l
     }
 
     fn payment(n: u32) -> PreparedPayment {
-        PreparedPayment {
-            payment_id: format!("pay_{n:0>32}"),
-            tx_id: format!("0.0.7162784@1788800000.{n:0>9}"),
-            mirror_id: format!("0.0.7162784-1788800000-{n:0>9}"),
-            payer: "0.0.10399984".to_owned(),
-            amount: 1_000,
-            asset: "0.0.429274".to_owned(),
-            pay_to: "0.0.10409989".to_owned(),
-            fee_payer: "0.0.7162784".to_owned(),
-            valid_start: NOW - Duration::seconds(5),
-            valid_until: NOW + Duration::seconds(115),
-            signature: format!("sig-{n}"),
-            quote_json: "{}".to_owned(),
-        }
-    }
-
-    fn request() -> Request {
-        Request {
-            method: "GET".to_owned(),
-            url: "http://127.0.0.1:4021/spike".to_owned(),
-            headers: vec![],
-            body: vec![],
-        }
+        signed_payment(n, 1_000, "0.0.429274", NOW)
     }
 
     fn settled() -> Settlement {
@@ -191,8 +166,9 @@ mod tests {
         let exhausted = l
             .prepare("m1", "c", None, &payment(3), &request(), NOW)
             .unwrap();
-        for _ in 0..3 {
-            l.commit_submission(exhausted.id, NOW).unwrap();
+        for i in 0..3 {
+            l.commit_submission(exhausted.id, NOW + Duration::seconds(30 * i))
+                .unwrap();
         }
         let unresolved = l
             .prepare("m1", "d", None, &payment(4), &request(), NOW)
@@ -209,18 +185,27 @@ mod tests {
             .prepare("m1", "e", None, &payment(5), &request(), NOW)
             .unwrap();
         l.record_settlement(retrieve.id, &settled(), NOW).unwrap();
+        let retrieved_recently = l
+            .prepare("m1", "g", None, &payment(7), &request(), NOW)
+            .unwrap();
+        l.record_settlement(retrieved_recently.id, &settled(), NOW)
+            .unwrap();
+        l.commit_retrieval(retrieved_recently.id, NOW + Duration::seconds(65))
+            .unwrap();
         let validate = l
             .prepare("m1", "f", None, &payment(6), &request(), NOW)
             .unwrap();
         l.record_settlement(validate.id, &settled(), NOW).unwrap();
         l.record_delivery(validate.id, b"x", None, NOW).unwrap();
 
-        let plan = plan_recovery(&l, "m1", NOW + Duration::seconds(10)).unwrap();
+        let at = NOW + Duration::seconds(70);
+        let plan = plan_recovery(&l, "m1", at).unwrap();
         let kinds: Vec<(&str, i64)> = plan
             .iter()
             .map(|r| {
                 let k = match r {
                     Resume::Resend(_) => "resend",
+                    Resume::Backoff(..) => "backoff",
                     Resume::AwaitRecord(_) => "await",
                     Resume::Unresolved(_) => "unresolved",
                     Resume::Retrieve(_) => "retrieve",
@@ -237,15 +222,28 @@ mod tests {
                 ("await", exhausted.id),
                 ("unresolved", unresolved.id),
                 ("retrieve", retrieve.id),
+                ("backoff", retrieved_recently.id),
                 ("validate", validate.id)
             ]
         );
         if let Resume::Resend(a) = &plan[1] {
             assert_eq!(
                 (a.submissions, a.signature.as_str(), a.payment_id.as_str()),
-                (1, "sig-2", payment(2).payment_id.as_str())
+                (
+                    1,
+                    payment(2).signature.as_str(),
+                    payment(2).payment_id.as_str()
+                )
             );
         }
+        if let Resume::Backoff(_, until) = &plan[5] {
+            assert_eq!(*until, NOW + Duration::seconds(95));
+        }
+        let soon = plan_recovery(&l, "m1", NOW + Duration::seconds(10)).unwrap();
+        assert!(
+            matches!(soon[1], Resume::Backoff(_, _)),
+            "sent 10 s ago: wait for the spacing"
+        );
         let expired = plan_recovery(&l, "m1", NOW + Duration::seconds(120)).unwrap();
         assert!(
             matches!(expired[0], Resume::AwaitRecord(_)),

@@ -8,52 +8,18 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use mandate::hedera::Settlement;
-use mandate::ledger::{
-    DeliveryState, Ledger, MandateRow, PaymentState, PreparedPayment, Request, ReservationSource,
-};
+use mandate::ledger::{DeliveryState, Ledger, PaymentState, PreparedPayment, ReservationSource};
 use mandate::purchase::{Resume, plan_recovery};
+use mandate::testing::{mandate_row as row, request, signed_payment};
 use time::macros::datetime;
 use time::{Duration, OffsetDateTime};
 
 const NOW: OffsetDateTime = datetime!(2026-09-08 09:00 UTC);
 
-fn row() -> MandateRow {
-    MandateRow {
-        id: "m1".to_owned(),
-        mandate_hash: "a".repeat(64),
-        manifest_hash: "b".repeat(64),
-        service_total: 10_000,
-        service_asset: "0.0.429274".to_owned(),
-        audit_total: 50_000_000,
-        max_single_payment: 9_000,
-        deadline: datetime!(2026-09-13 16:00 UTC),
-    }
-}
-
+/// The child signs with an ephemeral key and writes the header to a side
+/// file, so the parent can compare what the ledger holds with what was sent.
 fn payment() -> PreparedPayment {
-    PreparedPayment {
-        payment_id: "pay_00000000000000000000000000000001".to_owned(),
-        tx_id: "0.0.7162784@1788800000.000000001".to_owned(),
-        mirror_id: "0.0.7162784-1788800000-000000001".to_owned(),
-        payer: "0.0.10399984".to_owned(),
-        amount: 1_500,
-        asset: "0.0.429274".to_owned(),
-        pay_to: "0.0.10409989".to_owned(),
-        fee_payer: "0.0.7162784".to_owned(),
-        valid_start: NOW - Duration::seconds(5),
-        valid_until: NOW + Duration::seconds(115),
-        signature: "the-exact-header".to_owned(),
-        quote_json: "{}".to_owned(),
-    }
-}
-
-fn request() -> Request {
-    Request {
-        method: "POST".to_owned(),
-        url: "http://127.0.0.1:4021/events".to_owned(),
-        headers: vec![("content-type".to_owned(), "application/json".to_owned())],
-        body: br#"{"pools":["0xabc"]}"#.to_vec(),
-    }
+    signed_payment(1, 1_500, "0.0.429274", NOW)
 }
 
 /// The child: runs up to the failure point, then dies without cleanup.
@@ -68,8 +34,10 @@ fn crash_child() {
     ledger
         .hold("m1", "explain", 800, ReservationSource::CeilingAtMax, NOW)
         .unwrap();
+    let p = payment();
+    std::fs::write(path.with_extension("signature"), &p.signature).unwrap();
     let a = ledger
-        .prepare("m1", "events", None, &payment(), &request(), NOW)
+        .prepare("m1", "events", None, &p, &request(), NOW)
         .unwrap();
     if point == "after_authorization" {
         std::process::abort();
@@ -103,6 +71,10 @@ fn run_child(point: &str) -> (PathBuf, Ledger) {
     (dir, ledger)
 }
 
+fn child_signature(dir: &std::path::Path) -> String {
+    std::fs::read_to_string(dir.join("ledger.signature")).unwrap()
+}
+
 #[test]
 fn crash_after_authorization_resends_the_same_bytes_with_a_first_submission() {
     let (dir, ledger) = run_child("after_authorization");
@@ -115,8 +87,9 @@ fn crash_after_authorization_resends_the_same_bytes_with_a_first_submission() {
         (a.payment_state, a.submissions),
         (PaymentState::Prepared, 0)
     );
-    assert_eq!(a.signature, "the-exact-header");
+    assert_eq!(a.signature, child_signature(&dir));
     assert_eq!(a.payment_id, payment().payment_id);
+    assert_eq!(a.amount, 1_500);
     assert_eq!(a.request, request());
     assert_eq!(ledger.accounts("m1").unwrap().outstanding, 1_500);
     assert_eq!(ledger.accounts("m1").unwrap().held, 800);
@@ -126,7 +99,7 @@ fn crash_after_authorization_resends_the_same_bytes_with_a_first_submission() {
 #[test]
 fn crash_after_counter_costs_one_attempt_and_never_bypasses_the_cap() {
     let (dir, mut ledger) = run_child("after_counter");
-    let plan = plan_recovery(&ledger, "m1", NOW + Duration::seconds(10)).unwrap();
+    let plan = plan_recovery(&ledger, "m1", NOW + Duration::seconds(30)).unwrap();
     let Resume::Resend(a) = &plan[0] else {
         panic!("expected resend, got {plan:?}");
     };
@@ -135,19 +108,30 @@ fn crash_after_counter_costs_one_attempt_and_never_bypasses_the_cap() {
         (PaymentState::Sent, 1),
         "the lost send still counts"
     );
+    let early = plan_recovery(&ledger, "m1", NOW + Duration::seconds(10)).unwrap();
+    assert!(
+        matches!(early[0], Resume::Backoff(_, _)),
+        "the 30 s spacing survives the crash"
+    );
+    assert!(
+        ledger
+            .commit_submission(a.id, NOW + Duration::seconds(10))
+            .is_err(),
+        "too soon"
+    );
     let second = ledger
-        .commit_submission(a.id, NOW + Duration::seconds(10))
+        .commit_submission(a.id, NOW + Duration::seconds(30))
         .unwrap();
     assert_eq!(
-        (second.submissions, second.signature.as_str()),
-        (2, "the-exact-header")
+        (second.submissions, second.signature),
+        (2, child_signature(&dir))
     );
     ledger
-        .commit_submission(a.id, NOW + Duration::seconds(20))
+        .commit_submission(a.id, NOW + Duration::seconds(60))
         .unwrap();
     assert!(
         ledger
-            .commit_submission(a.id, NOW + Duration::seconds(30))
+            .commit_submission(a.id, NOW + Duration::seconds(90))
             .is_err(),
         "three is the cap"
     );
