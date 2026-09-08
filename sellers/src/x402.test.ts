@@ -5,7 +5,7 @@ import type { FacilitatorClient } from "@x402/core/server";
 import type { PaymentPayload, PaymentRequired } from "@x402/core/types";
 import { MemoryStore } from "./idempotency.js";
 import { Journal, sha256Hex } from "./journal.js";
-import { USDC_TESTNET, createSeller } from "./x402.js";
+import { USDC_TESTNET, createSeller, fixedPrice } from "./x402.js";
 
 interface Fake {
   client: FacilitatorClient;
@@ -65,11 +65,11 @@ function start(): Running {
       facilitator: fake.client,
     },
     [
-      { path: "/spike", amount: "1000", description: "spike", handler: (_req, res) => void res.json({ ok: true, nonce: ++counter }) },
+      { path: "/spike", price: fixedPrice(1000), description: "spike", handler: (_req, res) => void res.json({ ok: true, nonce: ++counter }) },
       {
         method: "POST",
         path: "/facts",
-        amount: "2000",
+        price: fixedPrice(2000),
         description: "facts",
         handler: (req, res) => void res.json({ pool: (req.body as { pool: string }).pool, nonce: ++counter }),
       },
