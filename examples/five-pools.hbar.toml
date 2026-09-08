@@ -1,0 +1,41 @@
+[mandate]
+principal = "0.0.10399984"
+purpose = "Explain any material liquidity change in the listed pools over the last 24 hours."
+coverage = "all_material"
+
+[mandate.budget]
+service = { total = "0.0100", asset = "0.0.0" }
+audit = { total = "0.5", asset = "HBAR" }
+reserve_completion = true
+
+[mandate.constraints]
+networks = ["hedera:testnet"]
+facilitator = "https://api.testnet.blocky402.com/"
+manifest = { path = "manifest.hbar.json", hash = "c42543dd9a047f640af1913d203414ae8b3f43c50ca2a259a93f4088d24f6736" }
+sellers = "allowlist"
+allowlist = ["mandate-sellers"]
+max_single_payment = "0.0090"
+deadline = 2026-09-13T16:00:00Z
+
+[mandate.requirements]
+evidence = "transaction"
+citations = "required"
+max_data_age_s = 3600
+provenance_samples = 0
+degrade = false
+
+[mandate.duties]
+receipts_topic = "0.0.10410389"
+report_refusals = true
+
+[mandate.inputs]
+pools = [
+  "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
+  "0x4585fe77225b41b697c938b018e2ac67ac5a20c0",
+  "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8",
+  "0x3416cf6c708da44db2624d63ea0aaef7113527c6",
+  "0x11b815efb8f581194ae79006d24e0d814b7697f6",
+]
+window_h = 24
+materiality = "0.05"
+min_event_usd = "100000"
