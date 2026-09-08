@@ -13,7 +13,7 @@ import type { Listing } from "./x402.js";
 
 /** What the handlers need; the Graph client and the model are injected so tests can fake them. */
 export interface Deps {
-  graph: Pick<GraphClient, "screen" | "eventsProduct">;
+  graph: Pick<GraphClient, "screen" | "eventsProduct" | "investigate">;
   explain: Explainer;
   tariffs: Record<ListingId, Tariff>;
   asset: string;
@@ -116,11 +116,9 @@ export function listings(deps: Deps): Listing[] {
 
 async function investigate(deps: Deps, body: unknown, evidence: Evidence): Promise<InvestigateResponse> {
   const r: EvidenceRequest = parseEvidenceRequest(body, { listing: "investigate", maxPools: deps.tariffs.investigate.max_units, hourAligned: true });
-  const screen = await deps.graph.screen(r.pools, r.window, r.inputs);
-  const material = Object.entries(screen.pools)
-    .filter(([, p]) => p.verdict === "material")
-    .map(([pool]) => pool);
-  const events = material.length > 0 ? await deps.graph.eventsProduct(material, r.window, r.cap) : null;
+  // One pinned context for the whole bundle: the screen and the events for
+  // the material pools come from one head and one deployment.
+  const { screen, events } = await deps.graph.investigate(r.pools, r.window, r.inputs, r.cap);
   const { outcomes, claims } = outcomesAndClaims(screen, events, evidence, r.inputs.min_event_usd);
   const brief = {
     outcomes,

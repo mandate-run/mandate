@@ -256,6 +256,22 @@ export interface PoolEvents {
   truncated: boolean;
 }
 
+/** What every query of one product or bundle shares. */
+export interface Context {
+  window: Window;
+  header: ResponseHeader;
+  head: number;
+  deployment: string;
+  /** `requests` at the start of what this context counts; the shared queries count toward the first product. */
+  requestsBefore: number;
+}
+
+/** The investigate bundle's facts: one context for both parts. */
+export interface Investigation {
+  screen: ScreenResponse;
+  events: EventsResponse | null;
+}
+
 export interface EventsResponse extends ResponseHeader {
   cap: number;
   pools: Record<string, PoolEvents>;
@@ -509,11 +525,23 @@ export class GraphClient {
     };
   }
 
+  /** One pinned context: the header, head and deployment every query of a product or bundle shares. */
+  async context(window: Window): Promise<Context> {
+    const requestsBefore = this.requests;
+    const { header, head, deployment } = await this.header(window);
+    return { window, header, head, deployment, requestsBefore };
+  }
+
   /** Screening product: three shared requests plus one per pool. The window must be hour-aligned. */
   async screen(pools: string[], window: Window, inputs: Inputs): Promise<ScreenResponse> {
     assertHourAligned(window);
-    const before = this.requests;
-    const { header, head, deployment } = await this.header(window);
+    return this.screenWith(await this.context(window), pools, inputs);
+  }
+
+  /** The screen inside an existing context. */
+  async screenWith(ctx: Context, pools: string[], inputs: Inputs): Promise<ScreenResponse> {
+    const { header, head, deployment, window } = ctx;
+    const before = ctx.requestsBefore;
     const out: Record<string, PoolScreen> = {};
     let anyTruncated = false;
     for (const raw of pools) {
@@ -562,8 +590,13 @@ export class GraphClient {
 
   /** Events product: every mint, burn and swap in the window, paginated at one head block. */
   async eventsProduct(pools: string[], window: Window, cap: number): Promise<EventsResponse> {
-    const before = this.requests;
-    const { header, head, deployment } = await this.header(window);
+    return this.eventsWith(await this.context(window), pools, cap);
+  }
+
+  /** The events product inside an existing context. */
+  async eventsWith(ctx: Context, pools: string[], cap: number): Promise<EventsResponse> {
+    const { header, head, deployment, window } = ctx;
+    const before = ctx.requestsBefore;
     const out: Record<string, PoolEvents> = {};
     let anyTruncated = false;
     for (const raw of pools) {
@@ -573,6 +606,23 @@ export class GraphClient {
       out[pool] = events;
     }
     return { ...header, truncated: anyTruncated, cap, pools: out, requests: this.requests - before };
+  }
+
+  /**
+   * The investigate bundle: the screen and, for the pools it finds material,
+   * the events, all read at one head from one deployment. A deployment change
+   * between the queries is an error, never a mixed bundle.
+   */
+  async investigate(pools: string[], window: Window, inputs: Inputs, cap: number): Promise<Investigation> {
+    assertHourAligned(window);
+    const ctx = await this.context(window);
+    const screen = await this.screenWith(ctx, pools, inputs);
+    const material = Object.entries(screen.pools)
+      .filter(([, p]) => p.verdict === "material")
+      .map(([pool]) => pool);
+    const events =
+      material.length > 0 ? await this.eventsWith({ ...ctx, requestsBefore: this.requests }, material, cap) : null;
+    return { screen, events };
   }
 
   async eventsForPool(pool: string, window: Window, head: number, cap: number, deployment?: string): Promise<PoolEvents> {
