@@ -37,6 +37,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Recover a run that stopped mid-purchase, then carry on where it left off.
+    Resume {
+        /// Path to the mandate file the run used.
+        file: PathBuf,
+        /// Path to the ledger holding its authorizations.
+        #[arg(long, default_value = "mandate.sqlite")]
+        ledger: PathBuf,
+        /// The mandate id to resume, when it differs from the file's.
+        #[arg(long)]
+        id: Option<String>,
+        /// Print the report and transcript as one JSON document instead of streaming lines.
+        #[arg(long)]
+        json: bool,
+    },
     /// Re-run I5 for every non-terminal authorization of a mandate from the mirror node.
     Reconcile {
         /// The mandate id.
@@ -79,7 +93,13 @@ async fn main() -> ExitCode {
             ledger,
             id,
             json,
-        } => run(&file, &ledger, id.as_deref(), json).await,
+        } => run(&file, &ledger, id.as_deref(), json, false).await,
+        Command::Resume {
+            file,
+            ledger,
+            id,
+            json,
+        } => run(&file, &ledger, id.as_deref(), json, true).await,
         Command::Quote {
             manifest,
             listing,
@@ -110,14 +130,16 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Sections 4 to 12 for one mandate. Exit 0 delivered, 3 refused, 4
-/// delivered with findings, 5 receipts not anchored when the mandate requires
-/// it, 1 error, 2 a mandate or manifest that does not load.
+/// Sections 4 to 12 for one mandate, or section 6 recovery first when
+/// `resume`. Exit 0 delivered, 3 refused, 4 delivered with findings, 5
+/// receipts not anchored when the mandate requires it, 6 a payment neither
+/// settled nor failed, 1 error, 2 a mandate or manifest that does not load.
 async fn run(
     file: &std::path::Path,
     ledger: &std::path::Path,
     id: Option<&str>,
     json: bool,
+    resume: bool,
 ) -> ExitCode {
     let cfg = match Config::load() {
         Ok(c) => c,
@@ -126,7 +148,7 @@ async fn run(
             return ExitCode::from(1);
         }
     };
-    match mandate::run::run(&cfg, file, ledger, id, json).await {
+    match mandate::run::run(&cfg, file, ledger, id, json, resume).await {
         Ok(report) => {
             if json {
                 println!(
