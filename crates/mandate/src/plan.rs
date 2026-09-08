@@ -142,7 +142,7 @@ fn units_for(listing: &Listing, pools: u64, window_seconds: u64) -> u64 {
 
 /// Prices one plan over the situation. Missing listings make it infeasible.
 pub fn price(kind: PlanKind, sit: &Situation<'_>) -> Plan {
-    let mut reasons = Vec::new();
+    let mut reasons: Vec<String> = Vec::new();
     let mut expected_steps = Vec::new();
     let mut bound_steps = Vec::new();
     let push = |cap: Capability,
@@ -166,10 +166,15 @@ pub fn price(kind: PlanKind, sit: &Situation<'_>) -> Plan {
             }
         }
     };
-    let expected_w = sit
-        .expected_material
-        .min(sit.pending)
-        .max(u64::from(sit.pending > 0));
+    // The assumption prices events and investigate only while nothing has
+    // been screened; once the screen has delivered, `|W|` is observed.
+    let expected_w = if sit.unscreened > 0 {
+        sit.expected_material
+            .min(sit.pending)
+            .max(u64::from(sit.pending > 0))
+    } else {
+        sit.pending
+    };
     match kind {
         PlanKind::Staged => {
             if sit.unscreened > 0 {
@@ -268,6 +273,9 @@ pub fn price(kind: PlanKind, sit: &Situation<'_>) -> Plan {
     if expected_steps.is_empty() {
         reasons.push("no pending work".to_owned());
     }
+    // One step is priced twice, at expected and at bound quantities; a
+    // listing that cannot be used says so once.
+    reasons.dedup();
     Plan {
         kind,
         expected,
@@ -463,6 +471,41 @@ mod tests {
             by_kind(&plans, PlanKind::Staged).expected,
             2_800,
             "live events quote replaces the ceiling"
+        );
+    }
+
+    #[test]
+    fn observed_work_replaces_the_assumption_after_the_screen() {
+        let m = Manifest::from_json(MANIFEST).unwrap();
+        let quotes = BTreeMap::new();
+        // Scenario 5: four pending pools after the screen.
+        let mut sit = situation(&m, &quotes, 5, 10_000);
+        sit.unscreened = 0;
+        sit.pending = 4;
+        let plans = price_all(&sit);
+        let staged = by_kind(&plans, PlanKind::Staged);
+        assert_eq!(
+            (staged.expected, staged.bound, staged.authorizations),
+            (6_800, 6_800, 2)
+        );
+        let hybrid = by_kind(&plans, PlanKind::Hybrid);
+        assert_eq!((hybrid.expected, hybrid.authorizations), (6_800, 1));
+        assert_eq!(
+            choose(&plans, &sit).unwrap().kind,
+            PlanKind::Hybrid,
+            "ties go to fewer authorizations"
+        );
+        // Five pending pools.
+        sit.pending = 5;
+        let plans = price_all(&sit);
+        assert_eq!(by_kind(&plans, PlanKind::Staged).expected, 8_300);
+        assert_eq!(by_kind(&plans, PlanKind::Hybrid).expected, 8_000);
+        assert_eq!(choose(&plans, &sit).unwrap().kind, PlanKind::Hybrid);
+        // Before the screen the assumption still applies.
+        let before = situation(&m, &quotes, 5, 10_000);
+        assert_eq!(
+            by_kind(&price_all(&before), PlanKind::Staged).expected,
+            3_300
         );
     }
 
