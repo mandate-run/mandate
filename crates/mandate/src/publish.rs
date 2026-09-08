@@ -21,6 +21,7 @@ pub struct Published {
 
 pub struct Publisher<'a> {
     pub consensus: &'a Consensus,
+    pub mirror: &'a MirrorNode,
     pub topic: HederaTopicId,
     pub fee_cap: i64,
 }
@@ -119,9 +120,9 @@ impl Publisher<'_> {
     pub async fn reconcile_audit(
         &self,
         ledger: &mut Ledger,
-        mirror: &MirrorNode,
         mandate_id: &str,
     ) -> Result<(), ReconcileError> {
+        let mirror = self.mirror;
         for c in ledger.audit_submitted_charges(mandate_id)? {
             let Some(mirror_id) = c.mirror_id.as_deref() else {
                 continue;

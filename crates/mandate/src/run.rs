@@ -1,9 +1,15 @@
 //! `mandate run`: sections 4, 5, 6, 8, 9, 11 and 12 in order for one
-//! mandate. Every decision is printed as it is made and collected into the
-//! report; every payment goes through the ledger; every delivery is checked
-//! before it authorizes another purchase; every receipt is durable before it
-//! is published. A refusal is terminal: nothing after it turns the run into
-//! a delivery.
+//! mandate, as one decision loop: construct the requests whose bodies are
+//! known, collect the quotes that are valid now, price and compare the
+//! remaining plans, hold or replace the completion reservation, buy the
+//! chosen plan's first step, check the delivery, recompute, update `W`,
+//! repeat. A refused quote excludes its listing and returns to planning; a
+//! refusal is terminal only when no plan remains. Every payment goes through
+//! the ledger; every receipt is durable before it is published.
+//!
+//! Quoting, paying and publishing are seams, so the same loop runs against
+//! the live sellers and the facilitator, or against a scripted market in
+//! tests.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -17,20 +23,22 @@ use time::format_description::well_known::Rfc3339;
 use crate::analysis::{self, Claim, Outcome, PoolOutcome, Thresholds, outcomes_and_claims};
 use crate::config::{Config, PublicConfig};
 use crate::evidence::{EventsResponse, Explanation, ScreenResponse, Window};
-use crate::hedera::{Consensus, HederaTopicId, MirrorNode, Settlement, Signer};
+use crate::hedera::{HederaTopicId, MirrorNode, Settlement};
 use crate::ledger::{
     Authorization, DeliveryState, Ledger, LedgerError, MandateRow, PaymentState, ReservationSource,
 };
 use crate::mandate::{Citations, Evidence, Mandate, SellerPolicy, format_amount};
 use crate::manifest::{Capability, Listing, Manifest};
 use crate::plan::{self, Plan, PlanKind, Situation};
-use crate::publish::{FEE_CAP_TINYBAR, Publisher};
-use crate::purchase::{PayError, Payer, Purchase};
+use crate::publish::{FEE_CAP_TINYBAR, Published, Publisher};
+use crate::purchase::{PayError, Payer, Purchase, ReconcileError};
 use crate::quote::{Estimate, Quote, QuoteError, Quoter};
 use crate::receipts::{Outcome as ReceiptOutcome, Receipt};
 use crate::refusal::{Code, Refusal};
 use crate::transcript;
-use crate::validate::{self, Delivered, Failure, Provenance, Rules, Timed, Validation, reasons_of};
+use crate::validate::{
+    self, Delivered, Failure, Provenance, Purchased, Rules, Timed, Validation, reasons_of,
+};
 use crate::x402::sha256_hex;
 
 pub const DEFAULT_QUOTE_TIMEOUT: StdDuration = StdDuration::from_secs(15);
@@ -40,6 +48,115 @@ pub const MIRROR_POLL: StdDuration = StdDuration::from_secs(5);
 pub const MAX_RETRIEVALS_PER_RUN: u32 = 4;
 /// Publish attempts for the queue when `anchor_before_delivery` is set.
 pub const ANCHOR_ATTEMPTS: u32 = 3;
+/// A quote is used for planning only while it stays usable this long.
+pub const QUOTE_MARGIN: time::Duration = time::Duration::seconds(10);
+
+// Seams.
+
+/// Section 4: one 402 for one listing from a client that cannot pay.
+#[allow(async_fn_in_trait)]
+pub trait Quoting {
+    fn signers(&self) -> Vec<String>;
+    async fn quote(
+        &self,
+        listing: &Listing,
+        body: Vec<u8>,
+        now: OffsetDateTime,
+    ) -> Result<Quote, QuoteError>;
+}
+
+impl Quoting for Quoter {
+    fn signers(&self) -> Vec<String> {
+        Quoter::signers(self).to_vec()
+    }
+
+    async fn quote(
+        &self,
+        listing: &Listing,
+        body: Vec<u8>,
+        now: OffsetDateTime,
+    ) -> Result<Quote, QuoteError> {
+        Quoter::quote(self, listing, body, now).await
+    }
+}
+
+/// Section 6: sign and persist, then drive to settlement with a delivery.
+#[allow(async_fn_in_trait)]
+pub trait Paying {
+    async fn prepare(
+        &self,
+        ledger: &mut Ledger,
+        mandate_id: &str,
+        step: &str,
+        reservation_id: Option<i64>,
+        quote: &Quote,
+    ) -> Result<Authorization, PayError>;
+    async fn settle(
+        &self,
+        ledger: &mut Ledger,
+        id: i64,
+        deadline: OffsetDateTime,
+        say: &mut dyn FnMut(String),
+    ) -> Result<Purchase, PayError>;
+}
+
+impl Paying for Payer<'_> {
+    async fn prepare(
+        &self,
+        ledger: &mut Ledger,
+        mandate_id: &str,
+        step: &str,
+        reservation_id: Option<i64>,
+        quote: &Quote,
+    ) -> Result<Authorization, PayError> {
+        Payer::prepare(self, ledger, mandate_id, step, reservation_id, quote).await
+    }
+
+    async fn settle(
+        &self,
+        ledger: &mut Ledger,
+        id: i64,
+        deadline: OffsetDateTime,
+        say: &mut dyn FnMut(String),
+    ) -> Result<Purchase, PayError> {
+        Payer::settle(self, ledger, id, deadline, say).await
+    }
+}
+
+/// Section 11: the receipt queue.
+#[allow(async_fn_in_trait)]
+pub trait Publishing {
+    async fn publish_pending(
+        &self,
+        ledger: &mut Ledger,
+        mandate_id: &str,
+        say: &mut dyn FnMut(String),
+    ) -> Result<Vec<Published>, LedgerError>;
+    async fn reconcile_audit(
+        &self,
+        ledger: &mut Ledger,
+        mandate_id: &str,
+    ) -> Result<(), ReconcileError>;
+}
+
+impl Publishing for Publisher<'_> {
+    async fn publish_pending(
+        &self,
+        ledger: &mut Ledger,
+        mandate_id: &str,
+        say: &mut dyn FnMut(String),
+    ) -> Result<Vec<Published>, LedgerError> {
+        Publisher::publish_pending(self, ledger, mandate_id, say).await
+    }
+
+    async fn reconcile_audit(
+        &self,
+        ledger: &mut Ledger,
+        mandate_id: &str,
+    ) -> Result<(), ReconcileError> {
+        Publisher::reconcile_audit(self, ledger, mandate_id).await
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
@@ -58,7 +175,7 @@ pub enum RunError {
     #[error("payment: {0}")]
     Pay(#[from] PayError),
     #[error("publish: {0}")]
-    Publish(#[from] crate::purchase::ReconcileError),
+    Publish(#[from] ReconcileError),
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
     #[error("{0}")]
@@ -150,6 +267,7 @@ pub struct StepReport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PlanningRound {
+    pub round: u32,
     pub pending: Vec<String>,
     pub assumption_expected_material: u64,
     pub plans: Vec<Plan>,
@@ -186,9 +304,12 @@ pub struct Report {
     pub quotes: Vec<Quote>,
     pub estimates: Vec<(String, u64, i64)>,
     pub planning: Vec<PlanningRound>,
+    pub reservation_moves: Vec<String>,
     pub steps: Vec<StepReport>,
     pub outcomes: Vec<PoolOutcome>,
     pub claims: Vec<Claim>,
+    /// Observation blocks per pool, from the purchase that covers it.
+    pub blocks: BTreeMap<String, (u64, u64)>,
     pub brief_events_used: Option<u32>,
     pub explanation: Option<Explanation>,
     pub validation: Option<Validation>,
@@ -220,36 +341,60 @@ impl Transcript {
     }
 }
 
-/// Everything a run holds while it moves through the steps.
-struct State<'a> {
+/// What `execute` needs beyond the seams.
+pub struct Inputs<'a> {
+    pub mandate: &'a Mandate,
+    pub manifest: Manifest,
+    pub facilitator_url: String,
+    pub facilitator_note: Option<String>,
+    pub topic: HederaTopicId,
+    pub hashscan: String,
+    /// Where the ledger lives, for the reconcile notice.
+    pub ledger_hint: String,
+    /// The client provenance checks use; unused when no sample is chosen.
+    pub http: &'a reqwest::Client,
+    pub quiet: bool,
+}
+
+/// One purchase's evidence as the run holds it.
+struct Owned {
+    label: String,
+    screen: Option<(ScreenResponse, OffsetDateTime)>,
+    events: Option<(EventsResponse, OffsetDateTime)>,
+}
+
+/// Everything a run holds while it moves through the loop.
+struct State<'a, Q, P, U> {
     mandate: &'a Mandate,
     manifest: Manifest,
     ledger: Ledger,
-    quoter: Quoter,
-    payer: Payer<'a>,
-    publisher: Option<Publisher<'a>>,
-    mirror: &'a MirrorNode,
+    quoter: &'a Q,
+    payer: &'a P,
+    publisher: &'a U,
     http: &'a reqwest::Client,
     out: Transcript,
     report: Report,
     window: Window,
     pools: Vec<String>,
-    quotes: BTreeMap<(String, u64), i64>,
+    /// Listings whose quote was refused or unreachable, excluded for the run.
     unusable: BTreeMap<String, String>,
+    /// The latest quote per listing, reused while usable and bound to the same body.
     live_quotes: BTreeMap<String, Quote>,
-    screen: Option<(ScreenResponse, OffsetDateTime)>,
-    events: Option<(EventsResponse, OffsetDateTime)>,
+    evidence: Vec<Owned>,
     explanation: Option<Explanation>,
     outcomes: Vec<PoolOutcome>,
     claims: Vec<Claim>,
+    brief: Option<analysis::Brief>,
     brief_numbers: Vec<String>,
+    /// The completion reservation: id, amount, final step.
     reservation: Option<(i64, i64, String)>,
     step_no: u32,
+    round: u32,
     incomplete: bool,
     refused: Option<Refusal>,
 }
 
-impl State<'_> {
+impl<Q, P, U> State<'_, Q, P, U> {
     fn thresholds(&self) -> Thresholds<'_> {
         Thresholds {
             materiality: &self.mandate.inputs.materiality,
@@ -275,19 +420,33 @@ impl State<'_> {
         }
     }
 
-    fn delivered(&self) -> Option<Delivered<'_>> {
-        let (screen, at) = self.screen.as_ref()?;
-        Some(Delivered {
-            screen: Timed {
-                body: screen,
-                quoted_at: *at,
-            },
-            events: self.events.as_ref().map(|(e, at)| Timed {
-                body: e,
-                quoted_at: *at,
-            }),
+    fn delivered(&self) -> Delivered<'_> {
+        Delivered {
+            purchases: self
+                .evidence
+                .iter()
+                .map(|o| Purchased {
+                    label: o.label.clone(),
+                    screen: o.screen.as_ref().map(|(s, at)| Timed {
+                        body: s,
+                        quoted_at: *at,
+                    }),
+                    events: o.events.as_ref().map(|(e, at)| Timed {
+                        body: e,
+                        quoted_at: *at,
+                    }),
+                })
+                .collect(),
             explanation: self.explanation.as_ref(),
-        })
+        }
+    }
+
+    fn screened(&self) -> bool {
+        self.evidence.iter().any(|o| o.screen.is_some())
+    }
+
+    fn decimals(&self) -> u32 {
+        self.mandate.budget.service_decimals
     }
 }
 
@@ -306,8 +465,8 @@ fn evidence_body(pools: &[String], window: Window, mandate: &Mandate) -> Vec<u8>
     .expect("body serializes")
 }
 
-/// Runs one mandate file. `quiet` suppresses the streamed transcript; the
-/// caller prints the report instead.
+/// Runs one mandate file against the live sellers, facilitator and network.
+/// `quiet` suppresses the streamed transcript; the caller prints the report.
 pub async fn run(
     cfg: &Config,
     mandate_path: &Path,
@@ -337,34 +496,47 @@ pub async fn run(
         .receipts_topic
         .parse()
         .map_err(|e| RunError::Other(format!("receipts_topic: {e}")))?;
-    run_with(
-        cfg,
-        &mandate,
-        manifest,
-        ledger_path,
-        quiet,
-        &signer,
-        &http,
-        &mirror,
-        &consensus,
+    // Section 2.1: the facilitator is the mandate's, and its `/supported` pins the fee payer.
+    let (quote_cfg, facilitator_note) = quoter_config(&cfg.public(), &mandate);
+    let quoter = Quoter::from_config(&quote_cfg, DEFAULT_QUOTE_TIMEOUT).await?;
+    let payer = Payer {
+        signer: &signer,
+        mirror: &mirror,
+        http: &http,
+        poll: MIRROR_POLL,
+        max_retrievals: MAX_RETRIEVALS_PER_RUN,
+    };
+    let publisher = Publisher {
+        consensus: &consensus,
+        mirror: &mirror,
         topic,
-    )
-    .await
+        fee_cap: FEE_CAP_TINYBAR,
+    };
+    let ledger = Ledger::open(ledger_path)?;
+    let inputs = Inputs {
+        mandate: &mandate,
+        manifest,
+        facilitator_url: quote_cfg.facilitator_url.clone(),
+        facilitator_note,
+        topic,
+        hashscan: cfg.network.hashscan().to_owned(),
+        ledger_hint: ledger_path.display().to_string(),
+        http: &http,
+        quiet,
+    };
+    execute(inputs, ledger, &quoter, &payer, &publisher).await
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_with(
-    cfg: &Config,
-    mandate: &Mandate,
-    manifest: Manifest,
-    ledger_path: &Path,
-    quiet: bool,
-    signer: &Signer,
-    http: &reqwest::Client,
-    mirror: &MirrorNode,
-    consensus: &Consensus,
-    topic: HederaTopicId,
+/// The run over the seams: sections 4 to 12 for one mandate.
+pub async fn execute<Q: Quoting, P: Paying, U: Publishing>(
+    inputs: Inputs<'_>,
+    mut ledger: Ledger,
+    quoter: &Q,
+    payer: &P,
+    publisher: &U,
 ) -> Result<Report, RunError> {
+    let mandate = inputs.mandate;
+    let manifest = inputs.manifest;
     let now = OffsetDateTime::now_utc();
     let decimals = mandate.budget.service_decimals;
     let pools: Vec<String> = mandate
@@ -397,7 +569,6 @@ async fn run_with(
         hash: manifest.hash.clone(),
     };
 
-    let mut ledger = Ledger::open(ledger_path)?;
     let row = MandateRow {
         id: mandate.id.clone(),
         mandate_hash: mandate.hash.clone(),
@@ -413,21 +584,6 @@ async fn run_with(
     }
     ledger.insert_mandate(&row, now)?;
 
-    // Section 2.1: the facilitator is the mandate's, and its `/supported` pins the fee payer.
-    let (quote_cfg, facilitator_note) = quoter_config(&cfg.public(), mandate);
-    let quoter = Quoter::from_config(&quote_cfg, DEFAULT_QUOTE_TIMEOUT).await?;
-    let payer = Payer {
-        signer,
-        mirror,
-        http,
-        poll: MIRROR_POLL,
-        max_retrievals: MAX_RETRIEVALS_PER_RUN,
-    };
-    let publisher = Publisher {
-        consensus,
-        topic,
-        fee_cap: FEE_CAP_TINYBAR,
-    };
     let report = Report {
         status: Status::Refused,
         mandate_id: mandate.id.clone(),
@@ -436,13 +592,15 @@ async fn run_with(
         pools: pools.clone(),
         window,
         service_asset: mandate.budget.service_asset.clone(),
-        facilitator: quote_cfg.facilitator_url.clone(),
+        facilitator: inputs.facilitator_url.clone(),
         quotes: Vec::new(),
         estimates: Vec::new(),
         planning: Vec::new(),
+        reservation_moves: Vec::new(),
         steps: Vec::new(),
         outcomes: Vec::new(),
         claims: Vec::new(),
+        blocks: BTreeMap::new(),
         brief_events_used: None,
         explanation: None,
         validation: None,
@@ -450,7 +608,7 @@ async fn run_with(
         refusals: Vec::new(),
         anomalies: Vec::new(),
         totals: None,
-        topic: topic.to_string(),
+        topic: inputs.topic.to_string(),
         receipts: Vec::new(),
         audit_pending: Vec::new(),
         reconcile_notice: None,
@@ -462,27 +620,26 @@ async fn run_with(
         ledger,
         quoter,
         payer,
-        publisher: Some(publisher),
-        mirror,
-        http,
+        publisher,
+        http: inputs.http,
         out: Transcript {
-            quiet,
+            quiet: inputs.quiet,
             lines: Vec::new(),
         },
         report,
         window,
         pools,
-        quotes: BTreeMap::new(),
         unusable: BTreeMap::new(),
         live_quotes: BTreeMap::new(),
-        screen: None,
-        events: None,
+        evidence: Vec::new(),
         explanation: None,
         outcomes: Vec::new(),
         claims: Vec::new(),
+        brief: None,
         brief_numbers: Vec::new(),
         reservation: None,
         step_no: 0,
+        round: 0,
         incomplete: false,
         refused: None,
     };
@@ -506,7 +663,7 @@ async fn run_with(
         mandate.requirements.citations.as_str()
     ));
     st.out.say(format!(
-        "service budget {} {} cap {} audit {} tinybar; assumption expected_material_pools {}; mandatory brief bound {} bytes",
+        "service budget {} {} cap {} audit {} tinybar; assumption expected_material_pools {} until the screen; mandatory brief bound {} bytes",
         format_amount(mandate.budget.service_total, decimals),
         mandate.budget.service_asset,
         format_amount(mandate.constraints.max_single_payment, decimals),
@@ -516,9 +673,10 @@ async fn run_with(
     ));
     st.out.say(format!(
         "facilitator {} signers {:?}{}",
-        quote_cfg.facilitator_url,
+        inputs.facilitator_url,
         st.quoter.signers(),
-        facilitator_note
+        inputs
+            .facilitator_note
             .as_deref()
             .map(|n| format!("; {n}"))
             .unwrap_or_default()
@@ -536,8 +694,7 @@ async fn run_with(
     ));
 
     // Receipt 0, durable then published. When delivery must be anchored and
-    // receipt 0 cannot be, nothing is bought: the duty is unmeetable before
-    // the first cent, and only audit budget was at stake.
+    // receipt 0 cannot be, nothing is bought.
     let r0 = Receipt::start(&mandate.id, &mandate.hash, &manifest.hash, &now_rfc3339());
     st.ledger.append_receipt(&mandate.id, &r0)?;
     publish(&mut st).await?;
@@ -562,62 +719,26 @@ async fn run_with(
                     ),
                 },
             )?;
-            return finish(st, cfg, ledger_path, topic).await;
+            return finish(st, inputs.hashscan, inputs.ledger_hint).await;
         }
     }
 
-    // Section 4: quote what is fully known now, estimate the rest.
-    quote_known(&mut st).await;
-    let mut estimates = Vec::new();
-    for l in &st.manifest.listings {
-        if st.live_quotes.contains_key(&l.id) || st.unusable.contains_key(&l.id) {
-            continue;
-        }
-        let units = match l.capability {
-            Capability::Events => {
-                st.pools.len() as u64
-                    * st.window
-                        .to
-                        .abs_diff(st.window.from)
-                        .div_ceil(crate::manifest::WINDOW_SECONDS)
-                        .max(1)
-            }
-            Capability::Explain => l.tariff.max_units,
-            _ => st.pools.len() as u64,
-        };
-        if let Ok(ceiling) = l.ceiling(units) {
-            estimates.push(Estimate {
-                listing_id: l.id.clone(),
-                units,
-                ceiling,
-            });
-        }
-    }
-    let quotes: Vec<Quote> = st.live_quotes.values().cloned().collect();
-    st.out.say(
-        transcript::quotes_table(&quotes, &estimates, decimals)
-            .trim_end()
-            .to_owned(),
-    );
-    for (id, reason) in &st.unusable {
-        st.out.say(format!("{id}: {reason}"));
-    }
-    st.report.estimates = estimates
-        .iter()
-        .map(|e| (e.listing_id.clone(), e.units, e.ceiling))
-        .collect();
-
-    // Section 5 then 6, 7, 8 until the report exists or a refusal ends the run.
+    // Sections 4 to 8: the decision loop.
     match drive(&mut st).await {
         Ok(()) => {}
         Err(Stop::Refused(r)) => refuse(&mut st, r)?,
+        Err(Stop::Replan) => {}
         Err(Stop::Error(e)) => return Err(e),
     }
 
     // Section 9 over R, when anything was delivered and accepted.
-    if let Some(delivered) = st.delivered() {
-        let rules = st.rules();
-        let mut v = validate::validate(&rules, &delivered, &st.outcomes, &st.claims);
+    if st.screened() {
+        let (mut v, blocks) = {
+            let rules = st.rules();
+            let delivered = st.delivered();
+            let v = validate::validate(&rules, &delivered, &st.outcomes, &st.claims);
+            (v, delivered.blocks())
+        };
         if let Provenance::Pending { samples } = &v.provenance {
             let rpc = mandate.constraints.eth_rpc.clone().unwrap_or_default();
             let checked = validate::check_provenance(st.http, &rpc, samples).await;
@@ -683,25 +804,21 @@ async fn run_with(
             st.out
                 .say("report has no explanation: the final step was not delivered".to_owned());
         }
+        st.report.blocks = blocks;
         st.report.validation = Some(v);
     }
-
-    finish(st, cfg, ledger_path, topic).await
+    finish(st, inputs.hashscan, inputs.ledger_hint).await
 }
 
 /// Section 11 and 12: the queue, audit reconciliation, totals, receipts,
 /// notices and the final status.
-async fn finish(
-    mut st: State<'_>,
-    cfg: &Config,
-    ledger_path: &Path,
-    topic: HederaTopicId,
+async fn finish<Q, P: Paying, U: Publishing>(
+    mut st: State<'_, Q, P, U>,
+    hashscan: String,
+    ledger_hint: String,
 ) -> Result<Report, RunError> {
     let mandate = st.mandate;
     let decimals = mandate.budget.service_decimals;
-    // Section 11 and I9: the queue, retried when delivery must be anchored.
-    // The mirror node lags a few seconds behind consensus; wait briefly for
-    // the last fee records.
     publish(&mut st).await?;
     let anchoring = mandate.duties.anchor_before_delivery;
     if anchoring {
@@ -713,15 +830,16 @@ async fn finish(
             publish(&mut st).await?;
         }
     }
-    if let Some(p) = st.publisher.as_ref() {
-        for _ in 0..4 {
-            p.reconcile_audit(&mut st.ledger, st.mirror, &mandate.id)
-                .await?;
-            if st.ledger.audit_submitted_charges(&mandate.id)?.is_empty() {
-                break;
-            }
-            tokio::time::sleep(MIRROR_POLL).await;
+    // The mirror node lags a few seconds behind consensus; wait briefly for
+    // the last fee records.
+    for _ in 0..4 {
+        st.publisher
+            .reconcile_audit(&mut st.ledger, &mandate.id)
+            .await?;
+        if st.ledger.audit_submitted_charges(&mandate.id)?.is_empty() {
+            break;
         }
+        tokio::time::sleep(MIRROR_POLL).await;
     }
     let accounts = st.ledger.accounts(&mandate.id)?;
     let audit = st.ledger.audit_accounts(&mandate.id)?;
@@ -757,7 +875,7 @@ async fn finish(
     st.report.audit_pending = st.ledger.unpublished(&mandate.id)?;
     st.out.say(format!(
         "HCS topic {} receipts {}{}; {}/topic/{}",
-        topic,
+        st.report.topic,
         receipts
             .iter()
             .map(|(r, s)| format!(
@@ -773,8 +891,8 @@ async fn finish(
         } else {
             format!(" audit_pending {:?}", st.report.audit_pending)
         },
-        cfg.network.hashscan(),
-        topic
+        hashscan,
+        st.report.topic
     ));
     if !unresolved.is_empty() {
         let notice = format!(
@@ -785,7 +903,7 @@ async fn finish(
                 .collect::<Vec<_>>()
                 .join(", "),
             mandate.id,
-            ledger_path.display()
+            ledger_hint
         );
         st.out.say(notice.clone());
         st.report.reconcile_notice = Some(notice);
@@ -815,12 +933,13 @@ async fn finish(
     st.report.status = status;
     st.report.outcomes = st.outcomes.clone();
     st.report.claims = st.claims.clone();
+    st.report.brief_events_used = st.brief.as_ref().map(|b| b.events_used);
     st.report.transcript = std::mem::take(&mut st.out.lines);
     Ok(st.report)
 }
 
 /// Records a terminal refusal: transcript, report, receipt.
-fn refuse(st: &mut State<'_>, r: Refusal) -> Result<(), RunError> {
+fn refuse<Q, P, U>(st: &mut State<'_, Q, P, U>, r: Refusal) -> Result<(), RunError> {
     st.out.say(r.to_string());
     st.report.refusals.push(r.to_string());
     let receipt = Receipt {
@@ -848,9 +967,11 @@ fn refuse(st: &mut State<'_>, r: Refusal) -> Result<(), RunError> {
     Ok(())
 }
 
-/// Why the step loop stopped early.
+/// Why the step loop stopped, or why a round starts over.
 enum Stop {
     Refused(Refusal),
+    /// The quote in hand expired before signing: quote and plan again.
+    Replan,
     Error(RunError),
 }
 
@@ -860,12 +981,10 @@ impl<E: Into<RunError>> From<E> for Stop {
     }
 }
 
-async fn publish(st: &mut State<'_>) -> Result<(), RunError> {
-    let Some(p) = st.publisher.as_ref() else {
-        return Ok(());
-    };
+async fn publish<Q, P, U: Publishing>(st: &mut State<'_, Q, P, U>) -> Result<(), RunError> {
     let mut lines = Vec::new();
-    p.publish_pending(&mut st.ledger, &st.mandate.id, &mut |l| lines.push(l))
+    st.publisher
+        .publish_pending(&mut st.ledger, &st.mandate.id, &mut |l| lines.push(l))
         .await?;
     for l in lines {
         st.out.say(l);
@@ -873,20 +992,12 @@ async fn publish(st: &mut State<'_>) -> Result<(), RunError> {
     Ok(())
 }
 
-/// Quotes screen and investigate over R now; events and explain wait for their inputs.
-async fn quote_known(st: &mut State<'_>) {
-    let body = evidence_body(&st.pools, st.window, st.mandate);
-    let listings: Vec<Listing> = st.manifest.listings.clone();
-    for l in listings
-        .iter()
-        .filter(|l| matches!(l.capability, Capability::Screen | Capability::Investigate))
-    {
-        quote_listing(st, l, body.clone()).await;
-    }
-}
-
 /// One live quote, recorded for planning or as unusable with its reason.
-async fn quote_listing(st: &mut State<'_>, listing: &Listing, body: Vec<u8>) -> Option<Quote> {
+async fn quote_listing<Q: Quoting, P, U>(
+    st: &mut State<'_, Q, P, U>,
+    listing: &Listing,
+    body: Vec<u8>,
+) -> Option<Quote> {
     let now = OffsetDateTime::now_utc();
     match st.quoter.quote(listing, body, now).await {
         Ok(q) => {
@@ -903,16 +1014,14 @@ async fn quote_listing(st: &mut State<'_>, listing: &Listing, body: Vec<u8>) -> 
                 None
             } else {
                 st.out.say(format!(
-                    "{} {} live, within ceiling {} ({} units, {} ms)",
+                    "{} {} live, within ceiling {} ({} units, {} ms, usable until {})",
                     listing.id,
                     format_amount(q.amount, q.decimals),
                     format_amount(q.ceiling, q.decimals),
                     q.request.units,
-                    q.latency_ms
+                    q.latency_ms,
+                    q.valid_until().format(&Rfc3339).unwrap_or_default()
                 ));
-                st.quotes
-                    .insert((listing.id.clone(), q.request.units), q.amount);
-                st.unusable.remove(&listing.id);
                 st.live_quotes.insert(listing.id.clone(), q.clone());
                 Some(q)
             }
@@ -930,21 +1039,70 @@ async fn quote_listing(st: &mut State<'_>, listing: &Listing, body: Vec<u8>) -> 
     }
 }
 
-fn pending_pools(st: &State<'_>) -> Vec<String> {
-    match &st.screen {
-        None => st.pools.clone(),
-        Some(_) => st
-            .outcomes
-            .iter()
-            .filter(|o| o.outcome.pending_work())
-            .map(|o| o.pool.clone())
-            .collect(),
+/// A quote valid for planning and paying now: the live one when it is still
+/// usable past the margin and bound to this body, else a fresh 402, asked
+/// twice when the first arrives already expired.
+async fn valid_quote<Q: Quoting, P, U>(
+    st: &mut State<'_, Q, P, U>,
+    listing: &Listing,
+    body: Vec<u8>,
+) -> Option<Quote> {
+    if st.unusable.contains_key(&listing.id) {
+        return None;
     }
+    let now = OffsetDateTime::now_utc();
+    if let Some(q) = st.live_quotes.get(&listing.id)
+        && q.usable_at(now + QUOTE_MARGIN)
+        && q.request.body == body
+    {
+        return Some(q.clone());
+    }
+    if let Some(q) = st.live_quotes.remove(&listing.id) {
+        st.out.say(format!(
+            "{} quote {} re-requested: {}",
+            listing.id,
+            format_amount(q.amount, q.decimals),
+            if q.request.body == body {
+                "expired"
+            } else {
+                "bound to another request"
+            }
+        ));
+    }
+    for _ in 0..2 {
+        let q = quote_listing(st, listing, body.clone()).await?;
+        if q.usable_at(OffsetDateTime::now_utc() + QUOTE_MARGIN) {
+            return Some(q);
+        }
+        st.out.say(format!(
+            "{} quote arrived expired; asking again",
+            listing.id
+        ));
+    }
+    let r = Refusal {
+        code: Code::SellerUnreachable,
+        detail: format!("{}: quotes arrive expired", listing.id),
+    };
+    st.out.say(r.to_string());
+    st.unusable.insert(listing.id.clone(), r.to_string());
+    st.report.refusals.push(format!("{}: {r}", listing.id));
+    None
+}
+
+fn pending_pools<Q, P, U>(st: &State<'_, Q, P, U>) -> Vec<String> {
+    if !st.screened() {
+        return st.pools.clone();
+    }
+    st.outcomes
+        .iter()
+        .filter(|o| o.outcome.pending_work())
+        .map(|o| o.pool.clone())
+        .collect()
 }
 
 /// Pools that a purchase can still resolve: `pending` ones. `undetermined`
 /// pools carry incomplete facts no purchase repairs.
-fn resolvable_pools(st: &State<'_>) -> Vec<String> {
+fn resolvable_pools<Q, P, U>(st: &State<'_, Q, P, U>) -> Vec<String> {
     st.outcomes
         .iter()
         .filter(|o| o.outcome == Outcome::Pending)
@@ -952,32 +1110,152 @@ fn resolvable_pools(st: &State<'_>) -> Vec<String> {
         .collect()
 }
 
-fn plan_round(st: &mut State<'_>, pending: &[String]) -> Result<Plan, Refusal> {
+fn listing_with<Q, P, U>(st: &State<'_, Q, P, U>, cap: Capability) -> Option<Listing> {
+    st.manifest.with_capability(cap).next().cloned()
+}
+
+/// Section 4 steps 2 and 3 for this round: the requests whose bodies are
+/// fully known now, quoted; the rest is estimated at the ceiling.
+async fn gather<Q: Quoting, P, U>(
+    st: &mut State<'_, Q, P, U>,
+    pending: &[String],
+) -> Result<BTreeMap<String, Quote>, Stop> {
+    let mut wanted: Vec<(Listing, Vec<u8>)> = Vec::new();
+    if !st.screened() {
+        let body = evidence_body(&st.pools, st.window, st.mandate);
+        for cap in [Capability::Screen, Capability::Investigate] {
+            if let Some(l) = listing_with(st, cap) {
+                wanted.push((l, body.clone()));
+            }
+        }
+    } else if !pending.is_empty() {
+        let body = evidence_body(pending, st.window, st.mandate);
+        for cap in [Capability::Events, Capability::Investigate] {
+            if let Some(l) = listing_with(st, cap) {
+                wanted.push((l, body.clone()));
+            }
+        }
+    } else if let Some(l) = listing_with(st, Capability::Explain) {
+        // W is empty: the brief is known, so the final step is quotable.
+        let bound = (l.tariff.max_units * crate::manifest::KB) as usize;
+        let delivered = st.delivered();
+        let blocks = delivered.blocks();
+        let events_owned: Option<EventsResponse> = None;
+        let _ = events_owned;
+        let brief = analysis::build_brief(
+            analysis::BriefInput {
+                mandate_id: &st.mandate.id,
+                window: st.window,
+                blocks: &blocks,
+                outcomes: &st.outcomes,
+                claims: &st.claims,
+                events: delivered
+                    .purchases
+                    .iter()
+                    .rev()
+                    .find_map(|p| p.events.map(|e| e.body)),
+                brief_events: st.mandate.requirements.brief_events,
+            },
+            bound,
+        )
+        .map_err(|e| {
+            Stop::Refused(Refusal {
+                code: Code::RequirementUnmeetable,
+                detail: format!("brief_too_large: {e}"),
+            })
+        })?;
+        st.out.say(format!(
+            "brief {} bytes ({} KB), {} supporting event(s) per pool",
+            brief.body.len(),
+            brief.body.len().div_ceil(1024),
+            brief.events_used
+        ));
+        st.brief_numbers.clear();
+        analysis::brief_numbers(&brief.json, &mut st.brief_numbers);
+        wanted.push((l, brief.body.clone()));
+        st.brief = Some(brief);
+    }
+    let mut valid = BTreeMap::new();
+    for (listing, body) in wanted {
+        if let Some(q) = valid_quote(st, &listing, body).await {
+            valid.insert(listing.id.clone(), q);
+        }
+    }
+    Ok(valid)
+}
+
+/// Section 5 for this round. Estimates for unquoted steps are printed with
+/// the quotes table on the first round.
+fn plan_round<Q, P, U>(
+    st: &mut State<'_, Q, P, U>,
+    pending: &[String],
+    valid: &BTreeMap<String, Quote>,
+) -> Result<Plan, Refusal> {
+    let decimals = st.decimals();
     let accounts = st.ledger.accounts(&st.mandate.id).map_err(|e| Refusal {
         code: Code::OverBudget,
         detail: e.to_string(),
     })?;
     let free = accounts.free() + st.reservation.as_ref().map(|r| r.1).unwrap_or(0);
+    let quotes: BTreeMap<(String, u64), i64> = valid
+        .values()
+        .map(|q| ((q.listing_id.clone(), q.request.units), q.amount))
+        .collect();
     let sit = Situation {
         manifest: &st.manifest,
         required: st.pools.len() as u64,
-        unscreened: if st.screen.is_none() {
-            st.pools.len() as u64
-        } else {
+        unscreened: if st.screened() {
             0
+        } else {
+            st.pools.len() as u64
         },
         pending: pending.len() as u64,
         expected_material: u64::from(st.mandate.inputs.expected_material_pools),
         window_seconds: st.window.to.abs_diff(st.window.from),
         free,
         max_single_payment: st.mandate.constraints.max_single_payment,
-        decimals: st.mandate.budget.service_decimals,
-        quotes: &st.quotes,
+        decimals,
+        quotes: &quotes,
         unusable: &st.unusable,
     };
+    if st.round == 1 {
+        let mut estimates = Vec::new();
+        for l in &st.manifest.listings {
+            if valid.contains_key(&l.id) || st.unusable.contains_key(&l.id) {
+                continue;
+            }
+            let units = match l.capability {
+                Capability::Events => {
+                    st.pools.len() as u64
+                        * sit
+                            .window_seconds
+                            .div_ceil(crate::manifest::WINDOW_SECONDS)
+                            .max(1)
+                }
+                Capability::Explain => l.tariff.max_units,
+                _ => st.pools.len() as u64,
+            };
+            if let Ok(ceiling) = l.ceiling(units) {
+                estimates.push(Estimate {
+                    listing_id: l.id.clone(),
+                    units,
+                    ceiling,
+                });
+            }
+        }
+        let quotes: Vec<Quote> = valid.values().cloned().collect();
+        st.out.say(
+            transcript::quotes_table(&quotes, &estimates, decimals)
+                .trim_end()
+                .to_owned(),
+        );
+        st.report.estimates = estimates
+            .iter()
+            .map(|e| (e.listing_id.clone(), e.units, e.ceiling))
+            .collect();
+    }
     let plans = plan::price_all(&sit);
     let chosen = plan::choose(&plans, &sit).map(|p| p.kind);
-    let decimals = sit.decimals;
     for p in &plans {
         let steps = p
             .expected_steps
@@ -1010,6 +1288,7 @@ fn plan_round(st: &mut State<'_>, pending: &[String]) -> Result<Plan, Refusal> {
         .ok()
         .and_then(|k| plans.iter().find(|p| p.kind == *k).cloned());
     st.report.planning.push(PlanningRound {
+        round: st.round,
         pending: pending.to_vec(),
         assumption_expected_material: sit.expected_material,
         plans,
@@ -1025,17 +1304,124 @@ fn plan_round(st: &mut State<'_>, pending: &[String]) -> Result<Plan, Refusal> {
     }
 }
 
-/// Section 5 and the step loop: plan over W, buy the first step, check the
-/// delivery, recompute, repeat.
-async fn drive(st: &mut State<'_>) -> Result<(), Stop> {
-    let mut pending = st.pools.clone();
-    let mut first = true;
+/// I4 for the chosen plan: a reservation for its final step at the bound
+/// amount while a non-final step remains, replaced when the plan's final
+/// step changes, kept when the final step is the only one left so the
+/// purchase consumes it, and released when the plan no longer needs it.
+fn settle_reservation<Q, P, U>(st: &mut State<'_, Q, P, U>, plan: &Plan) -> Result<(), RunError> {
+    let decimals = st.decimals();
+    let now = OffsetDateTime::now_utc();
+    let final_step = plan
+        .bound_steps
+        .last()
+        .map(|s| (s.listing_id.clone(), s.amount));
+    let existing = st.reservation.take();
+    let wanted = match (&final_step, &existing) {
+        (Some((step, amount)), _)
+            if plan.bound_steps.len() > 1 && st.mandate.budget.reserve_completion =>
+        {
+            Some((step.clone(), *amount))
+        }
+        (Some((step, _)), Some((_, _, held_step)))
+            if plan.bound_steps.len() == 1 && step == held_step =>
+        {
+            // The final step is the only step left: the purchase consumes the hold.
+            st.reservation = existing;
+            return Ok(());
+        }
+        _ => None,
+    };
+    if let Some((id, amount, step)) = &existing
+        && wanted
+            .as_ref()
+            .is_some_and(|(w, a)| w == step && *a == *amount)
+    {
+        st.reservation = Some((*id, *amount, step.clone()));
+        return Ok(());
+    }
+    if let Some((id, amount, step)) = existing {
+        st.ledger.release(id, now)?;
+        let line = format!(
+            "reserve {step} {} released: plan {}",
+            format_amount(amount, decimals),
+            if wanted.is_some() {
+                "switched"
+            } else {
+                "has one step left"
+            }
+        );
+        st.out.say(line.clone());
+        st.report.reservation_moves.push(line);
+    }
+    if let Some((step, amount)) = wanted {
+        let r = st.ledger.hold(
+            &st.mandate.id,
+            &step,
+            amount,
+            ReservationSource::CeilingAtMax,
+            now,
+        )?;
+        let line = format!("reserve {step} {} held", format_amount(amount, decimals));
+        st.out.say(line.clone());
+        st.report.reservation_moves.push(line);
+        st.reservation = Some((r.id, r.amount, step));
+    }
+    Ok(())
+}
+
+/// The decision loop.
+async fn drive<Q: Quoting, P: Paying, U: Publishing>(
+    st: &mut State<'_, Q, P, U>,
+) -> Result<(), Stop> {
     loop {
-        let plan = match plan_round(st, &pending) {
+        st.round += 1;
+        let pending = pending_pools(st);
+        // Section 7: pools no purchase can resolve.
+        if st.screened() {
+            let resolvable = resolvable_pools(st);
+            let stuck: Vec<&String> = pending.iter().filter(|p| !resolvable.contains(p)).collect();
+            if !stuck.is_empty() {
+                let r = Refusal {
+                    code: Code::EvidenceInsufficient,
+                    detail: format!(
+                        "undetermined with incomplete facts, no purchase resolves: {}",
+                        stuck
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                };
+                if st.mandate.requirements.degrade {
+                    st.out
+                        .say(format!("{r}; degrade: continuing to the explanation"));
+                    st.report.refusals.push(r.to_string());
+                    st.incomplete = true;
+                } else {
+                    return Err(Stop::Refused(r));
+                }
+            }
+        }
+        let pending: Vec<String> = if st.screened() {
+            resolvable_pools(st)
+        } else {
+            pending
+        };
+        st.out.say(format!(
+            "round {}: {} pool(s) pending{}",
+            st.round,
+            pending.len(),
+            if st.screened() { "" } else { " (unscreened)" }
+        ));
+
+        // 1 and 2: known requests, valid quotes.
+        let valid = gather(st, &pending).await?;
+
+        // 3: plans over the remaining job.
+        let plan = match plan_round(st, &pending, &valid) {
             Ok(p) => p,
-            Err(r) if first => return Err(Stop::Refused(r)),
+            Err(r) if st.round == 1 && st.step_no == 0 => return Err(Stop::Refused(r)),
             Err(r) => {
-                // A pending pool remains and no plan can pay for it.
                 let r = Refusal {
                     code: Code::EvidenceInsufficient,
                     detail: format!("{} pool(s) pending; {}", pending.len(), r.detail),
@@ -1049,120 +1435,378 @@ async fn drive(st: &mut State<'_>) -> Result<(), Stop> {
                 return Err(Stop::Refused(r));
             }
         };
-        // I4: hold the final step before any non-final authorization.
-        if first
-            && st.mandate.budget.reserve_completion
-            && plan.bound_steps.len() > 1
-            && st.reservation.is_none()
-        {
-            let last = plan.bound_steps.last().expect("steps");
-            let r = st.ledger.hold(
-                &st.mandate.id,
-                &last.listing_id,
-                last.amount,
-                ReservationSource::CeilingAtMax,
-                OffsetDateTime::now_utc(),
-            )?;
-            st.out.say(format!(
-                "reserve {} {} held",
-                last.listing_id,
-                format_amount(last.amount, st.mandate.budget.service_decimals)
-            ));
-            st.reservation = Some((r.id, r.amount, last.listing_id.clone()));
-        }
-        first = false;
-        let Some(next) = plan.expected_steps.first().cloned() else {
+
+        // 4: the completion reservation follows the plan.
+        settle_reservation(st, &plan)?;
+
+        // 5: the plan's first step, with the quote gathered this round.
+        let Some(step) = plan.expected_steps.first().cloned() else {
             return Ok(());
         };
-        let done = match next.capability {
-            Capability::Screen => {
-                buy_screen(st).await?;
-                false
-            }
-            Capability::Events => {
-                buy_events(st, &pending).await?;
-                false
-            }
-            Capability::Explain => {
-                buy_explain(st).await?;
-                true
-            }
-            Capability::Investigate => {
-                buy_investigate(st, &pending).await?;
-                true
-            }
+        let Some(listing) = st
+            .manifest
+            .listings
+            .iter()
+            .find(|l| l.id == step.listing_id)
+            .cloned()
+        else {
+            return Err(Stop::Refused(Refusal {
+                code: Code::RequirementUnmeetable,
+                detail: format!("listing {} vanished", step.listing_id),
+            }));
         };
+        let Some(quote) = valid.get(&listing.id).cloned() else {
+            // The step was priced at its ceiling without a quote: quote it now.
+            st.out.say(format!(
+                "{}: no valid quote in hand; quoting before purchase",
+                listing.id
+            ));
+            continue;
+        };
+        let reservation_id = match st.reservation.as_ref() {
+            Some((id, _, step)) if *step == listing.id => Some(*id),
+            _ => None,
+        };
+        let purchase = match buy(st, &listing, &quote, reservation_id).await {
+            Ok(p) => p,
+            Err(Stop::Replan) => continue,
+            Err(e) => return Err(e),
+        };
+        let done = accept(st, &listing, &quote, &purchase).await?;
         if done {
             return Ok(());
         }
-        // Section 7: what remains after this delivery.
-        let still = pending_pools(st);
-        let resolvable = resolvable_pools(st);
-        let stuck: Vec<&String> = still.iter().filter(|p| !resolvable.contains(p)).collect();
-        if !stuck.is_empty() {
-            let r = Refusal {
-                code: Code::EvidenceInsufficient,
-                detail: format!(
-                    "undetermined with incomplete facts, no purchase resolves: {}",
-                    stuck
-                        .iter()
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            };
-            if st.mandate.requirements.degrade {
-                st.out
-                    .say(format!("{r}; degrade: continuing to the explanation"));
-                st.report.refusals.push(r.to_string());
-                st.incomplete = true;
-            } else {
-                return Err(Stop::Refused(r));
-            }
+    }
+}
+
+/// Section 6 `received -> rejected` for a delivery that fails its own
+/// checks: the reasons are persisted, a `failed` receipt is written, the
+/// facts are dropped, and the run refuses rather than buying on top of it.
+async fn reject_delivery<Q, P, U: Publishing>(
+    st: &mut State<'_, Q, P, U>,
+    a: &Authorization,
+    failures: Vec<Failure>,
+) -> Result<Stop, RunError> {
+    let reasons: Vec<&str> = reasons_of(&failures)
+        .iter()
+        .map(|r| r.as_str())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect();
+    let reason = reasons.join(",");
+    st.out.say(format!(
+        "{} rejected: {} ({} finding(s))",
+        a.step,
+        reason,
+        failures.len()
+    ));
+    for f in &failures {
+        st.out.say(format!("  {} {}", f.reason.as_str(), f.detail));
+    }
+    st.ledger
+        .mark_rejected(a.id, &reason, OffsetDateTime::now_utc())?;
+    let mut r = purchase_receipt(st, a, ReceiptOutcome::Failed, None, None);
+    r.reason = Some(format!(
+        "validation {reason}: {}",
+        failures.first().map(|f| f.detail.as_str()).unwrap_or("")
+    ));
+    st.ledger.append_receipt(&st.mandate.id, &r)?;
+    publish(st).await?;
+    st.report
+        .rejected_deliveries
+        .push((a.step.clone(), failures));
+    Ok(Stop::Refused(Refusal {
+        code: Code::EvidenceInsufficient,
+        detail: format!("{} delivery rejected: {reason}", a.step),
+    }))
+}
+
+/// Takes a settled, delivered purchase into evidence after the section 9
+/// delivery checks, recomputes outcomes and claims, and says whether the
+/// run's final deliverable is now in hand.
+async fn accept<Q, P, U: Publishing>(
+    st: &mut State<'_, Q, P, U>,
+    listing: &Listing,
+    quote: &Quote,
+    purchase: &Purchase,
+) -> Result<bool, Stop> {
+    let quoted_at = OffsetDateTime::parse(&quote.received_at, &Rfc3339)
+        .unwrap_or_else(|_| OffsetDateTime::now_utc());
+    let body = purchase.body.as_deref().unwrap_or_default();
+    let a = &purchase.authorization;
+    let (owned, explanation, done, bundle_check) = match listing.capability {
+        Capability::Screen => {
+            let screen: ScreenResponse = parse_body("screen", body)?;
+            st.out.say(format!(
+                "screen delivered: deployment {} blocks {}..{} indexed {} at {} coverage_shortfall {} truncated {} requests {}",
+                screen.header.deployment_id,
+                screen.header.block_start,
+                screen.header.block_end,
+                screen.header.indexed_block,
+                screen
+                    .header
+                    .indexed_block_timestamp
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| "null".to_owned()),
+                screen.header.coverage_shortfall,
+                screen.header.truncated,
+                screen.requests
+            ));
+            (
+                Owned {
+                    label: listing.id.clone(),
+                    screen: Some((screen, quoted_at)),
+                    events: None,
+                },
+                None,
+                false,
+                None,
+            )
         }
-        pending = resolvable;
+        Capability::Events => {
+            let events: EventsResponse = parse_body("events", body)?;
+            let total: usize = events.pools.values().map(|p| p.all().count()).sum();
+            st.out.say(format!(
+                "events delivered: {} pool(s), {} events, truncated {}, blocks {}..{}, requests {}",
+                events.pools.len(),
+                total,
+                events.header.truncated,
+                events.header.block_start,
+                events.header.block_end,
+                events.requests
+            ));
+            (
+                Owned {
+                    label: listing.id.clone(),
+                    screen: None,
+                    events: Some((events, quoted_at)),
+                },
+                None,
+                false,
+                None,
+            )
+        }
+        Capability::Investigate => {
+            let bundle: Bundle = match serde_json::from_slice(body) {
+                Ok(b) => b,
+                Err(e) => {
+                    let f = vec![Failure {
+                        reason: validate::Reason::Schema,
+                        detail: format!(
+                            "{}: response does not match the bundle schema: {e}",
+                            listing.id
+                        ),
+                    }];
+                    return Err(reject_delivery(st, a, f).await?);
+                }
+            };
+            st.out.say(format!(
+                "investigate delivered: {} pool(s) screened, events for {}, blocks {}..{}, requests {}",
+                bundle.screen.pools.len(),
+                bundle.events.as_ref().map(|e| e.pools.len()).unwrap_or(0),
+                bundle.screen.header.block_start,
+                bundle.screen.header.block_end,
+                bundle.requests
+            ));
+            let ours = outcomes_and_claims(
+                &bundle.screen,
+                bundle.events.as_ref(),
+                st.mandate.requirements.evidence,
+                st.thresholds(),
+            );
+            let check = bundle_matches(&bundle.outcomes, &bundle.claims, &ours);
+            (
+                Owned {
+                    label: listing.id.clone(),
+                    screen: Some((bundle.screen, quoted_at)),
+                    events: bundle.events.map(|e| (e, quoted_at)),
+                },
+                Some(bundle.explanation),
+                true,
+                Some(check),
+            )
+        }
+        Capability::Explain => {
+            let x: Explanation = parse_body("explain", body)?;
+            st.out.say(format!(
+                "explanation from {} ({} input bytes): {}",
+                x.model, x.input_bytes, x.prose
+            ));
+            st.explanation = Some(x);
+            return Ok(true);
+        }
+    };
+    st.evidence.push(owned);
+    let is_bundle = bundle_check.is_some();
+    let mut failures = validate::validate_deliveries(&st.rules(), &st.delivered());
+    if let Some(check) = bundle_check {
+        failures.extend(check);
+    }
+    if !failures.is_empty() {
+        st.evidence.pop();
+        return Err(reject_delivery(st, a, failures).await?);
+    }
+    st.out.say(format!(
+        "{} delivery checked: schema and freshness pass",
+        listing.id
+    ));
+    if is_bundle {
+        st.out.say(format!(
+            "{}: seller's outcomes and claims equal the runtime's recomputation",
+            listing.id
+        ));
+    }
+    recompute(st);
+    if let Some(x) = explanation {
+        st.out.say(format!(
+            "explanation from {} ({} input bytes): {}",
+            x.model, x.input_bytes, x.prose
+        ));
+        st.explanation = Some(x);
+    }
+    Ok(done)
+}
+
+/// What a bundle must carry, section 8: facts, the seller's outcomes and
+/// claims, and the prose.
+#[derive(serde::Deserialize)]
+struct Bundle {
+    screen: ScreenResponse,
+    events: Option<EventsResponse>,
+    outcomes: Vec<PoolOutcome>,
+    claims: Vec<Claim>,
+    explanation: Explanation,
+    #[serde(default)]
+    requests: u64,
+}
+
+/// Section 8's equality requirement on a bundle: the seller's outcomes and
+/// claims are what the runtime computes from the delivered facts. Order is
+/// not part of the requirement: a seller may answer in request order, the
+/// runtime computes in pool order.
+pub fn bundle_matches(
+    bundle_outcomes: &[PoolOutcome],
+    bundle_claims: &[Claim],
+    ours: &(Vec<PoolOutcome>, Vec<Claim>),
+) -> Vec<Failure> {
+    let mut out = Vec::new();
+    let theirs_o = sorted_outcomes(bundle_outcomes);
+    let ours_o = sorted_outcomes(&ours.0);
+    let theirs_c = sorted_claims(bundle_claims);
+    let ours_c = sorted_claims(&ours.1);
+    if theirs_o != ours_o {
+        out.push(Failure {
+            reason: validate::Reason::Calculation,
+            detail: format!(
+                "bundle outcomes differ from the recomputation: {}",
+                first_difference(
+                    theirs_o
+                        .iter()
+                        .map(|o| format!("{} {}", o.pool, o.outcome.as_str())),
+                    ours_o
+                        .iter()
+                        .map(|o| format!("{} {}", o.pool, o.outcome.as_str())),
+                )
+            ),
+        });
+    }
+    if theirs_c != ours_c {
+        out.push(Failure {
+            reason: validate::Reason::Calculation,
+            detail: format!(
+                "bundle claims ({}) differ from the recomputation ({}): {}",
+                theirs_c.len(),
+                ours_c.len(),
+                first_difference(
+                    theirs_c
+                        .iter()
+                        .map(|c| format!("{} {:?} {:?}", c.pool, c.kind, c.values)),
+                    ours_c
+                        .iter()
+                        .map(|c| format!("{} {:?} {:?}", c.pool, c.kind, c.values)),
+                )
+            ),
+        });
+    }
+    out
+}
+
+/// The first entry that differs, for a message a human can act on.
+fn first_difference(
+    theirs: impl Iterator<Item = String>,
+    ours: impl Iterator<Item = String>,
+) -> String {
+    let (theirs, ours): (Vec<String>, Vec<String>) = (theirs.collect(), ours.collect());
+    for (i, t) in theirs.iter().enumerate() {
+        match ours.get(i) {
+            Some(o) if o == t => {}
+            Some(o) => return format!("seller {t}, runtime {o}"),
+            None => return format!("seller has {t}, the runtime has nothing"),
+        }
+    }
+    match ours.get(theirs.len()) {
+        Some(o) => format!("the runtime has {o}, the seller has nothing"),
+        None => "no entry differs".to_owned(),
     }
 }
 
-fn listing_with(st: &State<'_>, cap: Capability) -> Result<Listing, Stop> {
-    st.manifest
-        .with_capability(cap)
-        .next()
-        .cloned()
-        .ok_or_else(|| {
-            Stop::Refused(Refusal {
-                code: Code::RequirementUnmeetable,
-                detail: format!("no {cap:?} listing").to_lowercase(),
-            })
+fn sorted_outcomes(o: &[PoolOutcome]) -> Vec<PoolOutcome> {
+    let mut v = o.to_vec();
+    v.sort_by(|a, b| a.pool.cmp(&b.pool));
+    v
+}
+
+fn sorted_claims(c: &[Claim]) -> Vec<Claim> {
+    let mut v = c.to_vec();
+    v.sort_by(|a, b| {
+        (&a.pool, a.kind as u8, &a.evidence).cmp(&(&b.pool, b.kind as u8, &b.evidence))
+    });
+    v
+}
+
+fn parse_body<T: serde::de::DeserializeOwned>(what: &str, body: &[u8]) -> Result<T, Stop> {
+    serde_json::from_slice(body).map_err(|e| {
+        Stop::Refused(Refusal {
+            code: Code::EvidenceInsufficient,
+            detail: format!("{what}: response does not match the schema: {e}"),
         })
+    })
 }
 
-/// A usable quote for `listing` with `body`: the live one when still valid and
-/// bound to the same body, else a fresh 402.
-async fn usable_quote(st: &mut State<'_>, listing: &Listing, body: Vec<u8>) -> Result<Quote, Stop> {
-    let now = OffsetDateTime::now_utc();
-    if let Some(q) = st.live_quotes.get(&listing.id)
-        && q.usable_at(now + time::Duration::seconds(10))
-        && q.request.body == body
-    {
-        return Ok(q.clone());
+fn recompute<Q, P, U>(st: &mut State<'_, Q, P, U>) {
+    let (o, c) = validate::compute(
+        &st.delivered(),
+        st.mandate.requirements.evidence,
+        st.thresholds(),
+    );
+    let summary: BTreeMap<&str, usize> = o.iter().fold(BTreeMap::new(), |mut m, o| {
+        *m.entry(o.outcome.as_str()).or_default() += 1;
+        m
+    });
+    st.out.say(format!(
+        "outcomes: {}; claims {}",
+        summary
+            .iter()
+            .map(|(k, v)| format!("{v} {k}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        c.len()
+    ));
+    for po in &o {
+        st.out.say(format!(
+            "  {} {} [{}]",
+            po.pool,
+            po.outcome.as_str(),
+            po.reasons.join(", ")
+        ));
     }
-    match quote_listing(st, listing, body).await {
-        Some(q) => Ok(q),
-        None => Err(Stop::Refused(Refusal {
-            code: Code::SellerUnreachable,
-            detail: st
-                .unusable
-                .get(&listing.id)
-                .cloned()
-                .unwrap_or_else(|| format!("{}: no usable quote", listing.id)),
-        })),
-    }
+    st.outcomes = o;
+    st.claims = c;
 }
 
-/// One paid step: prepare, settle, receipt. Returns the purchase and its body.
-async fn buy(
-    st: &mut State<'_>,
+/// One paid step: prepare, settle, receipt.
+async fn buy<Q, P: Paying, U: Publishing>(
+    st: &mut State<'_, Q, P, U>,
     listing: &Listing,
     quote: &Quote,
     reservation_id: Option<i64>,
@@ -1209,10 +1853,11 @@ async fn buy(
         }
         Err(PayError::Refused(r)) => return Err(Stop::Refused(r)),
         Err(PayError::QuoteExpired(id)) => {
-            return Err(Stop::Refused(Refusal {
-                code: Code::SellerUnreachable,
-                detail: format!("{id}: quote expired before signing"),
-            }));
+            st.out.say(format!(
+                "{id}: quote expired before signing; quoting and planning again"
+            ));
+            st.live_quotes.remove(&id);
+            return Err(Stop::Replan);
         }
         Err(e) => return Err(e.into()),
     };
@@ -1228,14 +1873,15 @@ async fn buy(
     ));
     if let Some((_, held, _)) = st.reservation.as_ref()
         && reservation_id.is_some()
-        && *held > a.amount
     {
-        st.out.say(format!(
-            "reserve released {}",
-            format_amount(held - a.amount, quote.decimals)
-        ));
-    }
-    if reservation_id.is_some() {
+        if *held > a.amount {
+            let line = format!(
+                "reserve released {}",
+                format_amount(held - a.amount, quote.decimals)
+            );
+            st.out.say(line.clone());
+            st.report.reservation_moves.push(line);
+        }
         st.reservation = None;
     }
     let mut lines = Vec::new();
@@ -1309,8 +1955,8 @@ async fn buy(
     Ok(purchase)
 }
 
-fn purchase_receipt(
-    st: &State<'_>,
+fn purchase_receipt<Q, P, U>(
+    st: &State<'_, Q, P, U>,
     a: &Authorization,
     outcome: ReceiptOutcome,
     latency_ms: Option<u64>,
@@ -1342,391 +1988,6 @@ fn purchase_receipt(
         manifest_hash: None,
         spec_version: None,
     }
-}
-
-/// Section 6 `received -> rejected` for a delivery that fails its own
-/// checks: the reasons are persisted, a `failed` receipt is written, and
-/// the run refuses rather than buying anything on top of it.
-async fn reject_delivery(
-    st: &mut State<'_>,
-    a: &Authorization,
-    failures: Vec<Failure>,
-) -> Result<Stop, RunError> {
-    let reasons: Vec<&str> = reasons_of(&failures)
-        .iter()
-        .map(|r| r.as_str())
-        .collect::<Vec<_>>()
-        .into_iter()
-        .collect();
-    let reason = reasons.join(",");
-    st.out.say(format!(
-        "{} rejected: {} ({} finding(s))",
-        a.step,
-        reason,
-        failures.len()
-    ));
-    for f in &failures {
-        st.out.say(format!("  {} {}", f.reason.as_str(), f.detail));
-    }
-    st.ledger
-        .mark_rejected(a.id, &reason, OffsetDateTime::now_utc())?;
-    let mut r = purchase_receipt(st, a, ReceiptOutcome::Failed, None, None);
-    r.reason = Some(format!(
-        "validation {reason}: {}",
-        failures.first().map(|f| f.detail.as_str()).unwrap_or("")
-    ));
-    st.ledger.append_receipt(&st.mandate.id, &r)?;
-    publish(st).await?;
-    st.report
-        .rejected_deliveries
-        .push((a.step.clone(), failures));
-    Ok(Stop::Refused(Refusal {
-        code: Code::EvidenceInsufficient,
-        detail: format!("{} delivery rejected: {reason}", a.step),
-    }))
-}
-
-/// Section 9 schema and freshness on the deliveries held so far, before any
-/// of them authorizes another purchase.
-async fn check_deliveries(st: &mut State<'_>, a: &Authorization) -> Result<(), Stop> {
-    let failures = match st.delivered() {
-        Some(d) => validate::validate_delivery(&st.rules(), &d),
-        None => Vec::new(),
-    };
-    if failures.is_empty() {
-        st.out.say(format!(
-            "{} delivery checked: schema and freshness pass",
-            a.step
-        ));
-        return Ok(());
-    }
-    Err(reject_delivery(st, a, failures).await?)
-}
-
-fn parse_body<T: serde::de::DeserializeOwned>(what: &str, body: &[u8]) -> Result<T, Stop> {
-    serde_json::from_slice(body).map_err(|e| {
-        Stop::Refused(Refusal {
-            code: Code::EvidenceInsufficient,
-            detail: format!("{what}: response does not match the schema: {e}"),
-        })
-    })
-}
-
-fn recompute(st: &mut State<'_>) {
-    let Some((screen, _)) = st.screen.as_ref() else {
-        return;
-    };
-    let (o, c) = outcomes_and_claims(
-        screen,
-        st.events.as_ref().map(|(e, _)| e),
-        st.mandate.requirements.evidence,
-        st.thresholds(),
-    );
-    let summary: BTreeMap<&str, usize> = o.iter().fold(BTreeMap::new(), |mut m, o| {
-        *m.entry(o.outcome.as_str()).or_default() += 1;
-        m
-    });
-    st.out.say(format!(
-        "outcomes: {}; claims {}",
-        summary
-            .iter()
-            .map(|(k, v)| format!("{v} {k}"))
-            .collect::<Vec<_>>()
-            .join(", "),
-        c.len()
-    ));
-    for po in &o {
-        st.out.say(format!(
-            "  {} {} [{}]",
-            po.pool,
-            po.outcome.as_str(),
-            po.reasons.join(", ")
-        ));
-    }
-    st.outcomes = o;
-    st.claims = c;
-}
-
-async fn buy_screen(st: &mut State<'_>) -> Result<(), Stop> {
-    let listing = listing_with(st, Capability::Screen)?;
-    let body = evidence_body(&st.pools, st.window, st.mandate);
-    let quote = usable_quote(st, &listing, body).await?;
-    let quoted_at = OffsetDateTime::parse(&quote.received_at, &Rfc3339)
-        .unwrap_or_else(|_| OffsetDateTime::now_utc());
-    let purchase = buy(st, &listing, &quote, None).await?;
-    let screen: ScreenResponse =
-        parse_body("screen", purchase.body.as_deref().unwrap_or_default())?;
-    st.out.say(format!(
-        "screen delivered: deployment {} blocks {}..{} indexed {} at {} coverage_shortfall {} truncated {} requests {}",
-        screen.header.deployment_id,
-        screen.header.block_start,
-        screen.header.block_end,
-        screen.header.indexed_block,
-        screen
-            .header
-            .indexed_block_timestamp
-            .map(|t| t.to_string())
-            .unwrap_or_else(|| "null".to_owned()),
-        screen.header.coverage_shortfall,
-        screen.header.truncated,
-        screen.requests
-    ));
-    let before = st.screen.replace((screen, quoted_at));
-    if let Err(stop) = check_deliveries(st, &purchase.authorization).await {
-        st.screen = before;
-        return Err(stop);
-    }
-    recompute(st);
-    Ok(())
-}
-
-async fn buy_events(st: &mut State<'_>, pending: &[String]) -> Result<(), Stop> {
-    let listing = listing_with(st, Capability::Events)?;
-    let body = evidence_body(pending, st.window, st.mandate);
-    let quote = usable_quote(st, &listing, body).await?;
-    // The live events quote replaces the estimate: decide again before paying.
-    let bundle = st
-        .manifest
-        .with_capability(Capability::Investigate)
-        .next()
-        .cloned();
-    if let Some(inv) = bundle {
-        let inv_body = evidence_body(pending, st.window, st.mandate);
-        let inv_units = pending.len() as u64;
-        let inv_amount = st
-            .quotes
-            .get(&(inv.id.clone(), inv_units))
-            .copied()
-            .or_else(|| inv.ceiling(inv_units).ok());
-        let explain = st
-            .manifest
-            .with_capability(Capability::Explain)
-            .next()
-            .and_then(|e| e.tariff.ceiling_at_max().ok())
-            .unwrap_or(0);
-        if let Some(inv_amount) = inv_amount
-            && !st.unusable.contains_key(&inv.id)
-        {
-            st.out.say(format!(
-                "events {} vs bundle {}; {}",
-                format_amount(quote.amount + explain, quote.decimals),
-                format_amount(inv_amount, quote.decimals),
-                if quote.amount + explain <= inv_amount {
-                    "buying events"
-                } else {
-                    "buying the bundle"
-                }
-            ));
-            if quote.amount + explain > inv_amount {
-                let q = usable_quote(st, &inv, inv_body).await?;
-                if q.amount <= inv_amount {
-                    return buy_investigate_with(st, &inv, q).await;
-                }
-            }
-        }
-    }
-    let quoted_at = OffsetDateTime::parse(&quote.received_at, &Rfc3339)
-        .unwrap_or_else(|_| OffsetDateTime::now_utc());
-    let purchase = buy(st, &listing, &quote, None).await?;
-    let events: EventsResponse =
-        parse_body("events", purchase.body.as_deref().unwrap_or_default())?;
-    let total: usize = events.pools.values().map(|p| p.all().count()).sum();
-    st.out.say(format!(
-        "events delivered: {} pool(s), {} events, truncated {}, requests {}",
-        events.pools.len(),
-        total,
-        events.header.truncated,
-        events.requests
-    ));
-    let before = st.events.replace((events, quoted_at));
-    if let Err(stop) = check_deliveries(st, &purchase.authorization).await {
-        st.events = before;
-        return Err(stop);
-    }
-    recompute(st);
-    Ok(())
-}
-
-async fn buy_explain(st: &mut State<'_>) -> Result<(), Stop> {
-    let listing = listing_with(st, Capability::Explain)?;
-    let bound = (listing.tariff.max_units * crate::manifest::KB) as usize;
-    let blocks = st
-        .screen
-        .as_ref()
-        .map(|(s, _)| (s.header.block_start, s.header.block_end))
-        .unwrap_or((0, 0));
-    let brief = analysis::build_brief(
-        analysis::BriefInput {
-            mandate_id: &st.mandate.id,
-            window: st.window,
-            blocks,
-            outcomes: &st.outcomes,
-            claims: &st.claims,
-            events: st.events.as_ref().map(|(e, _)| e),
-            brief_events: st.mandate.requirements.brief_events,
-        },
-        bound,
-    )
-    .map_err(|e| {
-        Stop::Refused(Refusal {
-            code: Code::RequirementUnmeetable,
-            detail: format!("brief_too_large: {e}"),
-        })
-    })?;
-    st.report.brief_events_used = Some(brief.events_used);
-    st.brief_numbers.clear();
-    analysis::brief_numbers(&brief.json, &mut st.brief_numbers);
-    st.out.say(format!(
-        "brief {} bytes ({} KB), {} supporting event(s) per pool",
-        brief.body.len(),
-        brief.body.len().div_ceil(1024),
-        brief.events_used
-    ));
-    let quote = usable_quote(st, &listing, brief.body.clone()).await?;
-    let reservation_id = match st.reservation.as_ref() {
-        Some((id, _, step)) if *step == listing.id => Some(*id),
-        Some((id, _, _)) => {
-            st.ledger
-                .release(*id, OffsetDateTime::now_utc())
-                .map_err(RunError::from)?;
-            st.out
-                .say("reserve released: the final step changed".to_owned());
-            st.reservation = None;
-            None
-        }
-        None => None,
-    };
-    let purchase = buy(st, &listing, &quote, reservation_id).await?;
-    let x: Explanation = parse_body("explain", purchase.body.as_deref().unwrap_or_default())?;
-    st.out.say(format!(
-        "explanation from {} ({} input bytes): {}",
-        x.model, x.input_bytes, x.prose
-    ));
-    st.explanation = Some(x);
-    Ok(())
-}
-
-async fn buy_investigate(st: &mut State<'_>, pending: &[String]) -> Result<(), Stop> {
-    let listing = listing_with(st, Capability::Investigate)?;
-    let body = evidence_body(pending, st.window, st.mandate);
-    let quote = usable_quote(st, &listing, body).await?;
-    buy_investigate_with(st, &listing, quote).await
-}
-
-/// What a bundle must carry, section 8: facts, the seller's outcomes and
-/// claims, and the prose.
-#[derive(serde::Deserialize)]
-struct Bundle {
-    screen: ScreenResponse,
-    events: Option<EventsResponse>,
-    outcomes: Vec<PoolOutcome>,
-    claims: Vec<Claim>,
-    explanation: Explanation,
-}
-
-/// Section 8's equality requirement on a bundle: the seller's outcomes and
-/// claims are what the runtime computes from the delivered facts.
-pub fn bundle_matches(
-    bundle_outcomes: &[PoolOutcome],
-    bundle_claims: &[Claim],
-    ours: &(Vec<PoolOutcome>, Vec<Claim>),
-) -> Vec<Failure> {
-    let mut out = Vec::new();
-    if bundle_outcomes != ours.0 {
-        out.push(Failure {
-            reason: validate::Reason::Calculation,
-            detail: format!(
-                "bundle outcomes {} differ from the recomputation {}",
-                serde_json::to_string(bundle_outcomes).unwrap_or_default(),
-                serde_json::to_string(&ours.0).unwrap_or_default()
-            ),
-        });
-    }
-    if bundle_claims != ours.1 {
-        out.push(Failure {
-            reason: validate::Reason::Calculation,
-            detail: format!(
-                "bundle claims ({}) differ from the recomputation ({})",
-                bundle_claims.len(),
-                ours.1.len()
-            ),
-        });
-    }
-    out
-}
-
-/// The bundle: facts, the seller's outcomes and claims, prose. The runtime
-/// checks the facts like any delivery, recomputes outcomes and claims from
-/// them and requires equality, section 8; anything else is a rejected
-/// delivery.
-async fn buy_investigate_with(
-    st: &mut State<'_>,
-    listing: &Listing,
-    quote: Quote,
-) -> Result<(), Stop> {
-    let quoted_at = OffsetDateTime::parse(&quote.received_at, &Rfc3339)
-        .unwrap_or_else(|_| OffsetDateTime::now_utc());
-    if let Some((id, _, _)) = st.reservation.take() {
-        st.ledger
-            .release(id, OffsetDateTime::now_utc())
-            .map_err(RunError::from)?;
-        st.out
-            .say("reserve released: the bundle is one authorization".to_owned());
-    }
-    let purchase = buy(st, listing, &quote, None).await?;
-    let body = purchase.body.as_deref().unwrap_or_default();
-    let bundle: Bundle = match serde_json::from_slice(body) {
-        Ok(b) => b,
-        Err(e) => {
-            let f = vec![Failure {
-                reason: validate::Reason::Schema,
-                detail: format!(
-                    "{}: response does not match the bundle schema: {e}",
-                    listing.id
-                ),
-            }];
-            return Err(reject_delivery(st, &purchase.authorization, f).await?);
-        }
-    };
-    // One head for the bundle: the screen and the events share the quote time.
-    let (prior_screen, prior_events) = (st.screen.clone(), st.events.clone());
-    match st.screen.as_mut() {
-        Some((mine, _)) => {
-            // Hybrid: the bundle covers W and is the authority for those pools.
-            for (pool, facts) in &bundle.screen.pools {
-                mine.pools.insert(pool.clone(), facts.clone());
-            }
-        }
-        None => st.screen = Some((bundle.screen.clone(), quoted_at)),
-    }
-    st.events = bundle.events.clone().map(|e| (e, quoted_at));
-    let ours = outcomes_and_claims(
-        &bundle.screen,
-        bundle.events.as_ref(),
-        st.mandate.requirements.evidence,
-        st.thresholds(),
-    );
-    let mut failures = match st.delivered() {
-        Some(d) => validate::validate_delivery(&st.rules(), &d),
-        None => Vec::new(),
-    };
-    failures.extend(bundle_matches(&bundle.outcomes, &bundle.claims, &ours));
-    if !failures.is_empty() {
-        st.screen = prior_screen;
-        st.events = prior_events;
-        return Err(reject_delivery(st, &purchase.authorization, failures).await?);
-    }
-    st.out.say(format!(
-        "{}: seller's outcomes and claims equal the runtime's recomputation",
-        listing.id
-    ));
-    recompute(st);
-    st.out.say(format!(
-        "explanation from {} ({} input bytes): {}",
-        bundle.explanation.model, bundle.explanation.input_bytes, bundle.explanation.prose
-    ));
-    st.explanation = Some(bundle.explanation);
-    Ok(())
 }
 
 impl Evidence {
@@ -1774,7 +2035,6 @@ mod tests {
     #[test]
     fn a_refusal_is_terminal_and_a_delivery_needs_the_explanation() {
         let ok = validation(true, true);
-        // Probe: an off-tariff explain quote after a passing validation.
         assert_eq!(
             final_status(true, Some(&ok), false, false, true),
             Status::Refused
@@ -1803,7 +2063,6 @@ mod tests {
             final_status(false, None, false, false, true),
             Status::DeliveredWithFindings
         );
-        // Probe: anchoring required with receipts pending.
         assert_eq!(
             final_status(false, Some(&ok), true, false, false),
             Status::NotAnchored
@@ -1849,9 +2108,25 @@ mod tests {
         };
         let ours = outcomes_and_claims(&screen, Some(&events), Evidence::Transaction, t);
         assert!(bundle_matches(&ours.0, &ours.1, &ours).is_empty());
-        // Probe: empty seller outcomes and claims.
         let f = bundle_matches(&[], &[], &ours);
         assert_eq!(f.len(), 2);
         assert!(f.iter().all(|f| f.reason == validate::Reason::Calculation));
+        // Order is not part of the requirement.
+        let mut shuffled = ours.clone();
+        shuffled.0.reverse();
+        shuffled.1.reverse();
+        assert!(bundle_matches(&shuffled.0, &shuffled.1, &ours).is_empty());
+        // A changed value still fails, and the message names it.
+        let mut changed = ours.1.clone();
+        changed[0]
+            .values
+            .insert("change".into(), serde_json::json!("9"));
+        let f = bundle_matches(&ours.0, &changed, &ours);
+        assert_eq!(f.len(), 1);
+        assert!(
+            f[0].detail.contains("seller ") && f[0].detail.contains("runtime "),
+            "{}",
+            f[0].detail
+        );
     }
 }
