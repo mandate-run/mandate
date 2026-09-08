@@ -43,12 +43,15 @@ async fn main() -> anyhow::Result<()> {
         String::from_utf8_lossy(&message)
     );
 
-    let submitted = consensus.submit_message(topic, &message, 5_000_000).await?;
-    let seq = submitted.sequence;
+    let prepared = consensus.prepare_message(topic, &message, 5_000_000)?;
     println!(
-        "submitted to {topic_id} as sequence {seq}, transaction {}",
-        submitted.transaction_id
+        "prepared transaction {} valid until {}; a ledger would persist this before the send",
+        prepared.transaction_id,
+        prepared.valid_until.format(&Rfc3339)?
     );
+    let submitted = consensus.execute(prepared).await?;
+    let seq = submitted.sequence;
+    println!("submitted to {topic_id} as sequence {seq}");
     println!("{}/topic/{topic_id}", cfg.network.hashscan());
 
     let mut seen = None;
