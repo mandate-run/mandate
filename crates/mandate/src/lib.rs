@@ -8,10 +8,12 @@ pub mod ledger;
 pub mod mandate;
 pub mod manifest;
 pub mod plan;
+pub mod publish;
 pub mod purchase;
 pub mod quote;
 pub mod receipts;
 pub mod refusal;
+pub mod run;
 #[doc(hidden)]
 pub mod testing;
 pub mod transcript;

@@ -1,5 +1,4 @@
-//! `mandate` command line. `topic create` is real; the rest are stubs until
-//! the slices in issue #2 land.
+//! `mandate` command line: `run`, `quote`, `reconcile`, `topic create`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -26,9 +25,15 @@ struct Cli {
 enum Command {
     /// Execute a mandate file and print the transcript.
     Run {
-        /// Path to the mandate file, TOML.
+        /// Path to the mandate file, TOML. The manifest path inside it is relative to this file.
         file: PathBuf,
-        /// Print the transcript as JSON.
+        /// Path to the ledger.
+        #[arg(long, default_value = "mandate.sqlite")]
+        ledger: PathBuf,
+        /// Mandate id for this run, replacing the file's; ids are unique per run.
+        #[arg(long)]
+        id: Option<String>,
+        /// Print the report and transcript as one JSON document instead of streaming lines.
         #[arg(long)]
         json: bool,
     },
@@ -68,44 +73,77 @@ enum TopicCommand {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let what = match cli.command {
-        Command::Run { file, json } => format!("run {} json={json}", file.display()),
+    match cli.command {
+        Command::Run {
+            file,
+            ledger,
+            id,
+            json,
+        } => run(&file, &ledger, id.as_deref(), json).await,
         Command::Quote {
             manifest,
             listing,
             body,
-        } => {
-            return match quote(&manifest, &listing, body).await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("mandate quote: {e:#}");
-                    ExitCode::from(1)
-                }
-            };
-        }
-        Command::Reconcile { mandate_id, ledger } => {
-            return match reconcile(&mandate_id, &ledger).await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("mandate reconcile: {e:#}");
-                    ExitCode::from(1)
-                }
-            };
-        }
+        } => match quote(&manifest, &listing, body).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("mandate quote: {e:#}");
+                ExitCode::from(1)
+            }
+        },
+        Command::Reconcile { mandate_id, ledger } => match reconcile(&mandate_id, &ledger).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("mandate reconcile: {e:#}");
+                ExitCode::from(1)
+            }
+        },
         Command::Topic {
             command: TopicCommand::Create,
-        } => {
-            return match topic_create().await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("mandate topic create: {e:#}");
-                    ExitCode::from(1)
-                }
-            };
+        } => match topic_create().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("mandate topic create: {e:#}");
+                ExitCode::from(1)
+            }
+        },
+    }
+}
+
+/// Sections 4 to 12 for one mandate. Exit 0 delivered, 3 refused, 4
+/// delivered with findings, 1 error, 2 a mandate or manifest that does not load.
+async fn run(
+    file: &std::path::Path,
+    ledger: &std::path::Path,
+    id: Option<&str>,
+    json: bool,
+) -> ExitCode {
+    let cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("mandate run: {e}");
+            return ExitCode::from(1);
         }
     };
-    eprintln!("mandate {what}: not implemented");
-    ExitCode::from(2)
+    match mandate::run::run(&cfg, file, ledger, id, json).await {
+        Ok(report) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).unwrap_or_default()
+                );
+            }
+            ExitCode::from(report.status.exit_code())
+        }
+        Err(e @ (mandate::run::RunError::Mandate(_) | mandate::run::RunError::Manifest(_))) => {
+            eprintln!("mandate run: {e}");
+            ExitCode::from(2)
+        }
+        Err(e) => {
+            eprintln!("mandate run: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 /// Section 4 quoting from a process that holds no key.
