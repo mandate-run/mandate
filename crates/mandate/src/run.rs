@@ -1217,6 +1217,10 @@ fn plan_round<Q, P, U>(
         decimals,
         quotes: &quotes,
         unusable: &st.unusable,
+        brief_kb: st
+            .brief
+            .as_ref()
+            .map(|b| (b.body.len() as u64).div_ceil(crate::manifest::KB)),
     };
     if st.round == 1 {
         let mut estimates = Vec::new();

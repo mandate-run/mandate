@@ -93,6 +93,9 @@ pub struct Situation<'a> {
     pub decimals: u32,
     /// Live quotes by listing id and unit count.
     pub quotes: &'a BTreeMap<(String, u64), i64>,
+    /// The brief's size in whole KB, once it exists. Until then the explain
+    /// step is estimated at its listing's maximum, section 5.
+    pub brief_kb: Option<u64>,
     /// Listings whose quote was refused or unreachable, with the reason; no plan may use them.
     pub unusable: &'a BTreeMap<String, String>,
 }
@@ -132,11 +135,16 @@ fn step(sit: &Situation<'_>, listing: &Listing, units: u64) -> Result<Step, Stri
     })
 }
 
-fn units_for(listing: &Listing, pools: u64, window_seconds: u64) -> u64 {
+fn units_for(sit: &Situation<'_>, listing: &Listing, pools: u64, window_seconds: u64) -> u64 {
     match listing.tariff.unit {
         crate::manifest::Unit::Pool => pools,
         crate::manifest::Unit::PoolWindow => pools * windows(window_seconds),
-        crate::manifest::Unit::InputKb => listing.tariff.max_units,
+        // The brief decides the explain quantity as soon as it exists; before
+        // that the maximum is the only honest estimate.
+        crate::manifest::Unit::InputKb => sit
+            .brief_kb
+            .map(|kb| kb.clamp(1, listing.tariff.max_units))
+            .unwrap_or(listing.tariff.max_units),
     }
 }
 
@@ -159,7 +167,7 @@ pub fn price(kind: PlanKind, sit: &Situation<'_>) -> Plan {
             (expected_pools, &mut *expected_steps),
             (bound_pools, &mut *bound_steps),
         ] {
-            let units = units_for(listing, pools, sit.window_seconds);
+            let units = units_for(sit, listing, pools, sit.window_seconds);
             match step(sit, listing, units) {
                 Ok(s) => into.push(s),
                 Err(e) => reasons.push(e),
@@ -346,6 +354,7 @@ mod tests {
     ) -> Situation<'a> {
         Situation {
             unusable: &NONE,
+            brief_kb: None,
             manifest,
             required: pools,
             unscreened: pools,
@@ -507,6 +516,47 @@ mod tests {
             by_kind(&price_all(&before), PlanKind::Staged).expected,
             3_300
         );
+    }
+
+    #[test]
+    fn the_explain_step_prices_at_the_brief_size_once_it_exists() {
+        let m = Manifest::from_json(MANIFEST).unwrap();
+        // A live explain quote for a 3 KB brief, the size the run measured.
+        let mut quotes = BTreeMap::new();
+        quotes.insert(("explain".to_owned(), 3), 300);
+        let mut sit = situation(&m, &quotes, 5, 10_000);
+        sit.unscreened = 0;
+        sit.pending = 0;
+        // Before the brief exists the maximum is the only honest estimate.
+        let plans = price_all(&sit);
+        let staged = by_kind(&plans, PlanKind::Staged);
+        assert_eq!((staged.expected, staged.expected_steps[0].units), (800, 8));
+        assert_eq!(staged.expected_steps[0].source, Source::Ceiling);
+        // With the brief measured, the live quote at that size is used.
+        sit.brief_kb = Some(3);
+        let plans = price_all(&sit);
+        let staged = by_kind(&plans, PlanKind::Staged);
+        assert_eq!((staged.expected, staged.bound), (300, 300));
+        assert_eq!(staged.expected_steps[0].units, 3);
+        assert_eq!(staged.expected_steps[0].source, Source::Quote);
+        // Without a quote it is the ceiling at that size, not at the maximum.
+        let none = BTreeMap::new();
+        let mut sit = situation(&m, &none, 5, 10_000);
+        sit.unscreened = 0;
+        sit.pending = 0;
+        sit.brief_kb = Some(3);
+        let plans = price_all(&sit);
+        let staged = by_kind(&plans, PlanKind::Staged);
+        assert_eq!(
+            (staged.expected, staged.expected_steps[0].source),
+            (300, Source::Ceiling)
+        );
+        // A brief larger than the listing takes is still capped there, so the
+        // feasibility check, not the price, refuses it.
+        sit.brief_kb = Some(99);
+        let plans = price_all(&sit);
+        let staged = by_kind(&plans, PlanKind::Staged);
+        assert_eq!(staged.expected_steps[0].units, 8);
     }
 
     #[test]
