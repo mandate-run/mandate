@@ -128,9 +128,22 @@ async fn quote(
     let text = std::fs::read_to_string(manifest_path)?;
     let manifest = Manifest::from_json(&text)?;
     let listing = manifest.listing(listing_id)?;
+    // The body decides the unit count when it carries pools and a window;
+    // the flags only fill in what the body does not say.
+    let parsed: Option<serde_json::Value> = serde_json::from_str(&body).ok();
+    let body_pools = parsed
+        .as_ref()
+        .and_then(|v| v.get("pools"))
+        .and_then(|p| p.as_array())
+        .map(|p| p.len() as u64);
+    let body_window = parsed.as_ref().and_then(|v| v.get("window")).and_then(|w| {
+        let from = w.get("from")?.as_u64()?;
+        let to = w.get("to")?.as_u64()?;
+        Some(to.saturating_sub(from))
+    });
     let shape = RequestShape {
-        pools,
-        window_seconds: window_h * 3600,
+        pools: body_pools.unwrap_or(pools),
+        window_seconds: body_window.unwrap_or(window_h * 3600),
         body_bytes: body.len() as u64,
     };
     let units = units_for(listing.tariff.unit, &shape);
