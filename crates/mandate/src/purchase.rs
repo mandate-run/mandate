@@ -251,3 +251,293 @@ mod tests {
         );
     }
 }
+
+// Section 6 forward path: one purchase from an approved quote to a settled,
+// delivered authorization, driven by the ledger at every transition. The
+// signer is used once, before anything is persisted; every later send reuses
+// the stored header.
+
+/// Why a purchase did not start.
+#[derive(Debug, thiserror::Error)]
+pub enum PayError {
+    #[error("{0}")]
+    Refused(crate::refusal::Refusal),
+    #[error(transparent)]
+    Ledger(#[from] LedgerError),
+    #[error(transparent)]
+    Hedera(#[from] hedera::Error),
+    #[error("binding: {0}")]
+    Binding(#[from] crate::ledger::BindingError),
+    #[error("quote for {0} expired before it was paid")]
+    QuoteExpired(String),
+}
+
+/// What one purchase ended as. The authorization row is the record; the body
+/// is present when the delivery was received.
+#[derive(Debug, Clone)]
+pub struct Purchase {
+    pub authorization: Authorization,
+    pub settlement: Settlement,
+    pub body: Option<Vec<u8>>,
+    /// Milliseconds from the first send to the received delivery.
+    pub latency_ms: Option<u64>,
+    /// Records in the last mirror read.
+    pub records: usize,
+}
+
+/// One line of progress, printed by the caller.
+pub type Say<'a> = &'a mut dyn FnMut(String);
+
+/// The paying client: the signer, the ledger's mirror node and an HTTP client
+/// that never follows redirects.
+pub struct Payer<'a> {
+    pub signer: &'a hedera::Signer,
+    pub mirror: &'a MirrorNode,
+    pub http: &'a reqwest::Client,
+    /// How often the mirror node is read while waiting, section 6: 5 s.
+    pub poll: std::time::Duration,
+    /// Most retrievals after settlement within one run.
+    pub max_retrievals: u32,
+}
+
+impl Payer<'_> {
+    /// Signs and persists the authorization for `quote`, section 6's first
+    /// row. Nothing is sent. The quote must be usable and unrefused.
+    pub async fn prepare(
+        &self,
+        ledger: &mut Ledger,
+        mandate_id: &str,
+        step: &str,
+        reservation_id: Option<i64>,
+        quote: &crate::quote::Quote,
+        now: OffsetDateTime,
+    ) -> Result<Authorization, PayError> {
+        if let Some(r) = quote.refusal() {
+            return Err(PayError::Refused(r));
+        }
+        if !quote.usable_at(now) {
+            return Err(PayError::QuoteExpired(quote.listing_id.clone()));
+        }
+        let fee_payer = quote.fee_payer.as_deref().ok_or_else(|| {
+            PayError::Refused(crate::refusal::Refusal {
+                code: crate::refusal::Code::OutsideConstraints,
+                detail: format!("{}: quote names no fee payer", quote.listing_id),
+            })
+        })?;
+        let nodes = self.mirror.node_account_ids(5).await?;
+        let transfer = hedera::Transfer {
+            fee_payer: fee_payer.parse().map_err(hedera::Error::from)?,
+            pay_to: quote.pay_to.parse().map_err(hedera::Error::from)?,
+            asset: Asset::parse(&quote.asset)?,
+            amount: quote.amount,
+            node_account_ids: &nodes,
+            valid_start: now - hedera::VALID_START_SKEW,
+            valid_duration: hedera::valid_duration(quote.max_timeout_s),
+        };
+        let signed = hedera::sign_transfer(self.signer, &transfer)?;
+        let payment_id = crate::x402::new_payment_id();
+        let payload = crate::x402::PaymentPayload::new(
+            &quote.required,
+            &quote.accepted,
+            signed.base64(),
+            &payment_id,
+        );
+        let header = crate::x402::encode_header(&payload);
+        let prepared = crate::ledger::PreparedPayment::from_signature(&header, &payment_id)?
+            .with_quote(serde_json::to_string(quote).unwrap_or_default());
+        let mut headers = vec![(crate::x402::HEADER_SIGNATURE.to_owned(), header)];
+        if !quote.request.body.is_empty() {
+            headers.insert(
+                0,
+                ("content-type".to_owned(), "application/json".to_owned()),
+            );
+        }
+        let request = crate::ledger::Request {
+            method: quote.request.method.clone(),
+            url: quote.request.url.clone(),
+            headers,
+            body: quote.request.body.clone(),
+        };
+        let a = ledger.prepare(mandate_id, step, reservation_id, &prepared, &request, now)?;
+        Ok(a)
+    }
+
+    /// Sends a persisted authorization and drives it to a terminal payment
+    /// state with a delivery, or to `unresolved`, applying section 6's rules:
+    /// counters before sends, mirror records as the only settlement evidence,
+    /// resend within validity, retrieval after settlement with the same header.
+    pub async fn settle(
+        &self,
+        ledger: &mut Ledger,
+        id: i64,
+        deadline: OffsetDateTime,
+        say: Say<'_>,
+    ) -> Result<Purchase, PayError> {
+        let a = ledger.authorization(id)?;
+        let expected = Expected {
+            asset: Asset::parse(&a.asset)?,
+            from: a.payer.parse().map_err(hedera::Error::from)?,
+            to: a.pay_to.parse().map_err(hedera::Error::from)?,
+            amount: a.amount,
+        };
+        let started = std::time::Instant::now();
+        let mut latency_ms = None;
+        let mut settlement = Settlement::Absent {
+            duplicates_ignored: 0,
+        };
+        let mut records = 0;
+        let mut a = a;
+        let mut retrievals_left = self.max_retrievals;
+        loop {
+            let now = OffsetDateTime::now_utc();
+            // 1. Decide the next transmission from the ledger alone.
+            let action =
+                if a.payment_state.is_terminal() && a.payment_state != PaymentState::Settled {
+                    break;
+                } else if a.payment_state == PaymentState::Settled {
+                    match a.delivery_state {
+                        DeliveryState::None if retrievals_left > 0 && now < deadline => {
+                            Some("retrieve")
+                        }
+                        DeliveryState::None => break,
+                        _ => break,
+                    }
+                } else if a.delivery_state == DeliveryState::None
+                    && now < a.valid_until
+                    && a.submissions < MAX_SUBMISSIONS
+                {
+                    Some("send")
+                } else {
+                    None
+                };
+            // 2. Commit the counter, then transmit the stored bytes.
+            if let Some(kind) = action {
+                let committed = if kind == "send" {
+                    ledger.commit_submission(a.id, now)
+                } else {
+                    ledger.commit_retrieval(a.id, now)
+                };
+                match committed {
+                    Ok(row) => {
+                        a = row;
+                        if kind == "retrieve" {
+                            retrievals_left -= 1;
+                        }
+                        say(format!(
+                            "{} {}: {} {} (submissions {}, retrievals {})",
+                            a.step, a.payment_id, kind, a.request.url, a.submissions, a.retrievals
+                        ));
+                        match self.transmit(&a).await {
+                            Ok((status, body, payment_response))
+                                if (200..300).contains(&status) =>
+                            {
+                                a = ledger.record_delivery(
+                                    a.id,
+                                    &body,
+                                    payment_response.as_deref(),
+                                    OffsetDateTime::now_utc(),
+                                )?;
+                                latency_ms.get_or_insert(started.elapsed().as_millis() as u64);
+                                say(format!(
+                                    "{} delivery received, {} bytes, response hash {}",
+                                    a.step,
+                                    body.len(),
+                                    a.response_hash.as_deref().unwrap_or("?")
+                                ));
+                            }
+                            Ok((status, body, _)) => {
+                                say(format!(
+                                    "{} seller answered {status}: {}",
+                                    a.step,
+                                    String::from_utf8_lossy(&body[..body.len().min(300)])
+                                ));
+                            }
+                            Err(e) => say(format!("{} no response: {e}", a.step)),
+                        }
+                    }
+                    Err(LedgerError::TooSoon { next_at, .. }) => {
+                        say(format!("{} next {kind} allowed at {next_at}", a.step));
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            // 3. Reconcile from the mirror node.
+            let found = self.mirror.records(&a.mirror_id).await?;
+            records = found.len();
+            settlement = hedera::settlement(&found, &expected);
+            let now = OffsetDateTime::now_utc();
+            a = ledger.record_settlement(a.id, &settlement, now)?;
+            match (&settlement, a.delivery_state) {
+                (
+                    Settlement::Settled { .. },
+                    DeliveryState::Received | DeliveryState::Validated | DeliveryState::Rejected,
+                ) => {
+                    say(format!(
+                        "{} payment settled: record matches; records {}, duplicates ignored {}",
+                        a.step, records, a.duplicates_ignored
+                    ));
+                    break;
+                }
+                (Settlement::Settled { .. }, DeliveryState::None) => {
+                    say(format!(
+                        "{} payment settled, delivery none: retrieval with the original payment",
+                        a.step
+                    ));
+                }
+                (Settlement::Failed { results, .. }, _) => {
+                    say(format!("{} payment failed: {}", a.step, results.join(",")));
+                    break;
+                }
+                (Settlement::Anomaly { results, .. }, _) => {
+                    say(format!(
+                        "{} payment anomaly: {}; reconcile by hand",
+                        a.step,
+                        results.join(",")
+                    ));
+                    break;
+                }
+                (Settlement::Absent { .. }, _) => {}
+            }
+            if a.payment_state == PaymentState::Unresolved {
+                say(format!(
+                    "{} unresolved: no record by {}; exposure kept",
+                    a.step, a.valid_until
+                ));
+                break;
+            }
+            if action.is_none() && now >= deadline {
+                break;
+            }
+            tokio::time::sleep(self.poll).await;
+        }
+        Ok(Purchase {
+            body: a.response_body.clone(),
+            authorization: a,
+            settlement,
+            latency_ms,
+            records,
+        })
+    }
+
+    /// One transmission of the stored request. Never re-signs, never follows redirects.
+    async fn transmit(&self, a: &Authorization) -> Result<(u16, Vec<u8>, Option<String>), String> {
+        let method =
+            reqwest::Method::from_bytes(a.request.method.as_bytes()).map_err(|e| e.to_string())?;
+        let mut req = self.http.request(method, &a.request.url);
+        for (k, v) in &a.request.headers {
+            req = req.header(k, v);
+        }
+        if !a.request.body.is_empty() {
+            req = req.body(a.request.body.clone());
+        }
+        let resp = req.send().await.map_err(|e| e.to_string())?;
+        let status = resp.status().as_u16();
+        let payment_response = resp
+            .headers()
+            .get(crate::x402::HEADER_RESPONSE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let body = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
+        Ok((status, body, payment_response))
+    }
+}
