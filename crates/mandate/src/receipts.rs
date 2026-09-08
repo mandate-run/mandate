@@ -67,6 +67,16 @@ pub struct Receipt {
 }
 
 impl Receipt {
+    pub fn outcome_str(&self) -> &'static str {
+        match self.outcome {
+            Outcome::Start => "start",
+            Outcome::Paid => "paid",
+            Outcome::Refused => "refused",
+            Outcome::Failed => "failed",
+            Outcome::Unresolved => "unresolved",
+        }
+    }
+
     /// Receipt 0: what was run, not what was bought.
     pub fn start(mandate_id: &str, mandate_hash: &str, manifest_hash: &str, at: &str) -> Self {
         Self {
