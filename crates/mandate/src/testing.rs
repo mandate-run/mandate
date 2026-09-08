@@ -515,6 +515,21 @@ pub struct FakeMarket {
     head: std::sync::Mutex<u64>,
     /// Deliver bundles whose outcomes and claims are empty.
     pub tamper_bundle: bool,
+    /// Settle, then drop the response to this many transmissions per step,
+    /// the `drop-response-after-settle` fault. A retrieval past the count
+    /// serves the stored result, as section 13 requires.
+    pub drop_responses: BTreeMap<String, u32>,
+    /// Never produce a record for these steps: settlement stays `Absent`.
+    pub never_settle: Vec<String>,
+    /// Answer with a duplicate record beside the success record.
+    pub duplicate_records: bool,
+    /// What the market actually transmitted, by step: one entry per send.
+    pub transmissions: std::sync::Mutex<Vec<(String, String)>>,
+    /// Retrievals allowed per authorization, section 6.
+    pub max_retrievals: u32,
+    /// Authorize at most this many purchases, then fail as a dead process
+    /// would, so a test can resume the ledger the crash left behind.
+    stop_after: std::sync::Mutex<usize>,
     pub quoted: std::sync::Mutex<Vec<(String, i64)>>,
     pub authorized: std::sync::Mutex<Vec<(String, i64)>>,
 }
@@ -530,9 +545,21 @@ impl FakeMarket {
             thresholds: ("0.05".to_owned(), "100000".to_owned()),
             head: std::sync::Mutex::new(25_000_000),
             tamper_bundle: false,
+            drop_responses: BTreeMap::new(),
+            never_settle: Vec::new(),
+            duplicate_records: false,
+            transmissions: std::sync::Mutex::new(Vec::new()),
+            max_retrievals: 4,
+            stop_after: std::sync::Mutex::new(usize::MAX),
             quoted: std::sync::Mutex::new(Vec::new()),
             authorized: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Stop the run once `n` purchases have been authorized. The next
+    /// `prepare` fails, leaving the ledger exactly as a crash would.
+    pub fn stop_after(&self, n: usize) {
+        *self.stop_after.lock().unwrap() = n;
     }
 
     /// Scripts the quotes of one listing in order; the last one repeats.
@@ -741,25 +768,124 @@ impl crate::run::Paying for FakeMarket {
         _deadline: OffsetDateTime,
         say: &mut dyn FnMut(String),
     ) -> Result<crate::purchase::Purchase, crate::purchase::PayError> {
-        let now = OffsetDateTime::now_utc();
-        let a = ledger.commit_submission(id, now)?;
-        let body = self.deliver(&a.step, &a.request.body);
-        ledger.record_delivery(id, &body, Some("fake"), now)?;
-        let settlement = crate::hedera::Settlement::Settled {
-            consensus_timestamp: "1.000000001".to_owned(),
+        let deadline = _deadline;
+        let mut a = ledger.authorization(id)?;
+        let step = a.step.clone();
+        // The crash point: the authorization is durable, nothing was sent.
+        if self.authorized.lock().unwrap().len() >= *self.stop_after.lock().unwrap() {
+            return Err(crate::purchase::PayError::Crashed);
+        }
+        // A virtual clock: section 6 spaces transmissions 30 s apart, and a
+        // test must not sleep through them. Time only moves forward here.
+        let mut clock = OffsetDateTime::now_utc();
+        let drops = self.drop_responses.get(&step).copied().unwrap_or(0);
+        let never = self.never_settle.contains(&step);
+        let mut body = a.response_body.clone();
+        let mut settlement = crate::hedera::Settlement::Absent {
             duplicates_ignored: 0,
         };
-        let a = ledger.record_settlement(id, &settlement, now)?;
-        say(format!(
-            "{} payment settled: record matches; records 1, duplicates ignored 0",
-            a.step
-        ));
+        let mut records = 0;
+        let _ = records;
+        loop {
+            let now = clock;
+            // Section 6: a send while the payment is open, a retrieval once
+            // settled without a delivery. The stored bytes go out either way.
+            let sending = a.payment_state != crate::ledger::PaymentState::Settled
+                && a.delivery_state == crate::ledger::DeliveryState::None
+                && a.submissions < crate::ledger::MAX_SUBMISSIONS
+                && now < a.valid_until;
+            let retrieving = a.payment_state == crate::ledger::PaymentState::Settled
+                && a.delivery_state == crate::ledger::DeliveryState::None
+                && a.retrievals < self.max_retrievals
+                && now < deadline;
+            if sending {
+                a = ledger.commit_submission(id, now)?;
+            } else if retrieving {
+                a = ledger.commit_retrieval(id, now)?;
+            }
+            if sending || retrieving {
+                let sends = self.transmissions.lock().unwrap().len();
+                let _ = sends;
+                self.transmissions
+                    .lock()
+                    .unwrap()
+                    .push((step.clone(), a.signature.clone()));
+                let served = self.deliver(&step, &a.request.body);
+                // The fault drops the response to the first `drops`
+                // submissions; a retrieval always serves the stored result.
+                let dropped = sending && a.submissions <= drops;
+                if dropped {
+                    say(format!(
+                        "{step}: settled, response dropped (submission {})",
+                        a.submissions
+                    ));
+                } else {
+                    a = ledger.record_delivery(id, &served, Some("fake"), now)?;
+                    body = Some(served);
+                }
+            }
+            // The record set the mirror node would show.
+            clock += Duration::seconds(31);
+            let now = clock;
+            // The `drop-response-after-settle` fault: the seller settles and
+            // the response is lost, so the buyer resends up to I8's cap
+            // before a retrieval finds the stored result. The record only
+            // appears once the drops are exhausted, as a real mirror node
+            // lags behind the submissions.
+            let dropping = drops > 0 && a.submissions < crate::ledger::MAX_SUBMISSIONS.min(drops);
+            settlement = if never || dropping {
+                crate::hedera::Settlement::Absent {
+                    duplicates_ignored: 0,
+                }
+            } else if a.submissions > 0 {
+                crate::hedera::Settlement::Settled {
+                    consensus_timestamp: "1.000000001".to_owned(),
+                    duplicates_ignored: usize::from(self.duplicate_records),
+                }
+            } else {
+                settlement
+            };
+            records = match &settlement {
+                crate::hedera::Settlement::Settled {
+                    duplicates_ignored, ..
+                } => 1 + duplicates_ignored,
+                _ => 0,
+            };
+            // No record will ever come: age the row past `valid_until + 30 s`
+            // so the ledger can decide `unresolved`, as the clock would.
+            let at = if never {
+                a.valid_until + crate::hedera::RECORD_GRACE + Duration::seconds(1)
+            } else {
+                now
+            };
+            a = ledger.record_settlement(id, &settlement, at)?;
+            if a.payment_state == crate::ledger::PaymentState::Unresolved {
+                say(format!(
+                    "{step}: no record by {}; exposure kept",
+                    a.valid_until
+                ));
+                break;
+            }
+            if a.payment_state == crate::ledger::PaymentState::Settled
+                && a.delivery_state != crate::ledger::DeliveryState::None
+            {
+                say(format!(
+                    "{step} payment settled: record matches; records {records}, duplicates ignored {}",
+                    a.duplicates_ignored
+                ));
+                break;
+            }
+            // Nothing was transmitted this pass and nothing can be: stop.
+            if !sending && !retrieving {
+                break;
+            }
+        }
         Ok(crate::purchase::Purchase {
-            body: Some(body),
+            body,
             authorization: a,
             settlement,
             latency_ms: Some(1),
-            records: 1,
+            records,
         })
     }
 }
