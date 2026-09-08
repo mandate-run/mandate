@@ -111,7 +111,8 @@ async fn main() -> ExitCode {
 }
 
 /// Sections 4 to 12 for one mandate. Exit 0 delivered, 3 refused, 4
-/// delivered with findings, 1 error, 2 a mandate or manifest that does not load.
+/// delivered with findings, 5 receipts not anchored when the mandate requires
+/// it, 1 error, 2 a mandate or manifest that does not load.
 async fn run(
     file: &std::path::Path,
     ledger: &std::path::Path,

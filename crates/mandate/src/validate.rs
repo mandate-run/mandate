@@ -1,7 +1,11 @@
 //! Spec section 9: result validation. Every check is named by its failure
 //! reason: `coverage`, `calculation`, `citation`, `prose`, `provenance`,
-//! `freshness`, `schema`. The local checks are pure; provenance needs an
-//! Ethereum JSON-RPC and is applied afterwards with [`Validation::with_provenance`].
+//! `freshness`, `schema`. [`validate_delivery`] holds the checks one
+//! delivery can fail on its own, schema and freshness including the binding
+//! to the requested window, and runs before the delivery is used for any
+//! further purchase. [`validate`] adds the report-wide checks. The local
+//! checks are pure; provenance needs an Ethereum JSON-RPC and is applied
+//! afterwards with [`Validation::with_provenance`].
 
 use std::collections::BTreeSet;
 
@@ -9,8 +13,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use crate::analysis::{Claim, ClaimType, Outcome, PoolOutcome, outcomes_and_claims};
-use crate::evidence::{Dec, EventsResponse, Explanation, Header, ScreenResponse};
+use crate::analysis::{
+    Claim, ClaimType, Outcome, PoolOutcome, Thresholds, aggregates, assess, outcomes_and_claims,
+};
+use crate::evidence::{
+    Dec, EVENT_KINDS, EventsResponse, Explanation, Header, ScreenResponse, Window,
+};
 use crate::mandate::{Citations, Evidence};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +53,13 @@ pub struct Failure {
     pub detail: String,
 }
 
+fn fail(failures: &mut Vec<Failure>, reason: Reason, detail: impl Into<String>) {
+    failures.push(Failure {
+        reason,
+        detail: detail.into(),
+    });
+}
+
 /// One delivered response and when its quote was received, for freshness.
 #[derive(Debug)]
 pub struct Timed<'a, T> {
@@ -73,14 +88,18 @@ pub struct Delivered<'a> {
 pub struct Rules<'a> {
     /// `R`, lowercased pool addresses.
     pub required: &'a [String],
+    /// The window the run requested; every delivery must state and cover it.
+    pub window: Window,
     pub evidence: Evidence,
     pub citations: Citations,
     pub max_data_age_s: u64,
     pub provenance_samples: u32,
     pub degrade: bool,
-    pub min_event_usd: &'a str,
+    pub thresholds: Thresholds<'a>,
     /// Numbers a model may state that are inputs rather than facts: window hours and pool count.
     pub input_numbers: Vec<String>,
+    /// The number forms the brief showed the model, section 8.
+    pub brief_numbers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,13 +236,12 @@ fn resolve_tx(
     events: Option<&EventsResponse>,
 ) -> Result<(), String> {
     if let Some(facts) = screen.pools.get(pool)
-        && [
-            &facts.large_events.swap,
-            &facts.large_events.mint,
-            &facts.large_events.burn,
-        ]
-        .iter()
-        .any(|h| h.as_ref().is_some_and(|h| h.transaction.id == tx))
+        && EVENT_KINDS.iter().any(|k| {
+            facts
+                .large_events
+                .get(*k)
+                .is_some_and(|h| h.transaction.id == tx)
+        })
     {
         return Ok(());
     }
@@ -236,34 +254,385 @@ fn resolve_tx(
     Err(format!("{tx}: not among the purchased events of {pool}"))
 }
 
-fn header_fresh(
+/// Schema and freshness of one response header against the requested window.
+fn check_header(
     what: &str,
     h: &Header,
     quoted_at: OffsetDateTime,
-    max_age: u64,
+    rules: &Rules<'_>,
     failures: &mut Vec<Failure>,
 ) {
+    if h.deployment_id.is_empty() {
+        fail(
+            failures,
+            Reason::Schema,
+            format!("{what}: deployment_id is empty"),
+        );
+    }
+    if h.block_end < h.block_start {
+        fail(
+            failures,
+            Reason::Schema,
+            format!("{what}: block_end before block_start"),
+        );
+    }
+    if h.indexed_block < h.block_end {
+        fail(
+            failures,
+            Reason::Schema,
+            format!("{what}: indexed_block before block_end"),
+        );
+    }
+    let w = rules.window;
+    if h.window_requested != w {
+        fail(
+            failures,
+            Reason::Schema,
+            format!(
+                "{what}: window_requested {}..{} is not the requested {}..{}",
+                h.window_requested.from, h.window_requested.to, w.from, w.to
+            ),
+        );
+    }
+    if h.window_covered.from != w.from || h.window_covered.to > w.to || h.window_covered.to < w.from
+    {
+        fail(
+            failures,
+            Reason::Schema,
+            format!(
+                "{what}: window_covered {}..{} is outside the requested {}..{}",
+                h.window_covered.from, h.window_covered.to, w.from, w.to
+            ),
+        );
+    }
+    if h.block_end_timestamp > w.to {
+        fail(
+            failures,
+            Reason::Schema,
+            format!(
+                "{what}: block_end_timestamp {} is after the window end {}",
+                h.block_end_timestamp, w.to
+            ),
+        );
+    }
     match h.indexed_block_timestamp {
-        None => failures.push(Failure {
-            reason: Reason::Freshness,
-            detail: format!("{what}: indexed_block_timestamp is null"),
-        }),
+        None => fail(
+            failures,
+            Reason::Freshness,
+            format!("{what}: indexed_block_timestamp is null"),
+        ),
         Some(ts) => {
             let age = quoted_at.unix_timestamp() - ts as i64;
-            if age > max_age as i64 {
-                failures.push(Failure {
-                    reason: Reason::Freshness,
-                    detail: format!("{what}: indexed block is {age} s older than the quote, max_data_age_s is {max_age}"),
-                });
+            if age > rules.max_data_age_s as i64 {
+                fail(
+                    failures,
+                    Reason::Freshness,
+                    format!(
+                        "{what}: indexed block is {age} s older than the quote, max_data_age_s is {}",
+                        rules.max_data_age_s
+                    ),
+                );
+            }
+            if ts < w.to && !h.coverage_shortfall {
+                fail(
+                    failures,
+                    Reason::Freshness,
+                    format!(
+                        "{what}: indexed at {ts}, before the window end {}, without coverage_shortfall",
+                        w.to
+                    ),
+                );
+            }
+            if ts < w.to && h.window_covered.to == w.to {
+                fail(
+                    failures,
+                    Reason::Freshness,
+                    format!(
+                        "{what}: window_covered reaches the window end while the head is at {ts}"
+                    ),
+                );
             }
         }
     }
     if h.indexing_errors {
-        failures.push(Failure {
-            reason: Reason::Freshness,
-            detail: format!("{what}: indexing_errors is true"),
-        });
+        fail(
+            failures,
+            Reason::Freshness,
+            format!("{what}: indexing_errors is true"),
+        );
     }
+}
+
+fn number_ok(text: &str) -> bool {
+    Dec::parse(text).is_ok()
+}
+
+/// Section 9 schema and freshness for whatever has been delivered so far:
+/// the typed shape, the binding to the requested window, numeric fields that
+/// parse, rows inside the window, and the seller's own verdicts and
+/// aggregates agreeing with its facts.
+pub fn validate_delivery(rules: &Rules<'_>, delivered: &Delivered<'_>) -> Vec<Failure> {
+    let mut failures = Vec::new();
+    let screen = delivered.screen.body;
+    let w = rules.window;
+    check_header(
+        "screen",
+        &screen.header,
+        delivered.screen.quoted_at,
+        rules,
+        &mut failures,
+    );
+    for pool in rules.required {
+        if !screen.pools.contains_key(pool) {
+            fail(
+                &mut failures,
+                Reason::Schema,
+                format!("screen: pool {pool} missing from the response"),
+            );
+        }
+    }
+    for (pool, p) in &screen.pools {
+        for (name, s) in [("start", &p.start), ("end", &p.end)] {
+            let Some(s) = s else { continue };
+            for (field, value) in [
+                ("totalValueLockedToken0", Some(s.tvl_token0.as_str())),
+                ("totalValueLockedToken1", Some(s.tvl_token1.as_str())),
+                ("totalValueLockedUSD", s.tvl_usd.as_deref()),
+                ("liquidity", Some(s.liquidity.as_str())),
+                ("token0PriceUSD", s.token0_price_usd.as_deref()),
+                ("token1PriceUSD", s.token1_price_usd.as_deref()),
+            ] {
+                if let Some(v) = value
+                    && !number_ok(v)
+                {
+                    fail(
+                        &mut failures,
+                        Reason::Schema,
+                        format!("screen {pool}: {name}.{field} {v:?} is not a number"),
+                    );
+                }
+            }
+        }
+        for h in &p.hours {
+            if h.period_start_unix < w.from || h.period_start_unix >= w.to {
+                fail(
+                    &mut failures,
+                    Reason::Schema,
+                    format!(
+                        "screen {pool}: hour row at {} is outside {}..{}",
+                        h.period_start_unix, w.from, w.to
+                    ),
+                );
+            }
+            if !number_ok(&h.volume_usd)
+                || !number_ok(&h.tvl_usd)
+                || h.tx_count.parse::<u64>().is_err()
+            {
+                fail(
+                    &mut failures,
+                    Reason::Schema,
+                    format!(
+                        "screen {pool}: hour row at {} has a malformed number",
+                        h.period_start_unix
+                    ),
+                );
+            }
+        }
+        for kind in EVENT_KINDS {
+            if let Some(hit) = p.large_events.get(kind) {
+                if !is_tx_hash(&hit.transaction.id) {
+                    fail(
+                        &mut failures,
+                        Reason::Schema,
+                        format!(
+                            "screen {pool}: large_events.{} transaction {:?} is not a hash",
+                            kind.as_str(),
+                            hit.transaction.id
+                        ),
+                    );
+                }
+                if !number_ok(&hit.amount_usd) {
+                    fail(
+                        &mut failures,
+                        Reason::Schema,
+                        format!(
+                            "screen {pool}: large_events.{} amountUSD {:?} is not a number",
+                            kind.as_str(),
+                            hit.amount_usd
+                        ),
+                    );
+                }
+            }
+        }
+        if p.absent_at_start != (p.start.is_none() && p.end.is_some()) {
+            fail(
+                &mut failures,
+                Reason::Schema,
+                format!("screen {pool}: absent_at_start disagrees with the snapshots"),
+            );
+        }
+        // The seller's verdict must be what its own facts give.
+        let mine = assess(p, rules.thresholds);
+        if !mine
+            .reasons
+            .iter()
+            .any(|r| r.starts_with("undetermined:bad_number:"))
+            && (mine.verdict != p.verdict || mine.reasons != p.reasons)
+        {
+            fail(
+                &mut failures,
+                Reason::Calculation,
+                format!(
+                    "screen {pool}: seller verdict {:?} {:?} differs from the facts: {:?} {:?}",
+                    p.verdict, p.reasons, mine.verdict, mine.reasons
+                ),
+            );
+        }
+    }
+    if let Some(ev) = delivered.events {
+        let e = ev.body;
+        check_header("events", &e.header, ev.quoted_at, rules, &mut failures);
+        if e.header.deployment_id != screen.header.deployment_id {
+            fail(
+                &mut failures,
+                Reason::Schema,
+                "events: deployment differs from the screen",
+            );
+        }
+        for (pool, held) in &e.pools {
+            if !rules.required.contains(pool) {
+                fail(
+                    &mut failures,
+                    Reason::Schema,
+                    format!("events: pool {pool} is not in R"),
+                );
+            }
+            for (kind, x) in held.all() {
+                if x.timestamp < w.from || x.timestamp >= w.to {
+                    fail(
+                        &mut failures,
+                        Reason::Schema,
+                        format!(
+                            "events {pool}: {} {} at {} is outside {}..{}",
+                            kind.as_str(),
+                            x.id,
+                            x.timestamp,
+                            w.from,
+                            w.to
+                        ),
+                    );
+                }
+                if !is_tx_hash(&x.transaction.id) {
+                    fail(
+                        &mut failures,
+                        Reason::Schema,
+                        format!(
+                            "events {pool}: {} {} transaction {:?} is not a hash",
+                            kind.as_str(),
+                            x.id,
+                            x.transaction.id
+                        ),
+                    );
+                }
+                if !number_ok(&x.amount0)
+                    || !number_ok(&x.amount1)
+                    || x.amount_usd.as_deref().is_some_and(|a| !number_ok(a))
+                {
+                    fail(
+                        &mut failures,
+                        Reason::Schema,
+                        format!(
+                            "events {pool}: {} {} has a malformed amount",
+                            kind.as_str(),
+                            x.id
+                        ),
+                    );
+                }
+            }
+            // The seller's aggregates must be what its own events give.
+            let agg = aggregates(held);
+            if agg.bad.is_empty() {
+                for kind in EVENT_KINDS {
+                    let stated_sum = Dec::parse(held.sum(kind)).ok();
+                    if held.count(kind) != agg.counts[&kind]
+                        || stated_sum.as_ref() != Some(&agg.sums[&kind])
+                    {
+                        fail(
+                            &mut failures,
+                            Reason::Calculation,
+                            format!(
+                                "events {pool}: stated {} count {} sum {} differ from the events: {} {}",
+                                kind.as_str(),
+                                held.count(kind),
+                                held.sum(kind),
+                                agg.counts[&kind],
+                                agg.sums[&kind]
+                            ),
+                        );
+                    }
+                }
+                if held.amount_usd_nulls != agg.nulls {
+                    fail(
+                        &mut failures,
+                        Reason::Calculation,
+                        format!(
+                            "events {pool}: stated amount_usd_nulls {} differs from the events: {}",
+                            held.amount_usd_nulls, agg.nulls
+                        ),
+                    );
+                }
+            }
+            // A screen hit must be among the held events with the same amount,
+            // and no held event may reach the threshold the screen missed.
+            if let Some(facts) = screen.pools.get(pool) {
+                for kind in EVENT_KINDS {
+                    if let Some(hit) = facts.large_events.get(kind)
+                        && !held.all().any(|(k, x)| {
+                            k == kind
+                                && x.transaction.id == hit.transaction.id
+                                && x.amount_usd.as_deref() == Some(hit.amount_usd.as_str())
+                        })
+                    {
+                        fail(
+                            &mut failures,
+                            Reason::Calculation,
+                            format!(
+                                "events {pool}: the screen's {} hit {} is not among the held events with that amount",
+                                kind.as_str(),
+                                hit.transaction.id
+                            ),
+                        );
+                    }
+                }
+                if let Ok(min) = Dec::parse(rules.thresholds.min_event_usd) {
+                    for kind in EVENT_KINDS {
+                        let top = held
+                            .all()
+                            .filter(|(k, _)| *k == kind)
+                            .filter_map(|(_, x)| {
+                                x.amount_usd.as_deref().and_then(|a| Dec::parse(a).ok())
+                            })
+                            .max();
+                        if let Some(top) = top
+                            && top >= min
+                            && facts.large_events.get(kind).is_none()
+                        {
+                            fail(
+                                &mut failures,
+                                Reason::Calculation,
+                                format!(
+                                    "events {pool}: a held {} of {} reaches min_event_usd but the screen reports no hit",
+                                    kind.as_str(),
+                                    top
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    failures
 }
 
 /// Numbers in prose: maximal digit runs with optional thousands commas and a
@@ -312,7 +681,7 @@ fn value_numbers(v: &Value, out: &mut Vec<String>) {
     }
 }
 
-/// Every number a report may state: claim values, then every fact field.
+/// Every number a report may state: claim values, brief forms, inputs, then every fact field.
 fn allowed_numbers(
     claims: &[Claim],
     screen: &ScreenResponse,
@@ -360,14 +729,10 @@ fn allowed_numbers(
             ]);
         }
         raw.extend(
-            [
-                &p.large_events.swap,
-                &p.large_events.mint,
-                &p.large_events.burn,
-            ]
-            .into_iter()
-            .flatten()
-            .map(|h| h.amount_usd.clone()),
+            EVENT_KINDS
+                .iter()
+                .filter_map(|k| p.large_events.get(*k))
+                .map(|h| h.amount_usd.clone()),
         );
     }
     if let Some(ev) = events {
@@ -383,71 +748,22 @@ fn allowed_numbers(
                 raw.extend(e.tick_lower.map(|v| v.to_string()));
                 raw.extend(e.tick_upper.map(|v| v.to_string()));
             }
-            raw.extend(
-                [
-                    p.counts.swap,
-                    p.counts.mint,
-                    p.counts.burn,
-                    p.amount_usd_nulls,
-                ]
-                .map(|n| n.to_string()),
-            );
-            raw.extend([
-                p.sum_amount_usd.swap.clone(),
-                p.sum_amount_usd.mint.clone(),
-                p.sum_amount_usd.burn.clone(),
-            ]);
         }
     }
     raw.iter().filter_map(|s| Dec::parse(s).ok()).collect()
 }
 
-/// The local checks of section 9 over the report's outcomes and claims.
+/// The report-wide checks of section 9 over the report's outcomes and claims,
+/// the delivery checks included.
 pub fn validate(
     rules: &Rules<'_>,
     delivered: &Delivered<'_>,
     outcomes: &[PoolOutcome],
     claims: &[Claim],
 ) -> Validation {
-    let mut failures = Vec::new();
+    let mut failures = validate_delivery(rules, delivered);
     let screen = delivered.screen.body;
     let events = delivered.events.map(|e| e.body);
-
-    // Schema: the typed parse already happened; the shape must cover the request.
-    if screen.header.deployment_id.is_empty() {
-        failures.push(Failure {
-            reason: Reason::Schema,
-            detail: "screen: deployment_id is empty".to_owned(),
-        });
-    }
-    if screen.header.block_end < screen.header.block_start {
-        failures.push(Failure {
-            reason: Reason::Schema,
-            detail: "screen: block_end before block_start".to_owned(),
-        });
-    }
-    for pool in rules.required {
-        if !screen.pools.contains_key(pool) {
-            failures.push(Failure {
-                reason: Reason::Schema,
-                detail: format!("screen: pool {pool} missing from the response"),
-            });
-        }
-    }
-    if let Some(ev) = events {
-        if ev.header.deployment_id != screen.header.deployment_id {
-            failures.push(Failure {
-                reason: Reason::Schema,
-                detail: "events: deployment differs from the screen".to_owned(),
-            });
-        }
-        if ev.header.window_requested != screen.header.window_requested {
-            failures.push(Failure {
-                reason: Reason::Schema,
-                detail: "events: window differs from the screen".to_owned(),
-            });
-        }
-    }
 
     // Coverage over R.
     let mut pending = Vec::new();
@@ -455,10 +771,11 @@ pub fn validate(
     let mut resolved = 0;
     for pool in rules.required {
         match outcomes.iter().find(|o| &o.pool == pool) {
-            None => failures.push(Failure {
-                reason: Reason::Coverage,
-                detail: format!("{pool}: no outcome"),
-            }),
+            None => fail(
+                &mut failures,
+                Reason::Coverage,
+                format!("{pool}: no outcome"),
+            ),
             Some(o) => match o.outcome {
                 Outcome::Pending => pending.push(pool.clone()),
                 Outcome::Undetermined => {
@@ -471,56 +788,60 @@ pub fn validate(
     let complete =
         pending.is_empty() && undetermined.is_empty() && resolved == rules.required.len();
     if !complete && !rules.degrade {
-        failures.push(Failure {
-            reason: Reason::Coverage,
-            detail: format!(
+        fail(
+            &mut failures,
+            Reason::Coverage,
+            format!(
                 "{resolved}/{} resolved; pending {:?}; undetermined {:?}",
                 rules.required.len(),
                 pending,
                 undetermined
             ),
-        });
+        );
     }
 
     // Calculations: recompute everything from the facts and require equality.
     let (again_outcomes, again_claims) =
-        outcomes_and_claims(screen, events, rules.evidence, rules.min_event_usd);
+        outcomes_and_claims(screen, events, rules.evidence, rules.thresholds);
     let mut calculations = 0;
     for c in claims {
         if again_claims.contains(c) {
             calculations += 1;
         } else {
-            failures.push(Failure {
-                reason: Reason::Calculation,
-                detail: format!(
+            fail(
+                &mut failures,
+                Reason::Calculation,
+                format!(
                     "{} {:?} does not re-evaluate to its values {}",
                     c.pool,
                     c.kind,
                     serde_json::to_string(&c.values).unwrap_or_default()
                 ),
-            });
+            );
         }
     }
     for o in outcomes {
         if !again_outcomes.contains(o) {
-            failures.push(Failure {
-                reason: Reason::Calculation,
-                detail: format!(
+            fail(
+                &mut failures,
+                Reason::Calculation,
+                format!(
                     "{}: outcome {:?} is not what the facts give",
                     o.pool, o.outcome
                 ),
-            });
+            );
         }
     }
     if again_claims.len() != claims.len() {
-        failures.push(Failure {
-            reason: Reason::Calculation,
-            detail: format!(
+        fail(
+            &mut failures,
+            Reason::Calculation,
+            format!(
                 "{} claims reported, the facts give {}",
                 claims.len(),
                 again_claims.len()
             ),
-        });
+        );
     }
 
     // Evidence references and permitted kinds.
@@ -528,10 +849,11 @@ pub fn validate(
     let mut transaction_citations = 0;
     for c in claims {
         if !rules.required.contains(&c.pool) {
-            failures.push(Failure {
-                reason: Reason::Citation,
-                detail: format!("{}: claim about a pool outside R", c.pool),
-            });
+            fail(
+                &mut failures,
+                Reason::Citation,
+                format!("{}: claim about a pool outside R", c.pool),
+            );
         }
         let kind_ok = match c.kind {
             ClaimType::TvlChange => {
@@ -545,19 +867,21 @@ pub fn validate(
             }
         };
         if !kind_ok {
-            failures.push(Failure {
-                reason: Reason::Citation,
-                detail: format!(
+            fail(
+                &mut failures,
+                Reason::Citation,
+                format!(
                     "{} {:?}: evidence {:?} is not of the permitted kind",
                     c.pool, c.kind, c.evidence
                 ),
-            });
+            );
         }
         if c.evidence.is_empty() && rules.citations == Citations::Required {
-            failures.push(Failure {
-                reason: Reason::Citation,
-                detail: format!("{} {:?}: no evidence reference", c.pool, c.kind),
-            });
+            fail(
+                &mut failures,
+                Reason::Citation,
+                format!("{} {:?}: no evidence reference", c.pool, c.kind),
+            );
         }
         for e in &c.evidence {
             let r = if is_tx_hash(e) {
@@ -567,10 +891,7 @@ pub fn validate(
             };
             match r {
                 Ok(()) => references += 1,
-                Err(detail) => failures.push(Failure {
-                    reason: Reason::Citation,
-                    detail,
-                }),
+                Err(detail) => fail(&mut failures, Reason::Citation, detail),
             }
         }
         if !c.transaction_hashes().is_empty() {
@@ -581,22 +902,24 @@ pub fn validate(
         for o in outcomes.iter().filter(|o| o.outcome == Outcome::Supported) {
             let mine: Vec<&Claim> = claims.iter().filter(|c| c.pool == o.pool).collect();
             if mine.is_empty() {
-                failures.push(Failure {
-                    reason: Reason::Citation,
-                    detail: format!("{}: supported without a claim", o.pool),
-                });
+                fail(
+                    &mut failures,
+                    Reason::Citation,
+                    format!("{}: supported without a claim", o.pool),
+                );
             }
             let held_events = events
                 .and_then(|e| e.pools.get(&o.pool))
                 .is_some_and(|p| p.all().next().is_some());
             if held_events && !mine.iter().any(|c| !c.transaction_hashes().is_empty()) {
-                failures.push(Failure {
-                    reason: Reason::Citation,
-                    detail: format!(
+                fail(
+                    &mut failures,
+                    Reason::Citation,
+                    format!(
                         "{}: events held but no claim cites a transaction hash",
                         o.pool
                     ),
-                });
+                );
             }
         }
     }
@@ -604,45 +927,31 @@ pub fn validate(
     // Prose.
     let mut prose_count = 0;
     if let Some(x) = delivered.explanation {
-        let allowed = allowed_numbers(claims, screen, events, &rules.input_numbers);
+        let mut extra = rules.input_numbers.clone();
+        extra.extend(rules.brief_numbers.iter().cloned());
+        let allowed = allowed_numbers(claims, screen, events, &extra);
+        let hundred = Dec::parse("100").expect("literal");
         for (text, percent) in prose_numbers(&x.prose) {
             let Ok(n) = Dec::parse(&text) else { continue };
-            let hundred = Dec::parse("100").expect("literal");
-            let found = allowed.iter().any(|a| {
-                a.cmp(&n) == std::cmp::Ordering::Equal
-                    || (percent && a.mul(&hundred).cmp(&n) == std::cmp::Ordering::Equal)
-            });
+            let found = allowed
+                .iter()
+                .any(|a| *a == n || (percent && a.mul(&hundred) == n));
             if found {
                 prose_count += 1;
             } else {
-                failures.push(Failure {
-                    reason: Reason::Prose,
-                    detail: format!(
+                fail(
+                    &mut failures,
+                    Reason::Prose,
+                    format!(
                         "{text}{} is not among claim or fact values",
                         if percent { "%" } else { "" }
                     ),
-                });
+                );
             }
         }
     }
 
-    // Freshness.
-    header_fresh(
-        "screen",
-        &screen.header,
-        delivered.screen.quoted_at,
-        rules.max_data_age_s,
-        &mut failures,
-    );
-    if let Some(ev) = delivered.events {
-        header_fresh(
-            "events",
-            &ev.body.header,
-            ev.quoted_at,
-            rules.max_data_age_s,
-            &mut failures,
-        );
-    }
+    // A non_material pool needs complete coverage of its facts.
     for o in outcomes
         .iter()
         .filter(|o| o.outcome == Outcome::NonMaterial)
@@ -652,13 +961,14 @@ pub fn validate(
             .get(&o.pool)
             .is_some_and(|p| p.truncated || p.coverage_shortfall);
         if screen.header.coverage_shortfall || screen.header.truncated || pool_flags {
-            failures.push(Failure {
-                reason: Reason::Freshness,
-                detail: format!(
+            fail(
+                &mut failures,
+                Reason::Freshness,
+                format!(
                     "{}: non_material while coverage_shortfall or truncated",
                     o.pool
                 ),
-            });
+            );
         }
     }
 
@@ -706,26 +1016,31 @@ impl Validation {
     /// Applies checked samples: every sample must have passed.
     pub fn with_provenance(mut self, samples: Vec<Sample>) -> Self {
         for s in samples.iter().filter(|s| !s.ok) {
-            self.failures.push(Failure {
-                reason: Reason::Provenance,
-                detail: format!("{}: {}", s.tx, s.detail),
-            });
+            fail(
+                &mut self.failures,
+                Reason::Provenance,
+                format!("{}: {}", s.tx, s.detail),
+            );
         }
         self.provenance = Provenance::Checked { samples };
         self.passed = self.failures.is_empty();
         self
     }
 
-    /// The `rejected` reasons, distinct, in section 2.7 order.
+    /// The `rejected` reasons, distinct, in order of appearance.
     pub fn reasons(&self) -> Vec<Reason> {
-        let mut out: Vec<Reason> = Vec::new();
-        for f in &self.failures {
-            if !out.contains(&f.reason) {
-                out.push(f.reason);
-            }
-        }
-        out
+        reasons_of(&self.failures)
     }
+}
+
+pub fn reasons_of(failures: &[Failure]) -> Vec<Reason> {
+    let mut out: Vec<Reason> = Vec::new();
+    for f in failures {
+        if !out.contains(&f.reason) {
+            out.push(f.reason);
+        }
+    }
+    out
 }
 
 /// `eth_getTransactionReceipt` for each sample: the receipt exists, has
@@ -792,10 +1107,14 @@ pub async fn check_provenance(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{POOL, TO, events_fixture, screen_fixture};
+    use crate::testing::{FROM, POOL, TO, events_fixture, screen_fixture};
     use time::Duration;
 
     const TX: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    const T: Thresholds<'static> = Thresholds {
+        materiality: "0.05",
+        min_event_usd: "100000",
+    };
 
     fn quoted_at() -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(TO as i64 + 120).unwrap()
@@ -804,13 +1123,15 @@ mod tests {
     fn rules(required: &[String]) -> Rules<'_> {
         Rules {
             required,
+            window: Window { from: FROM, to: TO },
             evidence: Evidence::Transaction,
             citations: Citations::Required,
             max_data_age_s: 3600,
             provenance_samples: 3,
             degrade: false,
-            min_event_usd: "100000",
+            thresholds: T,
             input_numbers: vec!["24".to_owned(), "1".to_owned()],
+            brief_numbers: vec!["1100".to_owned()],
         }
     }
 
@@ -825,14 +1146,18 @@ mod tests {
         (s, e)
     }
 
-    #[test]
-    fn a_supported_pool_with_events_passes_every_local_check() {
-        let (screen, events) = with_real_hash(
+    fn pair() -> (ScreenResponse, EventsResponse) {
+        with_real_hash(
             screen_fixture(true, true),
             events_fixture(Some("250000"), false),
-        );
+        )
+    }
+
+    #[test]
+    fn a_supported_pool_with_events_passes_every_local_check() {
+        let (screen, events) = pair();
         let required = vec![POOL.to_owned()];
-        let (o, c) = outcomes_and_claims(&screen, Some(&events), Evidence::Transaction, "100000");
+        let (o, c) = outcomes_and_claims(&screen, Some(&events), Evidence::Transaction, T);
         let prose = Explanation {
             prose: format!(
                 "Pool {POOL} is supported: token0 TVL moved from 1,000 to 1100, a 10% change, on 250000 USD of swaps over 24 hours."
@@ -851,6 +1176,7 @@ mod tests {
             }),
             explanation: Some(&prose),
         };
+        assert!(validate_delivery(&rules(&required), &d).is_empty());
         let v = validate(&rules(&required), &d, &o, &c);
         assert!(v.passed, "{:?}", v.failures);
         assert!(v.complete);
@@ -892,7 +1218,7 @@ mod tests {
     fn a_non_material_pool_is_complete_with_provenance_not_applicable() {
         let screen = screen_fixture(false, false);
         let required = vec![POOL.to_owned()];
-        let (o, c) = outcomes_and_claims(&screen, None, Evidence::Transaction, "100000");
+        let (o, c) = outcomes_and_claims(&screen, None, Evidence::Transaction, T);
         let d = Delivered {
             screen: Timed {
                 body: &screen,
@@ -907,12 +1233,8 @@ mod tests {
         assert_eq!(v.calculations, 3);
         let mut zero = rules(&required);
         zero.provenance_samples = 0;
-        let (screen2, events2) = with_real_hash(
-            screen_fixture(true, true),
-            events_fixture(Some("250000"), false),
-        );
-        let (o2, c2) =
-            outcomes_and_claims(&screen2, Some(&events2), Evidence::Transaction, "100000");
+        let (screen2, events2) = pair();
+        let (o2, c2) = outcomes_and_claims(&screen2, Some(&events2), Evidence::Transaction, T);
         let d2 = Delivered {
             screen: Timed {
                 body: &screen2,
@@ -931,13 +1253,169 @@ mod tests {
     }
 
     #[test]
-    fn each_failure_is_named() {
-        let (screen, events) = with_real_hash(
-            screen_fixture(true, true),
-            events_fixture(Some("250000"), false),
-        );
+    fn evidence_is_bound_to_the_requested_window() {
+        // Probe: a screen declaring 0..3600 for a run over the last 24 hours.
+        let (mut screen, events) = pair();
+        screen.header.window_requested = Window { from: 0, to: 3600 };
+        screen.header.window_covered = Window { from: 0, to: 3600 };
         let required = vec![POOL.to_owned()];
-        let (o, c) = outcomes_and_claims(&screen, Some(&events), Evidence::Transaction, "100000");
+        let d = Delivered {
+            screen: Timed {
+                body: &screen,
+                quoted_at: quoted_at(),
+            },
+            events: Some(Timed {
+                body: &events,
+                quoted_at: quoted_at(),
+            }),
+            explanation: None,
+        };
+        let f = validate_delivery(&rules(&required), &d);
+        assert!(
+            f.iter().any(
+                |f| f.reason == Reason::Schema && f.detail.contains("window_requested 0..3600")
+            ),
+            "{f:?}"
+        );
+        // Rows outside the window, and a hidden shortfall.
+        let (mut screen, mut events) = pair();
+        screen.pools.get_mut(POOL).unwrap().hours[0].period_start_unix = FROM - 3600;
+        events.pools.get_mut(POOL).unwrap().swaps[0].timestamp = TO + 1;
+        let d = Delivered {
+            screen: Timed {
+                body: &screen,
+                quoted_at: quoted_at(),
+            },
+            events: Some(Timed {
+                body: &events,
+                quoted_at: quoted_at(),
+            }),
+            explanation: None,
+        };
+        let f = validate_delivery(&rules(&required), &d);
+        assert!(
+            f.iter().any(|f| f.detail.contains("hour row at"))
+                && f.iter().any(|f| f.detail.contains("is outside")),
+            "{f:?}"
+        );
+        let (mut screen, _) = pair();
+        screen.header.indexed_block_timestamp = Some(TO - 600);
+        let d = Delivered {
+            screen: Timed {
+                body: &screen,
+                quoted_at: quoted_at(),
+            },
+            events: None,
+            explanation: None,
+        };
+        let f = validate_delivery(&rules(&required), &d);
+        assert!(
+            f.iter().any(|f| f.reason == Reason::Freshness
+                && f.detail.contains("without coverage_shortfall")),
+            "{f:?}"
+        );
+    }
+
+    #[test]
+    fn seller_assertions_are_checked_against_their_facts() {
+        let required = vec![POOL.to_owned()];
+        // A verdict the facts do not give.
+        let (mut screen, events) = pair();
+        screen.pools.get_mut(POOL).unwrap().verdict = crate::evidence::Verdict::NonMaterial;
+        let d = Delivered {
+            screen: Timed {
+                body: &screen,
+                quoted_at: quoted_at(),
+            },
+            events: Some(Timed {
+                body: &events,
+                quoted_at: quoted_at(),
+            }),
+            explanation: None,
+        };
+        let f = validate_delivery(&rules(&required), &d);
+        assert!(
+            f.iter()
+                .any(|f| f.reason == Reason::Calculation && f.detail.contains("seller verdict")),
+            "{f:?}"
+        );
+        // Aggregates the events do not give.
+        let (screen, mut events) = pair();
+        events.pools.get_mut(POOL).unwrap().counts.swap = 999;
+        let d = Delivered {
+            screen: Timed {
+                body: &screen,
+                quoted_at: quoted_at(),
+            },
+            events: Some(Timed {
+                body: &events,
+                quoted_at: quoted_at(),
+            }),
+            explanation: None,
+        };
+        let f = validate_delivery(&rules(&required), &d);
+        assert!(
+            f.iter()
+                .any(|f| f.reason == Reason::Calculation
+                    && f.detail.contains("stated swap count 999")),
+            "{f:?}"
+        );
+        // A malformed number.
+        let (mut screen, events) = pair();
+        screen
+            .pools
+            .get_mut(POOL)
+            .unwrap()
+            .end
+            .as_mut()
+            .unwrap()
+            .tvl_token0 = "1,100".to_owned();
+        let d = Delivered {
+            screen: Timed {
+                body: &screen,
+                quoted_at: quoted_at(),
+            },
+            events: Some(Timed {
+                body: &events,
+                quoted_at: quoted_at(),
+            }),
+            explanation: None,
+        };
+        let f = validate_delivery(&rules(&required), &d);
+        assert!(
+            f.iter()
+                .any(|f| f.reason == Reason::Schema && f.detail.contains("is not a number")),
+            "{f:?}"
+        );
+        // A screen hit absent from the held events.
+        let (screen, mut events) = pair();
+        events.pools.get_mut(POOL).unwrap().swaps[0].amount_usd = Some("250001".to_owned());
+        events.pools.get_mut(POOL).unwrap().sum_amount_usd.swap = "250001".to_owned();
+        let d = Delivered {
+            screen: Timed {
+                body: &screen,
+                quoted_at: quoted_at(),
+            },
+            events: Some(Timed {
+                body: &events,
+                quoted_at: quoted_at(),
+            }),
+            explanation: None,
+        };
+        let f = validate_delivery(&rules(&required), &d);
+        assert!(
+            f.iter().any(|f| f
+                .detail
+                .contains("is not among the held events with that amount")),
+            "{f:?}"
+        );
+    }
+
+    #[test]
+    fn each_failure_is_named() {
+        let (screen, events) = pair();
+        let required = vec![POOL.to_owned()];
+        let (o, c) = outcomes_and_claims(&screen, Some(&events), Evidence::Transaction, T);
         let d = Delivered {
             screen: Timed {
                 body: &screen,
@@ -951,7 +1429,7 @@ mod tests {
         };
 
         // coverage: a pending pool without degrade.
-        let (po, pc) = outcomes_and_claims(&screen, None, Evidence::Transaction, "100000");
+        let (po, pc) = outcomes_and_claims(&screen, None, Evidence::Transaction, T);
         let d_pending = Delivered { events: None, ..d };
         let v = validate(&rules(&required), &d_pending, &po, &pc);
         assert_eq!(v.reasons(), vec![Reason::Coverage]);
@@ -979,7 +1457,7 @@ mod tests {
             vec![Reason::Calculation, Reason::Citation]
         );
 
-        // prose: a number from nowhere.
+        // prose: a number from nowhere; a brief form is fine.
         let prose = Explanation {
             prose: "Volume was 999 USD.".into(),
             model: "m".into(),
@@ -1007,7 +1485,14 @@ mod tests {
         );
         let mut short = screen_fixture(false, false);
         short.header.coverage_shortfall = true;
-        let (so, sc) = outcomes_and_claims(&short, None, Evidence::Transaction, "100000");
+        short.header.window_covered.to = TO - 3600;
+        short.header.indexed_block_timestamp = Some(TO - 3600);
+        short.pools.get_mut(POOL).unwrap().coverage_shortfall = true;
+        short.pools.get_mut(POOL).unwrap().verdict = crate::evidence::Verdict::Undetermined;
+        short.pools.get_mut(POOL).unwrap().reasons =
+            vec!["undetermined:coverage_shortfall".to_owned()];
+        let (so, sc) = outcomes_and_claims(&short, None, Evidence::Transaction, T);
+        assert_eq!(so[0].outcome, Outcome::Undetermined);
         let mut forced = so.clone();
         forced[0].outcome = Outcome::NonMaterial;
         let d_short = Delivered {

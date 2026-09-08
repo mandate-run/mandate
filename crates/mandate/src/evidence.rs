@@ -95,6 +95,14 @@ impl LargeEvents {
             EventKind::Burn => self.burn.as_ref(),
         }
     }
+
+    pub fn get_mut(&mut self, kind: EventKind) -> &mut Option<EventHit> {
+        match kind {
+            EventKind::Swap => &mut self.swap,
+            EventKind::Mint => &mut self.mint,
+            EventKind::Burn => &mut self.burn,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -143,7 +151,7 @@ pub struct ScreenResponse {
     pub requests: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
     Swap,
@@ -376,6 +384,38 @@ impl Dec {
     }
 }
 
+impl Dec {
+    /// The brief's number form, section 8: at most 18 significant digits,
+    /// truncated toward zero; an integer part longer than that goes to
+    /// exponent form so no number exceeds 24 bytes.
+    pub fn brief_form(&self) -> String {
+        let digits = self.m.abs().to_string();
+        let sign = if self.m.is_negative() { "-" } else { "" };
+        if digits.len() <= 18 {
+            return self.to_string();
+        }
+        let cut = digits.len() - 18;
+        let kept = &digits[..18];
+        let exp = cut as i64 - self.e as i64;
+        if exp <= 0 {
+            let m: BigInt = kept.parse().expect("digits");
+            return Dec {
+                m: if self.m.is_negative() { -m } else { m },
+                e: (-exp) as u32,
+            }
+            .to_string();
+        }
+        let mut mantissa = format!("{}.{}", &kept[..1], &kept[1..]);
+        while mantissa.ends_with('0') {
+            mantissa.pop();
+        }
+        if mantissa.ends_with('.') {
+            mantissa.pop();
+        }
+        format!("{sign}{mantissa}e{}", exp + 17)
+    }
+}
+
 impl std::fmt::Display for Dec {
     /// The sellers' `decToString`: no exponent, trailing zeros stripped.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -430,6 +470,26 @@ mod tests {
         );
         assert!(Dec::parse("1e3x").is_err());
         assert!(Dec::parse("").is_err());
+    }
+
+    #[test]
+    fn brief_form_keeps_18_significant_digits() {
+        let long = Dec::parse("1234567.890123456789012345").unwrap();
+        assert_eq!(long.brief_form(), "1234567.89012345678");
+        assert_eq!(
+            Dec::parse("0.000000000000000000000123456789012345678901")
+                .unwrap()
+                .brief_form(),
+            "0.000000000000000000000123456789012345678"
+        );
+        let huge = Dec::parse("1234567890123456789012345678901").unwrap();
+        assert_eq!(huge.brief_form(), "1.23456789012345678e30");
+        assert_eq!(
+            Dec::parse(&huge.brief_form()).unwrap().brief_form(),
+            "1.23456789012345678e30"
+        );
+        assert_eq!(Dec::parse("-42.5").unwrap().brief_form(), "-42.5");
+        assert!(huge.brief_form().len() <= 24);
     }
 
     #[test]

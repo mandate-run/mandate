@@ -1,19 +1,21 @@
 //! `mandate run`: sections 4, 5, 6, 8, 9, 11 and 12 in order for one
 //! mandate. Every decision is printed as it is made and collected into the
-//! report; every payment goes through the ledger; every receipt is durable
-//! before it is published.
+//! report; every payment goes through the ledger; every delivery is checked
+//! before it authorizes another purchase; every receipt is durable before it
+//! is published. A refusal is terminal: nothing after it turns the run into
+//! a delivery.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration as StdDuration;
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::analysis::{self, Brief, Claim, Outcome, PoolOutcome, outcomes_and_claims};
-use crate::config::Config;
+use crate::analysis::{self, Claim, Outcome, PoolOutcome, Thresholds, outcomes_and_claims};
+use crate::config::{Config, PublicConfig};
 use crate::evidence::{EventsResponse, Explanation, ScreenResponse, Window};
 use crate::hedera::{Consensus, HederaTopicId, MirrorNode, Settlement, Signer};
 use crate::ledger::{
@@ -28,7 +30,7 @@ use crate::quote::{Estimate, Quote, QuoteError, Quoter};
 use crate::receipts::{Outcome as ReceiptOutcome, Receipt};
 use crate::refusal::{Code, Refusal};
 use crate::transcript;
-use crate::validate::{self, Delivered, Provenance, Rules, Timed, Validation};
+use crate::validate::{self, Delivered, Failure, Provenance, Rules, Timed, Validation, reasons_of};
 use crate::x402::sha256_hex;
 
 pub const DEFAULT_QUOTE_TIMEOUT: StdDuration = StdDuration::from_secs(15);
@@ -36,6 +38,8 @@ pub const DEFAULT_QUOTE_TIMEOUT: StdDuration = StdDuration::from_secs(15);
 pub const DELIVERY_TIMEOUT: StdDuration = StdDuration::from_secs(120);
 pub const MIRROR_POLL: StdDuration = StdDuration::from_secs(5);
 pub const MAX_RETRIEVALS_PER_RUN: u32 = 4;
+/// Publish attempts for the queue when `anchor_before_delivery` is set.
+pub const ANCHOR_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
@@ -65,12 +69,14 @@ pub enum RunError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
-    /// Validated and complete.
+    /// Validated, complete, explained, receipts anchored when required.
     Delivered,
     /// Delivered under `degrade` or with a failed validation: see the report.
     DeliveredWithFindings,
-    /// A section 2.7 refusal; nothing further was bought.
+    /// A section 2.7 refusal ended the run; nothing further was bought.
     Refused,
+    /// `anchor_before_delivery` is set and a receipt is not on HCS: the report is withheld.
+    NotAnchored,
 }
 
 impl Status {
@@ -79,8 +85,50 @@ impl Status {
             Self::Delivered => 0,
             Self::DeliveredWithFindings => 4,
             Self::Refused => 3,
+            Self::NotAnchored => 5,
         }
     }
+}
+
+/// The status a run ends with. A refusal is terminal whatever was validated
+/// afterwards; a delivery needs the explanation, a passed and complete
+/// validation, and anchored receipts when the mandate requires them.
+pub fn final_status(
+    refused: bool,
+    validation: Option<&Validation>,
+    explained: bool,
+    incomplete: bool,
+    anchored: bool,
+) -> Status {
+    if refused {
+        return Status::Refused;
+    }
+    if !anchored {
+        return Status::NotAnchored;
+    }
+    match validation {
+        Some(v) if v.passed && v.complete && explained && !incomplete => Status::Delivered,
+        _ => Status::DeliveredWithFindings,
+    }
+}
+
+/// The public configuration quoting runs on: the mandate's facilitator,
+/// section 2.1, with the environment's value noted when it differs.
+pub fn quoter_config(env: &PublicConfig, mandate: &Mandate) -> (PublicConfig, Option<String>) {
+    let pinned = mandate
+        .constraints
+        .facilitator
+        .trim_end_matches('/')
+        .to_owned();
+    let from_env = env.facilitator_url.trim_end_matches('/').to_owned();
+    let note = (pinned != from_env).then(|| {
+        format!("facilitator {pinned} from the mandate; FACILITATOR_URL {from_env} ignored")
+    });
+    let cfg = PublicConfig {
+        facilitator_url: pinned,
+        ..env.clone()
+    };
+    (cfg, note)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,6 +182,7 @@ pub struct Report {
     pub pools: Vec<String>,
     pub window: Window,
     pub service_asset: String,
+    pub facilitator: String,
     pub quotes: Vec<Quote>,
     pub estimates: Vec<(String, u64, i64)>,
     pub planning: Vec<PlanningRound>,
@@ -143,6 +192,8 @@ pub struct Report {
     pub brief_events_used: Option<u32>,
     pub explanation: Option<Explanation>,
     pub validation: Option<Validation>,
+    /// Deliveries rejected before the report, with their reasons.
+    pub rejected_deliveries: Vec<(String, Vec<Failure>)>,
     pub refusals: Vec<String>,
     pub anomalies: Vec<String>,
     pub totals: Option<Totals>,
@@ -191,9 +242,53 @@ struct State<'a> {
     explanation: Option<Explanation>,
     outcomes: Vec<PoolOutcome>,
     claims: Vec<Claim>,
+    brief_numbers: Vec<String>,
     reservation: Option<(i64, i64, String)>,
     step_no: u32,
     incomplete: bool,
+    refused: Option<Refusal>,
+}
+
+impl State<'_> {
+    fn thresholds(&self) -> Thresholds<'_> {
+        Thresholds {
+            materiality: &self.mandate.inputs.materiality,
+            min_event_usd: &self.mandate.inputs.min_event_usd,
+        }
+    }
+
+    fn rules(&self) -> Rules<'_> {
+        Rules {
+            required: &self.pools,
+            window: self.window,
+            evidence: self.mandate.requirements.evidence,
+            citations: self.mandate.requirements.citations,
+            max_data_age_s: self.mandate.requirements.max_data_age_s,
+            provenance_samples: self.mandate.requirements.provenance_samples,
+            degrade: self.mandate.requirements.degrade,
+            thresholds: self.thresholds(),
+            input_numbers: vec![
+                self.mandate.inputs.window_h.to_string(),
+                self.pools.len().to_string(),
+            ],
+            brief_numbers: self.brief_numbers.clone(),
+        }
+    }
+
+    fn delivered(&self) -> Option<Delivered<'_>> {
+        let (screen, at) = self.screen.as_ref()?;
+        Some(Delivered {
+            screen: Timed {
+                body: screen,
+                quoted_at: *at,
+            },
+            events: self.events.as_ref().map(|(e, at)| Timed {
+                body: e,
+                quoted_at: *at,
+            }),
+            explanation: self.explanation.as_ref(),
+        })
+    }
 }
 
 fn now_rfc3339() -> String {
@@ -318,7 +413,9 @@ async fn run_with(
     }
     ledger.insert_mandate(&row, now)?;
 
-    let quoter = Quoter::from_config(&cfg.public(), DEFAULT_QUOTE_TIMEOUT).await?;
+    // Section 2.1: the facilitator is the mandate's, and its `/supported` pins the fee payer.
+    let (quote_cfg, facilitator_note) = quoter_config(&cfg.public(), mandate);
+    let quoter = Quoter::from_config(&quote_cfg, DEFAULT_QUOTE_TIMEOUT).await?;
     let payer = Payer {
         signer,
         mirror,
@@ -339,6 +436,7 @@ async fn run_with(
         pools: pools.clone(),
         window,
         service_asset: mandate.budget.service_asset.clone(),
+        facilitator: quote_cfg.facilitator_url.clone(),
         quotes: Vec::new(),
         estimates: Vec::new(),
         planning: Vec::new(),
@@ -348,6 +446,7 @@ async fn run_with(
         brief_events_used: None,
         explanation: None,
         validation: None,
+        rejected_deliveries: Vec::new(),
         refusals: Vec::new(),
         anomalies: Vec::new(),
         totals: None,
@@ -381,9 +480,11 @@ async fn run_with(
         explanation: None,
         outcomes: Vec::new(),
         claims: Vec::new(),
+        brief_numbers: Vec::new(),
         reservation: None,
         step_no: 0,
         incomplete: false,
+        refused: None,
     };
 
     // Section 12: mandate summary.
@@ -396,7 +497,7 @@ async fn run_with(
         crate::receipts::SPEC_VERSION
     ));
     st.out.say(format!(
-        "coverage all_material over {} pool(s), window {} to {} ({} h), evidence {:?}, citations {:?}",
+        "coverage all_material over {} pool(s), window {} to {} ({} h), evidence {}, citations {}",
         st.pools.len(),
         window.from,
         window.to,
@@ -414,6 +515,15 @@ async fn run_with(
         brief_bound
     ));
     st.out.say(format!(
+        "facilitator {} signers {:?}{}",
+        quote_cfg.facilitator_url,
+        st.quoter.signers(),
+        facilitator_note
+            .as_deref()
+            .map(|n| format!("; {n}"))
+            .unwrap_or_default()
+    ));
+    st.out.say(format!(
         "listings eligible {} of {}: {}",
         st.manifest.listings.len(),
         manifest.listings.len(),
@@ -425,10 +535,36 @@ async fn run_with(
             .join(", ")
     ));
 
-    // Receipt 0, durable then published.
+    // Receipt 0, durable then published. When delivery must be anchored and
+    // receipt 0 cannot be, nothing is bought: the duty is unmeetable before
+    // the first cent, and only audit budget was at stake.
     let r0 = Receipt::start(&mandate.id, &mandate.hash, &manifest.hash, &now_rfc3339());
     st.ledger.append_receipt(&mandate.id, &r0)?;
     publish(&mut st).await?;
+    if mandate.duties.anchor_before_delivery {
+        for _ in 1..ANCHOR_ATTEMPTS {
+            if st.ledger.unpublished(&mandate.id)?.is_empty() {
+                break;
+            }
+            tokio::time::sleep(MIRROR_POLL).await;
+            publish(&mut st).await?;
+        }
+        if !st.ledger.unpublished(&mandate.id)?.is_empty() {
+            let audit = st.ledger.audit_accounts(&mandate.id)?;
+            refuse(
+                &mut st,
+                Refusal {
+                    code: Code::OutsideConstraints,
+                    detail: format!(
+                        "anchor_before_delivery: receipt 0 is not on HCS after {ANCHOR_ATTEMPTS} attempts; audit budget free {} tinybar, fee cap {}",
+                        audit.free(),
+                        FEE_CAP_TINYBAR
+                    ),
+                },
+            )?;
+            return finish(st, cfg, ledger_path, topic).await;
+        }
+    }
 
     // Section 4: quote what is fully known now, estimate the rest.
     quote_known(&mut st).await;
@@ -472,64 +608,15 @@ async fn run_with(
         .collect();
 
     // Section 5 then 6, 7, 8 until the report exists or a refusal ends the run.
-    let outcome = drive(&mut st).await;
-    match outcome {
+    match drive(&mut st).await {
         Ok(()) => {}
-        Err(Stop::Refused(r)) => {
-            st.out.say(r.to_string());
-            st.report.refusals.push(r.to_string());
-            let receipt = Receipt {
-                seq: 0,
-                mandate_id: mandate.id.clone(),
-                outcome: ReceiptOutcome::Refused,
-                at: now_rfc3339(),
-                step: Some(st.step_no + 1),
-                listing_id: None,
-                seller: None,
-                amount: None,
-                asset: None,
-                tx_id: None,
-                payment_id_hash: None,
-                request_hash: None,
-                response_hash: None,
-                reason: Some(r.to_string()),
-                latency_ms: None,
-                mandate_hash: None,
-                manifest_hash: None,
-                spec_version: None,
-            };
-            st.ledger.append_receipt(&mandate.id, &receipt)?;
-            st.report.status = Status::Refused;
-        }
+        Err(Stop::Refused(r)) => refuse(&mut st, r)?,
         Err(Stop::Error(e)) => return Err(e),
     }
 
-    // Section 9 over R, when anything was delivered.
-    if let Some((screen, screen_at)) = st.screen.as_ref() {
-        let rules = Rules {
-            required: &st.pools,
-            evidence: mandate.requirements.evidence,
-            citations: mandate.requirements.citations,
-            max_data_age_s: mandate.requirements.max_data_age_s,
-            provenance_samples: mandate.requirements.provenance_samples,
-            degrade: mandate.requirements.degrade,
-            min_event_usd: &mandate.inputs.min_event_usd,
-            input_numbers: vec![
-                mandate.inputs.window_h.to_string(),
-                st.pools.len().to_string(),
-            ],
-        };
-        let delivered = Delivered {
-            screen: Timed {
-                body: screen,
-                quoted_at: *screen_at,
-            },
-            events: st.events.as_ref().map(|(e, at)| Timed {
-                body: e,
-                quoted_at: *at,
-            }),
-            explanation: st.explanation.as_ref(),
-        };
+    // Section 9 over R, when anything was delivered and accepted.
+    if let Some(delivered) = st.delivered() {
+        let rules = st.rules();
         let mut v = validate::validate(&rules, &delivered, &st.outcomes, &st.claims);
         if let Provenance::Pending { samples } = &v.provenance {
             let rpc = mandate.constraints.eth_rpc.clone().unwrap_or_default();
@@ -589,20 +676,43 @@ async fn run_with(
                 st.ledger.append_receipt(&mandate.id, &r)?;
             }
         }
-        st.report.status = if v.passed && v.complete && !st.incomplete {
-            Status::Delivered
-        } else {
-            Status::DeliveredWithFindings
-        };
         if !v.complete || st.incomplete {
             st.out.say("report incomplete: screening only".to_owned());
+        }
+        if st.explanation.is_none() && st.refused.is_none() {
+            st.out
+                .say("report has no explanation: the final step was not delivered".to_owned());
         }
         st.report.validation = Some(v);
     }
 
-    // Section 12: totals, receipts, notices. The mirror node lags a few
-    // seconds behind consensus; wait briefly for the last fee records.
+    finish(st, cfg, ledger_path, topic).await
+}
+
+/// Section 11 and 12: the queue, audit reconciliation, totals, receipts,
+/// notices and the final status.
+async fn finish(
+    mut st: State<'_>,
+    cfg: &Config,
+    ledger_path: &Path,
+    topic: HederaTopicId,
+) -> Result<Report, RunError> {
+    let mandate = st.mandate;
+    let decimals = mandate.budget.service_decimals;
+    // Section 11 and I9: the queue, retried when delivery must be anchored.
+    // The mirror node lags a few seconds behind consensus; wait briefly for
+    // the last fee records.
     publish(&mut st).await?;
+    let anchoring = mandate.duties.anchor_before_delivery;
+    if anchoring {
+        for _ in 1..ANCHOR_ATTEMPTS {
+            if st.ledger.unpublished(&mandate.id)?.is_empty() {
+                break;
+            }
+            tokio::time::sleep(MIRROR_POLL).await;
+            publish(&mut st).await?;
+        }
+    }
     if let Some(p) = st.publisher.as_ref() {
         for _ in 0..4 {
             p.reconcile_audit(&mut st.ledger, st.mirror, &mandate.id)
@@ -615,12 +725,10 @@ async fn run_with(
     }
     let accounts = st.ledger.accounts(&mandate.id)?;
     let audit = st.ledger.audit_accounts(&mandate.id)?;
-    let unresolved: Vec<&Authorization> = Vec::new();
     let auths = st.ledger.authorizations(&mandate.id)?;
     let unresolved: Vec<&Authorization> = auths
         .iter()
         .filter(|a| a.payment_state == PaymentState::Unresolved)
-        .chain(unresolved)
         .collect();
     st.out.say(format!(
         "totals settled {} outstanding {} held {} unspent {} audit spent {} tinybar",
@@ -682,11 +790,62 @@ async fn run_with(
         st.out.say(notice.clone());
         st.report.reconcile_notice = Some(notice);
     }
+    let anchored = !anchoring || st.report.audit_pending.is_empty();
+    let status = final_status(
+        st.refused.is_some(),
+        st.report.validation.as_ref(),
+        st.explanation.is_some(),
+        st.incomplete,
+        anchored,
+    );
+    if status == Status::NotAnchored {
+        st.out.say(format!(
+            "anchor_before_delivery: receipts {:?} are not on HCS; the report is withheld",
+            st.report.audit_pending
+        ));
+    } else {
+        st.report.explanation = st.explanation.clone();
+    }
+    st.out.say(format!(
+        "status {}",
+        serde_json::to_string(&status)
+            .unwrap_or_default()
+            .trim_matches('"')
+    ));
+    st.report.status = status;
     st.report.outcomes = st.outcomes.clone();
     st.report.claims = st.claims.clone();
-    st.report.explanation = st.explanation.clone();
     st.report.transcript = std::mem::take(&mut st.out.lines);
     Ok(st.report)
+}
+
+/// Records a terminal refusal: transcript, report, receipt.
+fn refuse(st: &mut State<'_>, r: Refusal) -> Result<(), RunError> {
+    st.out.say(r.to_string());
+    st.report.refusals.push(r.to_string());
+    let receipt = Receipt {
+        seq: 0,
+        mandate_id: st.mandate.id.clone(),
+        outcome: ReceiptOutcome::Refused,
+        at: now_rfc3339(),
+        step: Some(st.step_no + 1),
+        listing_id: None,
+        seller: None,
+        amount: None,
+        asset: None,
+        tx_id: None,
+        payment_id_hash: None,
+        request_hash: None,
+        response_hash: None,
+        reason: Some(r.to_string()),
+        latency_ms: None,
+        mandate_hash: None,
+        manifest_hash: None,
+        spec_version: None,
+    };
+    st.ledger.append_receipt(&st.mandate.id, &receipt)?;
+    st.refused = Some(r);
+    Ok(())
 }
 
 /// Why the step loop stopped early.
@@ -866,7 +1025,8 @@ fn plan_round(st: &mut State<'_>, pending: &[String]) -> Result<Plan, Refusal> {
     }
 }
 
-/// Section 5 and the step loop: plan over W, buy the first step, recompute, repeat.
+/// Section 5 and the step loop: plan over W, buy the first step, check the
+/// delivery, recompute, repeat.
 async fn drive(st: &mut State<'_>) -> Result<(), Stop> {
     let mut pending = st.pools.clone();
     let mut first = true;
@@ -1007,7 +1167,6 @@ async fn buy(
     quote: &Quote,
     reservation_id: Option<i64>,
 ) -> Result<Purchase, Stop> {
-    let now = OffsetDateTime::now_utc();
     let step_name = listing.id.clone();
     let a = match st
         .payer
@@ -1017,7 +1176,6 @@ async fn buy(
             &step_name,
             reservation_id,
             quote,
-            now,
         )
         .await
     {
@@ -1050,6 +1208,12 @@ async fn buy(
             }));
         }
         Err(PayError::Refused(r)) => return Err(Stop::Refused(r)),
+        Err(PayError::QuoteExpired(id)) => {
+            return Err(Stop::Refused(Refusal {
+                code: Code::SellerUnreachable,
+                detail: format!("{id}: quote expired before signing"),
+            }));
+        }
         Err(e) => return Err(e.into()),
     };
     st.step_no += 1;
@@ -1106,7 +1270,6 @@ async fn buy(
     let outcome = match (&purchase.settlement, a.payment_state) {
         (Settlement::Settled { .. }, _) => ReceiptOutcome::Paid,
         (Settlement::Failed { .. } | Settlement::Anomaly { .. }, _) => ReceiptOutcome::Failed,
-        (Settlement::Absent { .. }, PaymentState::Unresolved) => ReceiptOutcome::Unresolved,
         (Settlement::Absent { .. }, _) => ReceiptOutcome::Unresolved,
     };
     let reason = match &purchase.settlement {
@@ -1181,6 +1344,65 @@ fn purchase_receipt(
     }
 }
 
+/// Section 6 `received -> rejected` for a delivery that fails its own
+/// checks: the reasons are persisted, a `failed` receipt is written, and
+/// the run refuses rather than buying anything on top of it.
+async fn reject_delivery(
+    st: &mut State<'_>,
+    a: &Authorization,
+    failures: Vec<Failure>,
+) -> Result<Stop, RunError> {
+    let reasons: Vec<&str> = reasons_of(&failures)
+        .iter()
+        .map(|r| r.as_str())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect();
+    let reason = reasons.join(",");
+    st.out.say(format!(
+        "{} rejected: {} ({} finding(s))",
+        a.step,
+        reason,
+        failures.len()
+    ));
+    for f in &failures {
+        st.out.say(format!("  {} {}", f.reason.as_str(), f.detail));
+    }
+    st.ledger
+        .mark_rejected(a.id, &reason, OffsetDateTime::now_utc())?;
+    let mut r = purchase_receipt(st, a, ReceiptOutcome::Failed, None, None);
+    r.reason = Some(format!(
+        "validation {reason}: {}",
+        failures.first().map(|f| f.detail.as_str()).unwrap_or("")
+    ));
+    st.ledger.append_receipt(&st.mandate.id, &r)?;
+    publish(st).await?;
+    st.report
+        .rejected_deliveries
+        .push((a.step.clone(), failures));
+    Ok(Stop::Refused(Refusal {
+        code: Code::EvidenceInsufficient,
+        detail: format!("{} delivery rejected: {reason}", a.step),
+    }))
+}
+
+/// Section 9 schema and freshness on the deliveries held so far, before any
+/// of them authorizes another purchase.
+async fn check_deliveries(st: &mut State<'_>, a: &Authorization) -> Result<(), Stop> {
+    let failures = match st.delivered() {
+        Some(d) => validate::validate_delivery(&st.rules(), &d),
+        None => Vec::new(),
+    };
+    if failures.is_empty() {
+        st.out.say(format!(
+            "{} delivery checked: schema and freshness pass",
+            a.step
+        ));
+        return Ok(());
+    }
+    Err(reject_delivery(st, a, failures).await?)
+}
+
 fn parse_body<T: serde::de::DeserializeOwned>(what: &str, body: &[u8]) -> Result<T, Stop> {
     serde_json::from_slice(body).map_err(|e| {
         Stop::Refused(Refusal {
@@ -1198,7 +1420,7 @@ fn recompute(st: &mut State<'_>) {
         screen,
         st.events.as_ref().map(|(e, _)| e),
         st.mandate.requirements.evidence,
-        &st.mandate.inputs.min_event_usd,
+        st.thresholds(),
     );
     let summary: BTreeMap<&str, usize> = o.iter().fold(BTreeMap::new(), |mut m, o| {
         *m.entry(o.outcome.as_str()).or_default() += 1;
@@ -1240,12 +1462,20 @@ async fn buy_screen(st: &mut State<'_>) -> Result<(), Stop> {
         screen.header.block_start,
         screen.header.block_end,
         screen.header.indexed_block,
-        screen.header.indexed_block_timestamp.map(|t| t.to_string()).unwrap_or_else(|| "null".to_owned()),
+        screen
+            .header
+            .indexed_block_timestamp
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "null".to_owned()),
         screen.header.coverage_shortfall,
         screen.header.truncated,
         screen.requests
     ));
-    st.screen = Some((screen, quoted_at));
+    let before = st.screen.replace((screen, quoted_at));
+    if let Err(stop) = check_deliveries(st, &purchase.authorization).await {
+        st.screen = before;
+        return Err(stop);
+    }
     recompute(st);
     Ok(())
 }
@@ -1300,24 +1530,19 @@ async fn buy_events(st: &mut State<'_>, pending: &[String]) -> Result<(), Stop> 
     let purchase = buy(st, &listing, &quote, None).await?;
     let events: EventsResponse =
         parse_body("events", purchase.body.as_deref().unwrap_or_default())?;
-    let total: u64 = events
-        .pools
-        .values()
-        .map(|p| p.counts.swap + p.counts.mint + p.counts.burn)
-        .sum();
+    let total: usize = events.pools.values().map(|p| p.all().count()).sum();
     st.out.say(format!(
-        "events delivered: {} pool(s), {} events, nulls {}, truncated {}, requests {}",
+        "events delivered: {} pool(s), {} events, truncated {}, requests {}",
         events.pools.len(),
         total,
-        events
-            .pools
-            .values()
-            .map(|p| p.amount_usd_nulls)
-            .sum::<u64>(),
         events.header.truncated,
         events.requests
     ));
-    st.events = Some((events, quoted_at));
+    let before = st.events.replace((events, quoted_at));
+    if let Err(stop) = check_deliveries(st, &purchase.authorization).await {
+        st.events = before;
+        return Err(stop);
+    }
     recompute(st);
     Ok(())
 }
@@ -1325,14 +1550,21 @@ async fn buy_events(st: &mut State<'_>, pending: &[String]) -> Result<(), Stop> 
 async fn buy_explain(st: &mut State<'_>) -> Result<(), Stop> {
     let listing = listing_with(st, Capability::Explain)?;
     let bound = (listing.tariff.max_units * crate::manifest::KB) as usize;
-    let events = st.events.as_ref().map(|(e, _)| e);
-    let (brief, bytes, used) = analysis::build_brief(
-        &st.mandate.id,
-        st.window,
-        &st.outcomes,
-        &st.claims,
-        events,
-        st.mandate.requirements.brief_events,
+    let blocks = st
+        .screen
+        .as_ref()
+        .map(|(s, _)| (s.header.block_start, s.header.block_end))
+        .unwrap_or((0, 0));
+    let brief = analysis::build_brief(
+        analysis::BriefInput {
+            mandate_id: &st.mandate.id,
+            window: st.window,
+            blocks,
+            outcomes: &st.outcomes,
+            claims: &st.claims,
+            events: st.events.as_ref().map(|(e, _)| e),
+            brief_events: st.mandate.requirements.brief_events,
+        },
         bound,
     )
     .map_err(|e| {
@@ -1341,15 +1573,16 @@ async fn buy_explain(st: &mut State<'_>) -> Result<(), Stop> {
             detail: format!("brief_too_large: {e}"),
         })
     })?;
-    st.report.brief_events_used = Some(used);
+    st.report.brief_events_used = Some(brief.events_used);
+    st.brief_numbers.clear();
+    analysis::brief_numbers(&brief.json, &mut st.brief_numbers);
     st.out.say(format!(
         "brief {} bytes ({} KB), {} supporting event(s) per pool",
-        bytes.len(),
-        bytes.len().div_ceil(1024),
-        used
+        brief.body.len(),
+        brief.body.len().div_ceil(1024),
+        brief.events_used
     ));
-    let body = serde_json::to_vec(&json!({ "brief": brief })).expect("brief serializes");
-    let quote = usable_quote(st, &listing, body).await?;
+    let quote = usable_quote(st, &listing, brief.body.clone()).await?;
     let reservation_id = match st.reservation.as_ref() {
         Some((id, _, step)) if *step == listing.id => Some(*id),
         Some((id, _, _)) => {
@@ -1370,13 +1603,6 @@ async fn buy_explain(st: &mut State<'_>) -> Result<(), Stop> {
         x.model, x.input_bytes, x.prose
     ));
     st.explanation = Some(x);
-    let _ = Brief {
-        mandate_id: String::new(),
-        window: st.window,
-        outcomes: vec![],
-        claims: vec![],
-        events: BTreeMap::new(),
-    };
     Ok(())
 }
 
@@ -1387,9 +1613,52 @@ async fn buy_investigate(st: &mut State<'_>, pending: &[String]) -> Result<(), S
     buy_investigate_with(st, &listing, quote).await
 }
 
+/// What a bundle must carry, section 8: facts, the seller's outcomes and
+/// claims, and the prose.
+#[derive(serde::Deserialize)]
+struct Bundle {
+    screen: ScreenResponse,
+    events: Option<EventsResponse>,
+    outcomes: Vec<PoolOutcome>,
+    claims: Vec<Claim>,
+    explanation: Explanation,
+}
+
+/// Section 8's equality requirement on a bundle: the seller's outcomes and
+/// claims are what the runtime computes from the delivered facts.
+pub fn bundle_matches(
+    bundle_outcomes: &[PoolOutcome],
+    bundle_claims: &[Claim],
+    ours: &(Vec<PoolOutcome>, Vec<Claim>),
+) -> Vec<Failure> {
+    let mut out = Vec::new();
+    if bundle_outcomes != ours.0 {
+        out.push(Failure {
+            reason: validate::Reason::Calculation,
+            detail: format!(
+                "bundle outcomes {} differ from the recomputation {}",
+                serde_json::to_string(bundle_outcomes).unwrap_or_default(),
+                serde_json::to_string(&ours.0).unwrap_or_default()
+            ),
+        });
+    }
+    if bundle_claims != ours.1 {
+        out.push(Failure {
+            reason: validate::Reason::Calculation,
+            detail: format!(
+                "bundle claims ({}) differ from the recomputation ({})",
+                bundle_claims.len(),
+                ours.1.len()
+            ),
+        });
+    }
+    out
+}
+
 /// The bundle: facts, the seller's outcomes and claims, prose. The runtime
-/// recomputes outcomes and claims from the delivered facts and requires
-/// equality, section 8.
+/// checks the facts like any delivery, recomputes outcomes and claims from
+/// them and requires equality, section 8; anything else is a rejected
+/// delivery.
 async fn buy_investigate_with(
     st: &mut State<'_>,
     listing: &Listing,
@@ -1405,74 +1674,58 @@ async fn buy_investigate_with(
             .say("reserve released: the bundle is one authorization".to_owned());
     }
     let purchase = buy(st, listing, &quote, None).await?;
-    let v: Value = parse_body("investigate", purchase.body.as_deref().unwrap_or_default())?;
-    let screen: ScreenResponse =
-        serde_json::from_value(v.get("screen").cloned().unwrap_or(Value::Null)).map_err(|e| {
-            Stop::Refused(Refusal {
-                code: Code::EvidenceInsufficient,
-                detail: format!("investigate.screen: {e}"),
-            })
-        })?;
-    let events: Option<EventsResponse> = match v.get("events") {
-        None | Some(Value::Null) => None,
-        Some(e) => Some(serde_json::from_value(e.clone()).map_err(|e| {
-            Stop::Refused(Refusal {
-                code: Code::EvidenceInsufficient,
-                detail: format!("investigate.events: {e}"),
-            })
-        })?),
-    };
-    let theirs_outcomes: Vec<PoolOutcome> =
-        serde_json::from_value(v.get("outcomes").cloned().unwrap_or(Value::Null))
-            .unwrap_or_default();
-    let theirs_claims: Vec<Claim> =
-        serde_json::from_value(v.get("claims").cloned().unwrap_or(Value::Null)).unwrap_or_default();
-    let explanation: Explanation = serde_json::from_value(
-        v.get("explanation").cloned().unwrap_or(Value::Null),
-    )
-    .map_err(|e| {
-        Stop::Refused(Refusal {
-            code: Code::EvidenceInsufficient,
-            detail: format!("investigate.explanation: {e}"),
-        })
-    })?;
-    // One head for the bundle: the screen and the events share the quote time.
-    let had_screen = st.screen.is_some();
-    if had_screen {
-        // Hybrid: the bundle covers W; keep the earlier screen's facts for the other pools.
-        // The bundle's screen is the authority for the pools it covers.
-        let (mine, _) = st.screen.as_mut().expect("screen");
-        for (pool, facts) in &screen.pools {
-            mine.pools.insert(pool.clone(), facts.clone());
+    let body = purchase.body.as_deref().unwrap_or_default();
+    let bundle: Bundle = match serde_json::from_slice(body) {
+        Ok(b) => b,
+        Err(e) => {
+            let f = vec![Failure {
+                reason: validate::Reason::Schema,
+                detail: format!(
+                    "{}: response does not match the bundle schema: {e}",
+                    listing.id
+                ),
+            }];
+            return Err(reject_delivery(st, &purchase.authorization, f).await?);
         }
-    } else {
-        st.screen = Some((screen.clone(), quoted_at));
+    };
+    // One head for the bundle: the screen and the events share the quote time.
+    let (prior_screen, prior_events) = (st.screen.clone(), st.events.clone());
+    match st.screen.as_mut() {
+        Some((mine, _)) => {
+            // Hybrid: the bundle covers W and is the authority for those pools.
+            for (pool, facts) in &bundle.screen.pools {
+                mine.pools.insert(pool.clone(), facts.clone());
+            }
+        }
+        None => st.screen = Some((bundle.screen.clone(), quoted_at)),
     }
-    st.events = events.clone().map(|e| (e, quoted_at));
-    recompute(st);
-    let (ours_o, ours_c) = outcomes_and_claims(
-        &screen,
-        events.as_ref(),
+    st.events = bundle.events.clone().map(|e| (e, quoted_at));
+    let ours = outcomes_and_claims(
+        &bundle.screen,
+        bundle.events.as_ref(),
         st.mandate.requirements.evidence,
-        &st.mandate.inputs.min_event_usd,
+        st.thresholds(),
     );
-    if ours_o != theirs_outcomes || ours_c != theirs_claims {
-        st.report.anomalies.push(format!(
-            "{}: seller outcomes or claims differ from the recomputation",
-            listing.id
-        ));
-        st.out.say(format!("{}: seller's outcomes or claims differ from the runtime's recomputation; the runtime's stand", listing.id));
-    } else {
-        st.out.say(format!(
-            "{}: seller's outcomes and claims equal the runtime's recomputation",
-            listing.id
-        ));
+    let mut failures = match st.delivered() {
+        Some(d) => validate::validate_delivery(&st.rules(), &d),
+        None => Vec::new(),
+    };
+    failures.extend(bundle_matches(&bundle.outcomes, &bundle.claims, &ours));
+    if !failures.is_empty() {
+        st.screen = prior_screen;
+        st.events = prior_events;
+        return Err(reject_delivery(st, &purchase.authorization, failures).await?);
     }
     st.out.say(format!(
-        "explanation from {} ({} input bytes): {}",
-        explanation.model, explanation.input_bytes, explanation.prose
+        "{}: seller's outcomes and claims equal the runtime's recomputation",
+        listing.id
     ));
-    st.explanation = Some(explanation);
+    recompute(st);
+    st.out.say(format!(
+        "explanation from {} ({} input bytes): {}",
+        bundle.explanation.model, bundle.explanation.input_bytes, bundle.explanation.prose
+    ));
+    st.explanation = Some(bundle.explanation);
     Ok(())
 }
 
@@ -1491,5 +1744,114 @@ impl Citations {
             Self::Required => "required",
             Self::Optional => "optional",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::validate::CoverageResult;
+
+    fn validation(passed: bool, complete: bool) -> Validation {
+        Validation {
+            passed,
+            complete,
+            failures: Vec::new(),
+            coverage: CoverageResult {
+                required: 1,
+                resolved: 1,
+                pending: Vec::new(),
+                undetermined: Vec::new(),
+            },
+            calculations: 0,
+            references: 0,
+            transaction_citations: 0,
+            prose_numbers: 0,
+            provenance: Provenance::NotApplicable,
+        }
+    }
+
+    #[test]
+    fn a_refusal_is_terminal_and_a_delivery_needs_the_explanation() {
+        let ok = validation(true, true);
+        // Probe: an off-tariff explain quote after a passing validation.
+        assert_eq!(
+            final_status(true, Some(&ok), false, false, true),
+            Status::Refused
+        );
+        assert_eq!(
+            final_status(false, Some(&ok), false, false, true),
+            Status::DeliveredWithFindings
+        );
+        assert_eq!(
+            final_status(false, Some(&ok), true, false, true),
+            Status::Delivered
+        );
+        assert_eq!(
+            final_status(false, Some(&validation(false, true)), true, false, true),
+            Status::DeliveredWithFindings
+        );
+        assert_eq!(
+            final_status(false, Some(&validation(true, false)), true, false, true),
+            Status::DeliveredWithFindings
+        );
+        assert_eq!(
+            final_status(false, Some(&ok), true, true, true),
+            Status::DeliveredWithFindings
+        );
+        assert_eq!(
+            final_status(false, None, false, false, true),
+            Status::DeliveredWithFindings
+        );
+        // Probe: anchoring required with receipts pending.
+        assert_eq!(
+            final_status(false, Some(&ok), true, false, false),
+            Status::NotAnchored
+        );
+        assert_eq!(Status::NotAnchored.exit_code(), 5);
+        assert_eq!(Status::Refused.exit_code(), 3);
+    }
+
+    #[test]
+    fn the_mandates_facilitator_wins_over_the_environment() {
+        let env = PublicConfig {
+            network: crate::config::Network::Testnet,
+            facilitator_url: "https://other.example".to_owned(),
+            mirror_node_url: "https://testnet.mirrornode.hedera.com".to_owned(),
+            hcs_topic_id: None,
+        };
+        let mandate = crate::mandate::Mandate::from_toml(
+            crate::testing::MANDATE_TOML,
+            time::macros::datetime!(2026-09-08 09:00 UTC),
+        )
+        .unwrap();
+        let (cfg, note) = quoter_config(&env, &mandate);
+        assert_eq!(cfg.facilitator_url, "https://api.testnet.blocky402.com");
+        assert!(
+            note.unwrap()
+                .contains("FACILITATOR_URL https://other.example ignored")
+        );
+        let same = PublicConfig {
+            facilitator_url: "https://api.testnet.blocky402.com/".to_owned(),
+            ..env
+        };
+        assert!(quoter_config(&same, &mandate).1.is_none());
+    }
+
+    #[test]
+    fn a_bundle_with_other_claims_is_a_calculation_failure() {
+        use crate::testing::{events_fixture, screen_fixture};
+        let screen = screen_fixture(true, true);
+        let events = events_fixture(Some("250000"), false);
+        let t = Thresholds {
+            materiality: "0.05",
+            min_event_usd: "100000",
+        };
+        let ours = outcomes_and_claims(&screen, Some(&events), Evidence::Transaction, t);
+        assert!(bundle_matches(&ours.0, &ours.1, &ours).is_empty());
+        // Probe: empty seller outcomes and claims.
+        let f = bundle_matches(&[], &[], &ours);
+        assert_eq!(f.len(), 2);
+        assert!(f.iter().all(|f| f.reason == validate::Reason::Calculation));
     }
 }
