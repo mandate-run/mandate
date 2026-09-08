@@ -2,7 +2,9 @@
 //! client holds no signer, never retries and never follows redirects. It
 //! sends the real request without `PAYMENT-SIGNATURE`, records the 402 as a
 //! quote, and judges it against the pinned listing: `ceiling`,
-//! `within_tariff`, `listing_match` and `fee_payer_ok`.
+//! `within_tariff`, `listing_match` and `fee_payer_ok`. Everything a quote
+//! is judged on comes from the request the client itself sent: the unit
+//! count from the body, the binding from the wire request.
 
 use std::time::{Duration, Instant};
 
@@ -12,11 +14,15 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::config::PublicConfig;
 use crate::mandate::{asset_decimals, format_amount};
-use crate::manifest::{Listing, Method, TariffError};
+use crate::manifest::{Listing, Method, RequestShape, TariffError, units_for};
 use crate::refusal::{Code, Refusal};
 use crate::x402::{self, PaymentRequired, Requirement, sha256_hex};
 
 pub const DEFAULT_QUOTE_TIMEOUT: Duration = Duration::from_secs(15);
+/// The only protocol version the client interprets.
+pub const SUPPORTED_X402_VERSION: u32 = 2;
+/// A quote is usable for at most this long, whatever the seller advertises.
+pub const MAX_QUOTE_LIFETIME_S: u64 = 120;
 
 #[derive(Debug, thiserror::Error)]
 pub enum QuoteError {
@@ -39,6 +45,18 @@ pub enum QuoteError {
     Amount(String),
     #[error("OUTSIDE_CONSTRAINTS: request size: {0}")]
     RequestTooLarge(TariffError),
+    #[error(
+        "OUTSIDE_CONSTRAINTS: listing {listing} is on {network}; this runtime is on {configured}"
+    )]
+    WrongNetwork {
+        listing: String,
+        network: String,
+        configured: String,
+    },
+    #[error(
+        "OUTSIDE_CONSTRAINTS: x402 version {0} is not supported; only {SUPPORTED_X402_VERSION}"
+    )]
+    Version(u32),
     #[error("facilitator {url} /supported: {problem}")]
     Supported { url: String, problem: String },
 }
@@ -52,13 +70,16 @@ impl QuoteError {
             Self::Redirect { .. }
             | Self::NoAccepts
             | Self::Amount(_)
-            | Self::RequestTooLarge(_) => Code::OutsideConstraints,
+            | Self::RequestTooLarge(_)
+            | Self::WrongNetwork { .. }
+            | Self::Version(_) => Code::OutsideConstraints,
             Self::Supported { .. } => Code::SellerUnreachable,
         }
     }
 }
 
-/// The request a quote binds, section 2.3: local metadata, not x402.
+/// The request a quote binds, section 2.3: local metadata, not x402. Built
+/// by the client from the listing and the body it transmits, never supplied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuoteRequest {
     pub method: String,
@@ -66,7 +87,7 @@ pub struct QuoteRequest {
     #[serde(with = "body_base64")]
     pub body: Vec<u8>,
     pub body_hash: String,
-    /// Units under the listing's tariff, counted with `manifest::units_for`.
+    /// Units under the listing's tariff, read from the body.
     pub units: u64,
 }
 
@@ -86,14 +107,18 @@ mod body_base64 {
 }
 
 impl QuoteRequest {
-    pub fn new(listing: &Listing, body: Vec<u8>, units: u64) -> Self {
-        Self {
+    /// The binding of the request the client is about to send: the listing's
+    /// method and URL, this body, its hash, and the unit count read from it.
+    fn for_listing(listing: &Listing, body: Vec<u8>) -> Result<Self, QuoteError> {
+        let shape = RequestShape::from_body(&body).map_err(QuoteError::RequestTooLarge)?;
+        let units = units_for(listing.tariff.unit, &shape).map_err(QuoteError::RequestTooLarge)?;
+        Ok(Self {
             method: listing.method.as_str().to_owned(),
             url: listing.url.clone(),
             body_hash: sha256_hex(&body),
             body,
             units,
-        }
+        })
     }
 }
 
@@ -106,6 +131,7 @@ pub struct Quote {
     pub network: String,
     pub pay_to: String,
     pub fee_payer: Option<String>,
+    /// The seller's `maxTimeoutSeconds`, kept as advertised for the payment.
     pub max_timeout_s: u64,
     pub received_at: String,
     pub latency_ms: u64,
@@ -124,11 +150,16 @@ pub struct Quote {
 }
 
 impl Quote {
-    /// Usable within `received_at + max_timeout_s`, section 2.3.
+    /// Usable within `received_at + min(max_timeout_s, 120 s)`. The seller's
+    /// `maxTimeoutSeconds` stays on the wire requirement for the payment; the
+    /// usable lifetime never exceeds the validity a signed transfer can have.
     pub fn valid_until(&self) -> OffsetDateTime {
         let received = OffsetDateTime::parse(&self.received_at, &Rfc3339)
             .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-        received + time::Duration::seconds(self.max_timeout_s as i64)
+        let seconds = self.max_timeout_s.min(MAX_QUOTE_LIFETIME_S);
+        received
+            .checked_add(time::Duration::seconds(seconds as i64))
+            .unwrap_or(received)
     }
 
     pub fn usable_at(&self, now: OffsetDateTime) -> bool {
@@ -263,13 +294,24 @@ impl Quoter {
         &self.signers
     }
 
-    /// One 402 for one listing. Never retries; a redirect is refused, not followed.
+    /// One 402 for one listing. Never retries; a redirect is refused, not
+    /// followed. A listing outside the configured network is refused before
+    /// anything is sent. The unit count comes from `body`, the binding from
+    /// the request actually transmitted.
     pub async fn quote(
         &self,
         listing: &Listing,
-        request: &QuoteRequest,
+        body: Vec<u8>,
         now: OffsetDateTime,
     ) -> Result<Quote, QuoteError> {
+        if listing.network != self.network {
+            return Err(QuoteError::WrongNetwork {
+                listing: listing.id.clone(),
+                network: listing.network.clone(),
+                configured: self.network.clone(),
+            });
+        }
+        let request = QuoteRequest::for_listing(listing, body)?;
         let ceiling = listing
             .ceiling(request.units)
             .map_err(QuoteError::RequestTooLarge)?;
@@ -313,6 +355,9 @@ impl Quoter {
             .to_owned();
         let required: PaymentRequired =
             x402::decode_header(&header).map_err(|e| QuoteError::Header(e.to_string()))?;
+        if required.x402_version != SUPPORTED_X402_VERSION {
+            return Err(QuoteError::Version(required.x402_version));
+        }
         if required.accepts.is_empty() {
             return Err(QuoteError::NoAccepts);
         }
@@ -362,7 +407,7 @@ impl Quoter {
             fee_payer_ok,
             tariff_version: listing.tariff.version.clone(),
             decimals: asset_decimals(&listing.asset).unwrap_or(0),
-            request: request.clone(),
+            request,
             required,
             accepted,
         })
@@ -397,7 +442,7 @@ pub fn parse_amount(text: &str) -> Result<i64, QuoteError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{Manifest, RequestShape, units_for};
+    use crate::manifest::Manifest;
     use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
     use time::macros::datetime;
@@ -405,156 +450,13 @@ mod tests {
     const NOW: OffsetDateTime = datetime!(2026-09-08 09:00 UTC);
     const FEE_PAYER: &str = "0.0.7162784";
 
-    /// Serves exactly one HTTP response on a random port and records the request line.
-    fn serve_once(
-        status: &str,
-        headers: Vec<(String, String)>,
-        body: &str,
-    ) -> (String, std::sync::mpsc::Receiver<String>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let status = status.to_owned();
-        let body = body.to_owned();
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = vec![0u8; 65536];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let request = String::from_utf8_lossy(&buf[..n]).to_string();
-            let mut out = format!(
-                "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n",
-                body.len()
-            );
-            for (k, v) in &headers {
-                out.push_str(&format!("{k}: {v}\r\n"));
-            }
-            out.push_str("\r\n");
-            out.push_str(&body);
-            stream.write_all(out.as_bytes()).unwrap();
-            stream.flush().ok();
-            tx.send(request).ok();
-        });
-        (format!("http://127.0.0.1:{port}"), rx)
-    }
-
-    fn listing(base: &str, method: &str, unit_price: i64) -> Listing {
-        let m = Manifest::from_json(&format!(
-            r#"{{"version":"1","listings":[{{"id":"screen","seller":"s","url":"{base}/screen","method":"{method}",
-            "capability":"screen","produces":"screening",
-            "tariff":{{"version":"t1","base":0,"unit":"pool","unit_price":{unit_price},"max_units":20}},
-            "network":"hedera:testnet","asset":"0.0.429274","pay_to":"0.0.10409989"}}]}}"#
-        ))
-        .unwrap();
-        m.listings[0].clone()
-    }
-
-    fn required_header(accepts: &str, url: &str) -> (String, String) {
-        let json = format!(
-            r#"{{"x402Version":2,"error":"Payment required","resource":{{"url":"{url}"}},"accepts":[{accepts}],"extensions":{{"payment-identifier":{{"info":{{"required":true}},"schema":{{}}}}}}}}"#
-        );
-        (
-            "PAYMENT-REQUIRED".to_owned(),
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, json),
-        )
-    }
-
-    fn accept(amount: &str, pay_to: &str, asset: &str, fee_payer: &str) -> String {
-        format!(
-            r#"{{"scheme":"exact","network":"hedera:testnet","amount":"{amount}","asset":"{asset}","payTo":"{pay_to}","maxTimeoutSeconds":120,"extra":{{"feePayer":"{fee_payer}"}}}}"#
-        )
-    }
-
-    fn quoter() -> Quoter {
-        Quoter::with_signers(
-            "hedera:testnet".to_owned(),
-            vec![FEE_PAYER.to_owned()],
-            Duration::from_secs(5),
-        )
-        .unwrap()
-    }
-
-    fn request(listing: &Listing, pools: u64) -> QuoteRequest {
-        let body = format!(r#"{{"pools":{pools}}}"#).into_bytes();
-        let units = units_for(
-            listing.tariff.unit,
-            &RequestShape {
-                pools,
-                ..Default::default()
-            },
-        );
-        QuoteRequest::new(listing, body, units)
-    }
-
-    #[tokio::test]
-    async fn a_matching_402_becomes_a_quote_within_tariff() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let base = format!("http://127.0.0.1:{port}");
-        let l = listing(&base, "post", 200);
-        let (_, rx) = serve_on(
-            port,
-            "402 Payment Required",
-            vec![required_header(
-                &accept("1000", "0.0.10409989", "0.0.429274", FEE_PAYER),
-                &l.url,
-            )],
-            "{}",
-        );
-        let q = quoter().quote(&l, &request(&l, 5), NOW).await.unwrap();
-        let sent = rx.recv().unwrap();
-        assert!(sent.starts_with("POST /screen HTTP/1.1"), "{sent}");
-        assert!(
-            !sent.to_lowercase().contains("payment-signature"),
-            "never a signature"
-        );
-        assert!(sent.ends_with("{\"pools\":5}"), "the real body");
-        assert_eq!(
-            (
-                q.amount,
-                q.ceiling,
-                q.within_tariff,
-                q.listing_match,
-                q.fee_payer_ok
-            ),
-            (1000, 1000, true, true, true)
-        );
-        assert_eq!(q.fee_payer.as_deref(), Some(FEE_PAYER));
-        assert_eq!(q.refusal(), None);
-        assert!(q.usable_at(NOW + time::Duration::seconds(119)));
-        assert!(!q.usable_at(NOW + time::Duration::seconds(120)));
-        assert_eq!(q.request.body_hash, sha256_hex(b"{\"pools\":5}"));
-    }
-
-    async fn quote_with(
-        accepts: &str,
-        unit_price: i64,
-        url_override: Option<&str>,
-    ) -> Result<Quote, QuoteError> {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let base = format!("http://127.0.0.1:{port}");
-        let l = listing(&base, "post", unit_price);
-        let url = url_override
-            .map(str::to_owned)
-            .unwrap_or_else(|| l.url.clone());
-        let (served, _rx) = serve_on(
-            port,
-            "402 Payment Required",
-            vec![required_header(accepts, &url)],
-            "{}",
-        );
-        assert_eq!(served, base);
-        quoter().quote(&l, &request(&l, 5), NOW).await
-    }
-
+    /// Serves exactly one HTTP response on `port` and hands back the request text.
     fn serve_on(
         port: u16,
         status: &str,
         headers: Vec<(String, String)>,
         body: &str,
-    ) -> (String, std::sync::mpsc::Receiver<String>) {
+    ) -> std::sync::mpsc::Receiver<String> {
         let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let status = status.to_owned();
@@ -577,39 +479,205 @@ mod tests {
             stream.flush().ok();
             tx.send(request).ok();
         });
-        (format!("http://127.0.0.1:{port}"), rx)
+        rx
+    }
+
+    fn free_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
+
+    fn listing(base: &str, method: &str, unit: &str, unit_price: i64, network: &str) -> Listing {
+        let m = Manifest::from_json(&format!(
+            r#"{{"version":"1","listings":[{{"id":"screen","seller":"s","url":"{base}/screen","method":"{method}",
+            "capability":"screen","produces":"screening",
+            "tariff":{{"version":"t1","base":0,"unit":"{unit}","unit_price":{unit_price},"max_units":20}},
+            "network":"{network}","asset":"0.0.429274","pay_to":"0.0.10409989"}}]}}"#
+        ))
+        .unwrap();
+        m.listings[0].clone()
+    }
+
+    fn required_header(accepts: &str, url: &str, version: u32) -> (String, String) {
+        let json = format!(
+            r#"{{"x402Version":{version},"error":"Payment required","resource":{{"url":"{url}"}},"accepts":[{accepts}],"extensions":{{"payment-identifier":{{"info":{{"required":true}},"schema":{{}}}}}}}}"#
+        );
+        (
+            "PAYMENT-REQUIRED".to_owned(),
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, json),
+        )
+    }
+
+    fn accept(amount: &str, pay_to: &str, asset: &str, fee_payer: &str, timeout: u64) -> String {
+        format!(
+            r#"{{"scheme":"exact","network":"hedera:testnet","amount":"{amount}","asset":"{asset}","payTo":"{pay_to}","maxTimeoutSeconds":{timeout},"extra":{{"feePayer":"{fee_payer}"}}}}"#
+        )
+    }
+
+    fn quoter() -> Quoter {
+        Quoter::with_signers(
+            "hedera:testnet".to_owned(),
+            vec![FEE_PAYER.to_owned()],
+            Duration::from_secs(5),
+        )
+        .unwrap()
+    }
+
+    fn body(pools: usize) -> Vec<u8> {
+        let list: Vec<String> = (0..pools).map(|i| format!("\"0x{i:040x}\"")).collect();
+        format!(
+            r#"{{"pools":[{}],"window":{{"from":1788800400,"to":1788886800}}}}"#,
+            list.join(",")
+        )
+        .into_bytes()
+    }
+
+    struct Served {
+        listing: Listing,
+        rx: std::sync::mpsc::Receiver<String>,
+    }
+
+    fn serve_402(
+        accepts: &str,
+        unit_price: i64,
+        url_override: Option<&str>,
+        version: u32,
+    ) -> Served {
+        let port = free_port();
+        let base = format!("http://127.0.0.1:{port}");
+        let listing = listing(&base, "post", "pool", unit_price, "hedera:testnet");
+        let url = url_override
+            .map(str::to_owned)
+            .unwrap_or_else(|| listing.url.clone());
+        let rx = serve_on(
+            port,
+            "402 Payment Required",
+            vec![required_header(accepts, &url, version)],
+            "{}",
+        );
+        Served { listing, rx }
     }
 
     #[tokio::test]
-    async fn above_the_ceiling_is_off_tariff() {
-        let q = quote_with(
-            &accept("2000", "0.0.10409989", "0.0.429274", FEE_PAYER),
+    async fn a_matching_402_becomes_a_quote_bound_to_the_wire_request() {
+        let s = serve_402(
+            &accept("1000", "0.0.10409989", "0.0.429274", FEE_PAYER, 120),
             200,
             None,
-        )
-        .await
-        .unwrap();
+            2,
+        );
+        let q = quoter().quote(&s.listing, body(5), NOW).await.unwrap();
+        let sent = s.rx.recv().unwrap();
+        assert!(sent.starts_with("POST /screen HTTP/1.1"), "{sent}");
+        assert!(
+            !sent.to_lowercase().contains("payment-signature"),
+            "never a signature"
+        );
+        assert!(
+            sent.ends_with(&String::from_utf8(body(5)).unwrap()),
+            "the real body"
+        );
         assert_eq!(
-            (q.within_tariff, q.listing_match, q.fee_payer_ok),
-            (false, true, true)
+            (q.request.method.as_str(), q.request.url.as_str()),
+            ("POST", s.listing.url.as_str())
+        );
+        assert_eq!(q.request.body_hash, sha256_hex(&body(5)));
+        assert_eq!(q.request.units, 5, "units read from the body sent");
+        assert_eq!(
+            (
+                q.amount,
+                q.ceiling,
+                q.within_tariff,
+                q.listing_match,
+                q.fee_payer_ok
+            ),
+            (1000, 1000, true, true, true)
+        );
+        assert_eq!(q.fee_payer.as_deref(), Some(FEE_PAYER));
+        assert_eq!(q.refusal(), None);
+        assert!(q.usable_at(NOW + time::Duration::seconds(119)));
+        assert!(!q.usable_at(NOW + time::Duration::seconds(120)));
+    }
+
+    #[tokio::test]
+    async fn units_come_from_the_body_so_one_pool_cannot_buy_a_five_pool_ceiling() {
+        let s = serve_402(
+            &accept("1000", "0.0.10409989", "0.0.429274", FEE_PAYER, 120),
+            200,
+            None,
+            2,
+        );
+        let q = quoter().quote(&s.listing, body(1), NOW).await.unwrap();
+        assert_eq!(
+            (q.request.units, q.ceiling, q.within_tariff),
+            (1, 200, false)
         );
         let r = q.refusal().unwrap();
         assert_eq!(r.code, Code::OffTariff);
         assert_eq!(
             r.to_string(),
-            "REFUSED OFF_TARIFF screen ceiling 0.001000 quoted 0.002000 tariff t1"
+            "REFUSED OFF_TARIFF screen ceiling 0.000200 quoted 0.001000 tariff t1"
         );
+    }
+
+    #[tokio::test]
+    async fn a_listing_on_another_network_is_never_contacted() {
+        let port = free_port();
+        let l = listing(
+            &format!("http://127.0.0.1:{port}"),
+            "post",
+            "pool",
+            200,
+            "hedera:mainnet",
+        );
+        let err = quoter().quote(&l, body(1), NOW).await.unwrap_err();
+        assert!(matches!(err, QuoteError::WrongNetwork { .. }), "{err}");
+        assert_eq!(err.code(), Code::OutsideConstraints);
+    }
+
+    #[tokio::test]
+    async fn the_usable_lifetime_is_capped_at_120_seconds() {
+        let s = serve_402(
+            &accept("1000", "0.0.10409989", "0.0.429274", FEE_PAYER, 600),
+            200,
+            None,
+            2,
+        );
+        let q = quoter().quote(&s.listing, body(5), NOW).await.unwrap();
+        assert_eq!(
+            q.max_timeout_s, 600,
+            "the wire value is kept for the payment"
+        );
+        assert_eq!(q.accepted.max_timeout_seconds, 600);
+        assert!(q.usable_at(NOW + time::Duration::seconds(119)));
+        assert!(!q.usable_at(NOW + time::Duration::seconds(121)));
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_x402_version_is_refused() {
+        let s = serve_402(
+            &accept("1000", "0.0.10409989", "0.0.429274", FEE_PAYER, 120),
+            200,
+            None,
+            99,
+        );
+        let err = quoter().quote(&s.listing, body(5), NOW).await.unwrap_err();
+        assert!(matches!(err, QuoteError::Version(99)), "{err}");
+        assert_eq!(err.code(), Code::OutsideConstraints);
     }
 
     #[tokio::test]
     async fn several_accepts_only_one_matching_the_listing() {
         let accepts = format!(
             "{},{},{}",
-            accept("999", "0.0.5", "0.0.429274", FEE_PAYER),
-            accept("900", "0.0.10409989", "0.0.429274", FEE_PAYER),
-            accept("1", "0.0.10409989", "0.0.0", FEE_PAYER)
+            accept("999", "0.0.5", "0.0.429274", FEE_PAYER, 120),
+            accept("900", "0.0.10409989", "0.0.429274", FEE_PAYER, 120),
+            accept("1", "0.0.10409989", "0.0.0", FEE_PAYER, 120)
         );
-        let q = quote_with(&accepts, 200, None).await.unwrap();
+        let s = serve_402(&accepts, 200, None, 2);
+        let q = quoter().quote(&s.listing, body(5), NOW).await.unwrap();
         assert_eq!(
             (q.amount, q.listing_match, q.pay_to.as_str()),
             (900, true, "0.0.10409989")
@@ -618,31 +686,35 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_recipient_url_or_fee_payer_is_outside_constraints() {
-        let q = quote_with(&accept("1000", "0.0.5", "0.0.429274", FEE_PAYER), 200, None)
-            .await
-            .unwrap();
+        let s = serve_402(
+            &accept("1000", "0.0.5", "0.0.429274", FEE_PAYER, 120),
+            200,
+            None,
+            2,
+        );
+        let q = quoter().quote(&s.listing, body(5), NOW).await.unwrap();
         assert!(!q.listing_match);
         assert_eq!(q.refusal().unwrap().code, Code::OutsideConstraints);
 
-        let q = quote_with(
-            &accept("1000", "0.0.10409989", "0.0.429274", FEE_PAYER),
+        let s = serve_402(
+            &accept("1000", "0.0.10409989", "0.0.429274", FEE_PAYER, 120),
             200,
             Some("http://evil.example/screen"),
-        )
-        .await
-        .unwrap();
+            2,
+        );
+        let q = quoter().quote(&s.listing, body(5), NOW).await.unwrap();
         assert!(
             !q.listing_match,
             "resource url must equal the pinned listing url"
         );
 
-        let q = quote_with(
-            &accept("1000", "0.0.10409989", "0.0.429274", "0.0.999"),
+        let s = serve_402(
+            &accept("1000", "0.0.10409989", "0.0.429274", "0.0.999", 120),
             200,
             None,
-        )
-        .await
-        .unwrap();
+            2,
+        );
+        let q = quoter().quote(&s.listing, body(5), NOW).await.unwrap();
         assert_eq!((q.listing_match, q.fee_payer_ok), (true, false));
         assert_eq!(q.refusal().unwrap().code, Code::OutsideConstraints);
     }
@@ -650,13 +722,13 @@ mod tests {
     #[tokio::test]
     async fn bad_amounts_are_outside_constraints() {
         for amount in ["99999999999999999999", "-5", "1.5", "abc", ""] {
-            let err = quote_with(
-                &accept(amount, "0.0.10409989", "0.0.429274", FEE_PAYER),
+            let s = serve_402(
+                &accept(amount, "0.0.10409989", "0.0.429274", FEE_PAYER, 120),
                 200,
                 None,
-            )
-            .await
-            .unwrap_err();
+                2,
+            );
+            let err = quoter().quote(&s.listing, body(5), NOW).await.unwrap_err();
             assert!(matches!(err, QuoteError::Amount(_)), "{amount}: {err}");
             assert_eq!(err.code(), Code::OutsideConstraints);
         }
@@ -664,7 +736,16 @@ mod tests {
 
     #[tokio::test]
     async fn redirects_are_refused_and_never_followed() {
-        let (base, rx) = serve_once(
+        let port = free_port();
+        let l = listing(
+            &format!("http://127.0.0.1:{port}"),
+            "get",
+            "input_kb",
+            0,
+            "hedera:testnet",
+        );
+        let rx = serve_on(
+            port,
             "302 Found",
             vec![(
                 "location".to_owned(),
@@ -672,11 +753,7 @@ mod tests {
             )],
             "",
         );
-        let l = listing(&base, "get", 200);
-        let err = quoter()
-            .quote(&l, &QuoteRequest::new(&l, vec![], 1), NOW)
-            .await
-            .unwrap_err();
+        let err = quoter().quote(&l, vec![], NOW).await.unwrap_err();
         assert!(
             matches!(err, QuoteError::Redirect { status: 302, .. }),
             "{err}"
@@ -688,36 +765,37 @@ mod tests {
 
     #[tokio::test]
     async fn non_402_answers_and_dead_sellers_are_unreachable() {
-        let (base, _rx) = serve_once("200 OK", vec![], "{}");
-        let l = listing(&base, "get", 200);
-        let err = quoter()
-            .quote(&l, &QuoteRequest::new(&l, vec![], 1), NOW)
-            .await
-            .unwrap_err();
+        let port = free_port();
+        let l = listing(
+            &format!("http://127.0.0.1:{port}"),
+            "get",
+            "input_kb",
+            0,
+            "hedera:testnet",
+        );
+        let _rx = serve_on(port, "200 OK", vec![], "{}");
+        let err = quoter().quote(&l, vec![], NOW).await.unwrap_err();
         assert!(matches!(
             err,
             QuoteError::NotPaymentRequired { status: 200 }
         ));
         assert_eq!(err.code(), Code::SellerUnreachable);
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let dead = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        drop(listener);
-        let l = listing(&dead, "get", 200);
-        let err = quoter()
-            .quote(&l, &QuoteRequest::new(&l, vec![], 1), NOW)
-            .await
-            .unwrap_err();
+        let dead = listing(
+            &format!("http://127.0.0.1:{}", free_port()),
+            "get",
+            "input_kb",
+            0,
+            "hedera:testnet",
+        );
+        let err = quoter().quote(&dead, vec![], NOW).await.unwrap_err();
         assert!(matches!(err, QuoteError::Unreachable(_)));
     }
 
     #[tokio::test]
-    async fn requests_above_max_units_are_never_sent() {
-        let l = listing("http://127.0.0.1:1", "post", 200);
-        let err = quoter()
-            .quote(&l, &QuoteRequest::new(&l, b"{}".to_vec(), 21), NOW)
-            .await
-            .unwrap_err();
+    async fn requests_above_max_units_or_without_a_shape_are_never_sent() {
+        let l = listing("http://127.0.0.1:1", "post", "pool", 200, "hedera:testnet");
+        let err = quoter().quote(&l, body(21), NOW).await.unwrap_err();
         assert!(matches!(
             err,
             QuoteError::RequestTooLarge(TariffError::AboveMaxUnits {
@@ -725,5 +803,21 @@ mod tests {
                 max_units: 20
             })
         ));
+        let err = quoter().quote(&l, b"{}".to_vec(), NOW).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                QuoteError::RequestTooLarge(TariffError::MissingPools(_))
+            ),
+            "{err}"
+        );
+        let err = quoter()
+            .quote(&l, b"not json".to_vec(), NOW)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, QuoteError::RequestTooLarge(TariffError::Body(_))),
+            "{err}"
+        );
     }
 }
