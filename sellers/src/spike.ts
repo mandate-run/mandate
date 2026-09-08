@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { FileStore } from "./idempotency.js";
 import { Journal } from "./journal.js";
-import { HBAR, USDC_TESTNET, createSeller } from "./x402.js";
+import { HBAR, USDC_TESTNET, createSeller, fixedPrice } from "./x402.js";
 
 try {
   process.loadEnvFile(".env");
@@ -41,7 +41,7 @@ const app = createSeller(
   [
     {
       path: "/spike",
-      amount: "1000",
+      price: fixedPrice(1000),
       description: "Spike: one paid JSON body with a fresh nonce. Issue 3.",
       handler: (_req, res) => {
         res.json({ ok: true, served_at: new Date().toISOString(), nonce: randomUUID() });

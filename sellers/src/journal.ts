@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-export type Source = "live" | "store" | "conflict" | "unpaid" | "dropped";
+export type Source = "live" | "store" | "conflict" | "unpaid" | "dropped" | "rejected";
 
 export interface JournalEntry {
   ts: string;
