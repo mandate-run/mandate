@@ -3,15 +3,15 @@ import type { AddressInfo } from "node:net";
 import test from "node:test";
 import type { FacilitatorClient } from "@x402/core/server";
 import type { PaymentPayload, PaymentRequired } from "@x402/core/types";
-import { outcomesAndClaims } from "./claims.js";
+import { incompleteness, outcomesAndClaims } from "./claims.js";
 import type { Explainer } from "./explain.js";
 import { FAULT_QUOTE_ABOVE_CEILING, FAULT_QUOTE_DRIFT, parseFaults } from "./faults.js";
 import type { EventsResponse, ScreenResponse } from "./graph.js";
-import { MemoryStore } from "./idempotency.js";
+import { MemoryStore, type ResultStore } from "./idempotency.js";
 import { Journal } from "./journal.js";
 import { buildManifest, listings } from "./listings.js";
 import { parseEvidenceRequest, parseExplainRequest } from "./requests.js";
-import { ceiling, tariffsFor, unitsFor } from "./tariffs.js";
+import { type ListingId, type Tariff, ceiling, tariffsFor, unitsFor } from "./tariffs.js";
 import { USDC_TESTNET, createSeller } from "./x402.js";
 
 const POOL = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640";
@@ -23,7 +23,18 @@ function snapshot(t0: string, t1: string) {
   return { totalValueLockedToken0: t0, totalValueLockedToken1: t1, totalValueLockedUSD: "1000", liquidity: "1", token0PriceUSD: "1", token1PriceUSD: "2000" };
 }
 
-function screenResponse(pools: string[], verdict: "material" | "non_material" = "material"): ScreenResponse {
+interface ScreenOpts {
+  verdict?: "material" | "non_material";
+  coverageShortfall?: boolean;
+  truncated?: boolean;
+  unvaluedMint?: boolean;
+  largeSwap?: boolean;
+}
+
+function screenResponse(pools: string[], verdictOrOpts: "material" | "non_material" | ScreenOpts = "material"): ScreenResponse {
+  const opts: ScreenOpts = typeof verdictOrOpts === "string" ? { verdict: verdictOrOpts } : verdictOrOpts;
+  const verdict = opts.verdict ?? "material";
+  const largeSwap = opts.largeSwap ?? verdict === "material";
   const entries = pools.map((pool) => [
     pool,
     {
@@ -34,12 +45,12 @@ function screenResponse(pools: string[], verdict: "material" | "non_material" = 
         { periodStartUnix: WINDOW.from, tvlUSD: "1", volumeUSD: "100.5", txCount: "3" },
         { periodStartUnix: WINDOW.from + 3600, tvlUSD: "1", volumeUSD: "200", txCount: "4" },
       ],
-      large_events: { swap: verdict === "material" ? { transaction: { id: "0xswap" }, amountUSD: "250000" } : null, mint: null, burn: null },
-      unvalued_events: { mint: false, burn: false },
-      truncated: false,
-      coverage_shortfall: false,
+      large_events: { swap: largeSwap ? { transaction: { id: "0xswap" }, amountUSD: "250000" } : null, mint: null, burn: null },
+      unvalued_events: { mint: opts.unvaluedMint ?? false, burn: false },
+      truncated: opts.truncated ?? false,
+      coverage_shortfall: opts.coverageShortfall ?? false,
       verdict,
-      reasons: verdict === "material" ? ["tvl_change:token0", "large_event:swap"] : [],
+      reasons: verdict === "material" ? (largeSwap ? ["tvl_change:token0", "large_event:swap"] : ["tvl_change:token0"]) : [],
     },
   ]);
   return {
@@ -52,24 +63,25 @@ function screenResponse(pools: string[], verdict: "material" | "non_material" = 
     indexing_errors: false,
     window_requested: WINDOW,
     window_covered: WINDOW,
-    coverage_shortfall: false,
-    truncated: false,
+    coverage_shortfall: opts.coverageShortfall ?? false,
+    truncated: opts.truncated ?? false,
     pools: Object.fromEntries(entries) as ScreenResponse["pools"],
     requests: 3 + pools.length,
   };
 }
 
-function eventsResponse(pools: string[]): EventsResponse {
+function eventsResponse(pools: string[], opts: { amountUSD?: string | null; truncated?: boolean } = {}): EventsResponse {
+  const amount = opts.amountUSD === undefined ? "250000" : opts.amountUSD;
   const entries = pools.map((pool) => [
     pool,
     {
-      swaps: [{ id: "s1", transaction: { id: "0xswap" }, logIndex: 1, timestamp: WINDOW.from + 1, amount0: "1", amount1: "-1", amountUSD: "250000", origin: "0xo" }],
+      swaps: [{ id: "s1", transaction: { id: "0xswap" }, logIndex: 1, timestamp: WINDOW.from + 1, amount0: "1", amount1: "-1", amountUSD: amount, origin: "0xo" }],
       mints: [],
       burns: [],
       counts: { swap: 1, mint: 0, burn: 0 },
-      sum_amount_usd: { swap: "250000", mint: "0", burn: "0" },
-      amount_usd_nulls: 0,
-      truncated: false,
+      sum_amount_usd: { swap: amount ?? "0", mint: "0", burn: "0" },
+      amount_usd_nulls: amount === null ? 1 : 0,
+      truncated: opts.truncated ?? false,
     },
   ]);
   return {
@@ -91,7 +103,7 @@ function eventsResponse(pools: string[]): EventsResponse {
 }
 
 function fakeGraph(opts: { fail?: boolean } = {}) {
-  const calls = { screen: 0, events: 0 };
+  const calls = { screen: 0, events: 0, investigate: 0 };
   return {
     calls,
     screen: async (pools: string[]) => {
@@ -103,6 +115,13 @@ function fakeGraph(opts: { fail?: boolean } = {}) {
       calls.events += 1;
       if (opts.fail) throw new Error("gateway down");
       return eventsResponse(pools);
+    },
+    investigate: async (pools: string[]) => {
+      calls.investigate += 1;
+      if (opts.fail) throw new Error("gateway down");
+      const screen = screenResponse(pools);
+      const material = Object.entries(screen.pools).filter(([, p]) => p.verdict === "material").map(([pool]) => pool);
+      return { screen, events: material.length > 0 ? eventsResponse(material) : null };
     },
   };
 }
@@ -138,16 +157,16 @@ function fakeFacilitator() {
   return { client, calls };
 }
 
-function start(opts: { faults?: string; failGraph?: boolean } = {}) {
+function start(opts: { faults?: string; failGraph?: boolean; store?: ResultStore; tariffs?: Record<ListingId, Tariff> } = {}) {
   const graph = fakeGraph({ fail: opts.failGraph ?? false });
   const explain = fakeExplainer();
   const faults = parseFaults(opts.faults);
-  const tariffs = tariffsFor(USDC_TESTNET);
+  const tariffs = opts.tariffs ?? tariffsFor(USDC_TESTNET);
   const fac = fakeFacilitator();
   const journal = new Journal(null);
   const manifest = buildManifest({ baseUrl: "http://127.0.0.1:0", seller: "mandate-sellers", network: "hedera:testnet", asset: USDC_TESTNET, payTo: "0.0.111", tariffs });
   const app = createSeller(
-    { network: "hedera:testnet", payTo: "0.0.111", facilitatorUrl: "http://127.0.0.1:9", asset: USDC_TESTNET, store: new MemoryStore(), journal, faults, manifest, facilitator: fac.client },
+    { network: "hedera:testnet", payTo: "0.0.111", facilitatorUrl: "http://127.0.0.1:9", asset: USDC_TESTNET, store: opts.store ?? new MemoryStore(), journal, faults, manifest, facilitator: fac.client },
     listings({ graph, explain, tariffs, asset: USDC_TESTNET, faults }),
   );
   const server = app.listen(0);
@@ -238,7 +257,7 @@ test("every 402 carries the ceiling for the request, bazaar info, and does no wo
     const brief = { brief: { outcomes: [], claims: [], pad: "x".repeat(1500) } };
     const explain = await post(s.base, "/explain", brief);
     assert.equal(explain.required?.accepts[0]?.amount, "200", "1.5 KB rounds up to 2 KB");
-    assert.deepEqual(s.graph.calls, { screen: 0, events: 0 }, "no Graph query for an unpaid request");
+    assert.deepEqual(s.graph.calls, { screen: 0, events: 0, investigate: 0 }, "no Graph query for an unpaid request");
     assert.equal(s.explain.calls, 0, "no model call for an unpaid request");
     assert.deepEqual(s.fac.calls, { verify: 0, settle: 0 });
   } finally {
@@ -257,8 +276,11 @@ test("invalid requests are 400 before any 402 or payment", async () => {
     assert.equal(unaligned.status, 400);
     const big = await post(s.base, "/explain", { brief: { pad: "x".repeat(9000) } });
     assert.equal(big.status, 400);
-    assert.equal(s.journal.all().filter((e) => e.source === "rejected").length, 3);
-    assert.deepEqual(s.graph.calls, { screen: 0, events: 0 });
+    const overWindows = await post(s.base, "/events", evidenceBody(Array.from({ length: 20 }, (_, i) => `0x${String(i).padStart(40, "0")}`), { window: { from: WINDOW.from, to: WINDOW.from + 2 * 86_400 } }));
+    assert.equal(overWindows.status, 400, "20 pools over 48 h are 40 pool windows");
+    assert.match(overWindows.text, /exceed max_units 20/);
+    assert.equal(s.journal.all().filter((e) => e.source === "rejected").length, 4);
+    assert.deepEqual(s.graph.calls, { screen: 0, events: 0, investigate: 0 });
   } finally {
     s.close();
   }
@@ -272,7 +294,7 @@ test("a paid screen runs one Graph query and settles once; investigate bundles f
     assert.equal(paid.status, 200);
     const body = JSON.parse(paid.text) as ScreenResponse;
     assert.equal(body.pools[POOL]?.verdict, "material");
-    assert.deepEqual(s.graph.calls, { screen: 1, events: 0 });
+    assert.deepEqual(s.graph.calls, { screen: 1, events: 0, investigate: 0 });
     assert.deepEqual(s.fac.calls, { verify: 1, settle: 1 });
 
     const q2 = await post(s.base, "/investigate", evidenceBody([POOL]));
@@ -284,7 +306,7 @@ test("a paid screen runs one Graph query and settles once; investigate bundles f
     assert.deepEqual(bundle.claims[2]?.evidence, ["0xswap"]);
     assert.match(bundle.explanation.prose, /explained/);
     assert.equal(s.explain.calls, 1);
-    assert.deepEqual(s.graph.calls, { screen: 2, events: 1 });
+    assert.deepEqual(s.graph.calls, { screen: 1, events: 0, investigate: 1 }, "the bundle is one pinned Graph call");
   } finally {
     s.close();
   }
@@ -343,4 +365,82 @@ test("outcomes and claims follow section 8", () => {
   const quiet = outcomesAndClaims(screenResponse([POOL], "non_material"), null, "transaction", "100000");
   assert.equal(quiet.outcomes[0]?.outcome, "non_material");
   assert.equal(quiet.claims.filter((c) => c.type === "large_event").length, 0);
+});
+
+test("a stored result is served under the terms that were paid, whatever the tariff says today", async () => {
+  const store = new MemoryStore();
+  const two = [POOL, "0x1111111111111111111111111111111111111111"];
+  const first = start({ store });
+  let header: string;
+  let paidText: string;
+  try {
+    const q = await post(first.base, "/screen", evidenceBody(two));
+    header = headerFor(q.required!);
+    const paid = await post(first.base, "/screen", evidenceBody(two), header);
+    assert.equal(paid.status, 200);
+    paidText = paid.text;
+  } finally {
+    first.close();
+  }
+  const stricter = tariffsFor(USDC_TESTNET);
+  stricter.screen = { ...stricter.screen, max_units: 1 };
+  const second = start({ store, tariffs: stricter });
+  try {
+    const fresh = await post(second.base, "/screen", evidenceBody(two));
+    assert.equal(fresh.status, 400, "a new two-pool purchase is now refused");
+    const retrieved = await post(second.base, "/screen", evidenceBody(two), header);
+    assert.equal(retrieved.status, 200, "the paid result is still retrievable");
+    assert.equal(retrieved.text, paidText);
+    assert.deepEqual(second.fac.calls, { verify: 0, settle: 0 });
+    assert.deepEqual(second.graph.calls, { screen: 0, events: 0, investigate: 0 });
+  } finally {
+    second.close();
+  }
+});
+
+test("case and trailing-slash variants of a listing path are refused, never priced by accident", async () => {
+  const s = start();
+  try {
+    for (const path of ["/Screen", "/screen/", "/SCREEN/"]) {
+      const res = await fetch(`${s.base}${path}`, { method: "POST", body: JSON.stringify(evidenceBody([POOL])), headers: { "content-type": "application/json" } });
+      assert.equal(res.status, 404, path);
+      assert.match(await res.text(), /the listing is POST \/screen/);
+    }
+    assert.deepEqual(s.fac.calls, { verify: 0, settle: 0 });
+  } finally {
+    s.close();
+  }
+});
+
+test("incomplete facts are undetermined before materiality is considered", () => {
+  const cases: [string, ScreenResponse, EventsResponse | null, string[]][] = [
+    ["coverage shortfall", screenResponse([POOL], { coverageShortfall: true }), eventsResponse([POOL]), ["coverage_shortfall"]],
+    ["truncated hours", screenResponse([POOL], { truncated: true }), eventsResponse([POOL]), ["truncated"]],
+    ["unvalued mint on screen", screenResponse([POOL], { unvaluedMint: true }), null, ["unvalued_event:mint"]],
+    ["truncated events", screenResponse([POOL]), eventsResponse([POOL], { truncated: true }), ["events_truncated"]],
+    ["event without valuation", screenResponse([POOL]), eventsResponse([POOL], { amountUSD: null }), ["events_unvalued"]],
+  ];
+  for (const [name, screen, events, reasons] of cases) {
+    const { outcomes } = outcomesAndClaims(screen, events, "transaction", "100000");
+    assert.equal(outcomes[0]?.outcome, "undetermined", name);
+    assert.deepEqual(outcomes[0]?.reasons, reasons, name);
+  }
+  const missing = screenResponse([POOL]);
+  missing.pools[POOL]!.start = null;
+  assert.deepEqual(incompleteness(missing, missing.pools[POOL]!, undefined), ["facts_missing"]);
+});
+
+test("a material pool whose held events are all small still cites a transaction", () => {
+  const screen = screenResponse([POOL], { largeSwap: false });
+  const events = eventsResponse([POOL], { amountUSD: "1500" });
+  const { outcomes, claims } = outcomesAndClaims(screen, events, "transaction", "100000");
+  assert.equal(outcomes[0]?.outcome, "supported");
+  assert.deepEqual(claims.map((c) => c.type), ["tvl_change", "tvl_change", "largest_event", "activity_summary"]);
+  const largest = claims[2]!;
+  assert.deepEqual(largest.evidence, ["0xswap"]);
+  assert.equal(largest.values["reaches_threshold"], false);
+  assert.equal(largest.values["amountUSD"], "1500");
+  assert.ok(!claims.some((c) => c.type === "large_event"), "no claim that the threshold was exceeded");
+  const withLarge = outcomesAndClaims(screenResponse([POOL]), eventsResponse([POOL]), "transaction", "100000");
+  assert.ok(!withLarge.claims.some((c) => c.type === "largest_event"), "one transaction claim per pool");
 });

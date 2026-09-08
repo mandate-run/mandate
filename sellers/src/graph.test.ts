@@ -472,3 +472,41 @@ describe("GraphClient.eventsProduct", () => {
     assert.equal(swapCalls.length, 2);
   });
 });
+
+describe("GraphClient.investigate", () => {
+  test("the bundle reads the screen and the events from one head and one deployment", async () => {
+    const fetch = fakeFetch({
+      ...shared(),
+      ScreenPool: () => screenRows({ swap: [{ transaction: { id: "0xswap" }, amountUSD: "5000000" }] }),
+      EventsSwaps: () => ({ swaps: [], _meta: { deployment: DEPLOYMENT } }),
+      EventsMints: () => ({ mints: [], _meta: { deployment: DEPLOYMENT } }),
+      EventsBurns: () => ({ burns: [], _meta: { deployment: DEPLOYMENT } }),
+    });
+    const { screen, events } = await client(fetch).investigate([POOL], WINDOW, INPUTS, 100);
+    assert.equal(fetch.calls.filter((c) => c.op === "Meta").length, 1, "one head for the whole bundle");
+    assert.equal(fetch.calls.filter((c) => c.op === "ObservationBlock").length, 2);
+    assert.ok(events);
+    assert.equal(events.deployment_id, screen.deployment_id);
+    assert.equal(events.indexed_block, screen.indexed_block);
+    assert.equal(events.block_end, screen.block_end);
+    const eventCalls = fetch.calls.filter((c) => c.op.startsWith("Events"));
+    assert.equal(eventCalls.length, 3);
+    assert.ok(eventCalls.every((c) => c.vars["block"] === HEAD));
+  });
+
+  test("a deployment change between the screen and the events fails the bundle", async () => {
+    const fetch = fakeFetch({
+      ...shared(),
+      ScreenPool: () => screenRows({ swap: [{ transaction: { id: "0xswap" }, amountUSD: "5000000" }] }),
+      EventsSwaps: () => ({ swaps: [], _meta: { deployment: "QmOther" } }),
+    });
+    await assert.rejects(client(fetch).investigate([POOL], WINDOW, INPUTS, 100), /deployment QmOther differs/);
+  });
+
+  test("a bundle with no material pool holds no events and made no event query", async () => {
+    const fetch = fakeFetch(shared({ ScreenPool: () => screenRows({ end: snapshot("1000", "500") }) }));
+    const { events } = await client(fetch).investigate([POOL], WINDOW, INPUTS, 100);
+    assert.equal(events, null);
+    assert.equal(fetch.calls.filter((c) => c.op.startsWith("Events")).length, 0);
+  });
+});
