@@ -124,28 +124,66 @@ impl Consensus {
         receipt.topic_id.ok_or(Error::MissingTopicId)
     }
 
-    /// Submits one message under a fee cap in tinybars, reserved from the
-    /// audit budget by the caller, and returns the sequence number and the
-    /// transaction id whose mirror record carries the charged fee.
+    /// Freezes one message under a fee cap in tinybars, reserved from the
+    /// audit budget by the caller, and returns its transaction id before
+    /// anything is sent, so the caller can persist the id first. A crash or
+    /// timeout after `execute` then leaves a known transaction to reconcile.
+    pub fn prepare_message(
+        &self,
+        topic: TopicId,
+        message: &[u8],
+        fee_cap_tinybar: i64,
+    ) -> Result<PreparedSubmit, Error> {
+        let mut tx = TopicMessageSubmitTransaction::new();
+        tx.topic_id(topic)
+            .message(message.to_vec())
+            .max_transaction_fee(Hbar::from_tinybars(fee_cap_tinybar));
+        tx.freeze_with(&self.client)?;
+        let id = tx.get_transaction_id().ok_or(Error::MissingTransactionId)?;
+        let duration = tx
+            .get_transaction_valid_duration()
+            .unwrap_or(Duration::seconds(MAX_VALID_SECONDS as i64));
+        Ok(PreparedSubmit {
+            tx,
+            transaction_id: id.to_string(),
+            mirror_id: mirror_id(&id),
+            valid_until: id.valid_start + duration,
+        })
+    }
+
+    /// Sends a prepared message and waits for its receipt.
+    pub async fn execute(&self, mut prepared: PreparedSubmit) -> Result<Submitted, Error> {
+        let receipt = prepared
+            .tx
+            .execute(&self.client)
+            .await?
+            .get_receipt(&self.client)
+            .await?;
+        Ok(Submitted {
+            sequence: receipt.topic_sequence_number,
+            transaction_id: prepared.transaction_id,
+            mirror_id: prepared.mirror_id,
+        })
+    }
+
+    /// `prepare_message` then `execute`, for callers that keep no ledger.
     pub async fn submit_message(
         &self,
         topic: TopicId,
         message: &[u8],
         fee_cap_tinybar: i64,
     ) -> Result<Submitted, Error> {
-        let response = TopicMessageSubmitTransaction::new()
-            .topic_id(topic)
-            .message(message.to_vec())
-            .max_transaction_fee(Hbar::from_tinybars(fee_cap_tinybar))
-            .execute(&self.client)
-            .await?;
-        let receipt = response.get_receipt(&self.client).await?;
-        Ok(Submitted {
-            sequence: receipt.topic_sequence_number,
-            transaction_id: response.transaction_id.to_string(),
-            mirror_id: mirror_id(&response.transaction_id),
-        })
+        let prepared = self.prepare_message(topic, message, fee_cap_tinybar)?;
+        self.execute(prepared).await
     }
+}
+
+/// A frozen HCS submit whose identity is known before it is sent.
+pub struct PreparedSubmit {
+    tx: TopicMessageSubmitTransaction,
+    pub transaction_id: String,
+    pub mirror_id: String,
+    pub valid_until: OffsetDateTime,
 }
 
 /// An accepted HCS submit.
