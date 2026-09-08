@@ -1,11 +1,14 @@
 // The four reference sellers on one port with the manifest. Run from sellers/:
 //   pnpm sellers
 // Reads sellers/.env: SELLER_PAY_TO, FACILITATOR_URL, GRAPH_API_KEY,
-// GRAPH_SUBGRAPH_ID, ANTHROPIC_API_KEY, PORT, JOURNAL_DIR, FAULT, SELLER_ASSET,
-// PUBLIC_URL. Without GRAPH_API_KEY the evidence handlers fail before settling;
-// without ANTHROPIC_API_KEY explain uses a template built from the brief.
+// GRAPH_SUBGRAPH_ID, GRAPH_FIXTURE, ANTHROPIC_API_KEY, PORT, JOURNAL_DIR, FAULT,
+// SELLER_ASSET, PUBLIC_URL. GRAPH_FIXTURE serves canned facts instead of the
+// gateway; without it and without GRAPH_API_KEY the evidence handlers fail
+// before settling. Without ANTHROPIC_API_KEY explain uses a template built
+// from the brief.
 import { anthropicExplainer, templateExplainer } from "./explain.js";
 import { parseFaults } from "./faults.js";
+import { fixtureFetch, parseFixture } from "./fixture.js";
 import { GraphClient } from "./graph.js";
 import { FileStore } from "./idempotency.js";
 import { Journal } from "./journal.js";
@@ -35,8 +38,11 @@ const tariffs = tariffsFor(asset);
 
 const apiKey = env["GRAPH_API_KEY"];
 const subgraphId = env["GRAPH_SUBGRAPH_ID"] ?? "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV";
+const fixture = parseFixture(env["GRAPH_FIXTURE"]);
 const graph =
-  apiKey === undefined || apiKey === ""
+  fixture !== undefined
+    ? new GraphClient({ apiKey: "fixture", subgraphId: "fixture", fetch: fixtureFetch(fixture) })
+    : apiKey === undefined || apiKey === ""
     ? {
         screen: async () => {
           throw new Error("GRAPH_API_KEY is not set");
@@ -69,6 +75,6 @@ const app = createSeller(
 
 app.listen(port, () => {
   console.log(
-    `sellers on :${port} payTo ${payTo} asset ${asset} facilitator ${facilitatorUrl} graph ${apiKey ? "live" : "absent"} model ${modelKey ? "anthropic" : "template"} faults [${[...faults].join(",")}] manifest ${baseUrl}/manifest.json`,
+    `sellers on :${port} payTo ${payTo} asset ${asset} facilitator ${facilitatorUrl} graph ${fixture !== undefined ? `fixture:${fixture}` : apiKey ? "live" : "absent"} model ${modelKey ? "anthropic" : "template"} faults [${[...faults].join(",")}] manifest ${baseUrl}/manifest.json`,
   );
 });
