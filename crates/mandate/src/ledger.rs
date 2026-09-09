@@ -534,7 +534,7 @@ pub struct AuditCharge {
     pub state: String,
 }
 
-const SCHEMA: &str = r#"
+const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS mandates (
   id TEXT PRIMARY KEY,
   mandate_hash TEXT NOT NULL,
@@ -619,7 +619,7 @@ CREATE TABLE IF NOT EXISTS audit_charges (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-"#;
+";
 
 pub struct Ledger {
     conn: Connection,

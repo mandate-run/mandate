@@ -141,10 +141,9 @@ fn units_for(sit: &Situation<'_>, listing: &Listing, pools: u64, window_seconds:
         crate::manifest::Unit::PoolWindow => pools * windows(window_seconds),
         // The brief decides the explain quantity as soon as it exists; before
         // that the maximum is the only honest estimate.
-        crate::manifest::Unit::InputKb => sit
-            .brief_kb
-            .map(|kb| kb.clamp(1, listing.tariff.max_units))
-            .unwrap_or(listing.tariff.max_units),
+        crate::manifest::Unit::InputKb => sit.brief_kb.map_or(listing.tariff.max_units, |kb| {
+            kb.clamp(1, listing.tariff.max_units)
+        }),
     }
 }
 
