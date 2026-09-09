@@ -16,16 +16,12 @@ teardown = "harness/scripts/sellers down"
 timeout_s = 120
 
 [evidence]
-journal = ".proctor/journal/sellers-journal.jsonl"
-ledger = ".proctor/work/lost-response.sqlite"
+journal = ".proctor/run-4021/journal/sellers-journal.jsonl"
+ledger = ".proctor/run-4021/work/lost-response.sqlite"
 mandate_id = "proctor-lost-response"
 
-[[check]]
-name = "build"
-run = "cargo build -p mandate --quiet"
-timeout_s = 300
-
-# The application's own account of the run, and what Proctor measured.
+# The runner builds the buyer under test, so a check never runs a stale
+# binary and this task needs no separate build step.
 [[check]]
 name = "recovery"
 run = "harness/scripts/run-mandate lost-response"

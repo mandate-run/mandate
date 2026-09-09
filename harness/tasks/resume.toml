@@ -15,8 +15,8 @@ ready = "harness/scripts/sellers ready"
 teardown = "harness/scripts/sellers down"
 
 [evidence]
-journal = ".proctor/journal/sellers-journal.jsonl"
-ledger = ".proctor/work/resume.sqlite"
+journal = ".proctor/run-4021/journal/sellers-journal.jsonl"
+ledger = ".proctor/run-4021/work/resume.sqlite"
 mandate_id = "proctor-resume"
 
 [[check]]
