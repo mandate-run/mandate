@@ -22,16 +22,46 @@ pub struct Entry {
     pub source: String,
 }
 
-/// Reads the journal, skipping lines that do not parse: a fixture that
-/// writes garbage is a fixture problem, and the caller decides what that
-/// means rather than this reader guessing.
-pub fn read_journal(path: &Path) -> std::io::Result<Vec<Entry>> {
-    let text = std::fs::read_to_string(path)?;
-    Ok(text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str::<Entry>(l).ok())
-        .collect())
+/// Why the evidence cannot be trusted. Proctor cannot certify that nothing
+/// was paid from a journal it could not fully read, so an unreadable or
+/// partly malformed journal is an infrastructure error, never a quiet pass.
+#[derive(Debug, thiserror::Error)]
+pub enum EvidenceError {
+    #[error("{path}: {problem}")]
+    Unreadable { path: String, problem: String },
+    #[error("{path} line {line}: {problem}")]
+    Malformed {
+        path: String,
+        line: usize,
+        problem: String,
+    },
+}
+
+/// Reads the journal in full. Every line must parse: a fixture that writes
+/// one malformed record could otherwise hide exactly the payment a contract
+/// asserts did not happen.
+pub fn read_journal(path: &Path) -> Result<Vec<Entry>, EvidenceError> {
+    let text = std::fs::read_to_string(path).map_err(|e| EvidenceError::Unreadable {
+        path: path.display().to_string(),
+        problem: e.to_string(),
+    })?;
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Entry>(line) {
+            Ok(e) => out.push(e),
+            Err(problem) => {
+                return Err(EvidenceError::Malformed {
+                    path: path.display().to_string(),
+                    line: i + 1,
+                    problem: problem.to_string(),
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// What the journal proves about a run, independently of what the buyer says.
@@ -170,23 +200,25 @@ pub fn from_ledger(path: &Path, mandate_id: &str) -> Measurements {
     m
 }
 
-/// Everything Proctor measured for one attempt.
-pub fn gather(evidence: &crate::task::Evidence, dir: &Path) -> Measurements {
+/// Everything Proctor measured for one attempt, or why it could not. An
+/// evidence source the task names and Proctor cannot read in full stops the
+/// run: assertions over partial evidence would certify the wrong thing.
+pub fn gather(evidence: &crate::task::Evidence, dir: &Path) -> Result<Measurements, EvidenceError> {
     let mut m = Measurements::new();
     if let Some(journal) = &evidence.journal {
-        match read_journal(&dir.join(journal)) {
-            Ok(entries) => m.extend(from_journal(&entries)),
-            // A journal the task names but the fixture never wrote is itself
-            // a measurement: the contract's assertions on it will fail.
-            Err(_) => {
-                m.insert("fixture_journal_missing".into(), true.into());
-            }
+        let path = dir.join(journal);
+        // A journal the fixture has not written yet is not evidence of
+        // anything, and a check before the first request is legitimate.
+        if path.exists() {
+            m.extend(from_journal(&read_journal(&path)?));
+        } else {
+            m.insert("fixture_journal_missing".into(), true.into());
         }
     }
     if let (Some(ledger), Some(id)) = (&evidence.ledger, &evidence.mandate_id) {
         m.extend(from_ledger(&dir.join(ledger), id));
     }
-    m
+    Ok(m)
 }
 
 #[cfg(test)]
@@ -259,8 +291,44 @@ mod tests {
             ledger: None,
             mandate_id: None,
         };
-        let m = gather(&ev, Path::new("/tmp"));
+        let m = gather(&ev, Path::new("/tmp")).unwrap();
         assert_eq!(m["fixture_journal_missing"], true);
+    }
+
+    /// The probe: a journal holding one valid unpaid request and one
+    /// malformed payment record passed assertions requiring zero payments.
+    /// Proctor cannot certify "nothing was paid" from evidence it could not
+    /// read, so this is an infrastructure error naming the line.
+    #[test]
+    fn a_malformed_journal_line_is_never_silently_dropped() {
+        let dir = std::env::temp_dir().join(format!("proctor-journal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.jsonl");
+        let valid = entry("pay_1", "hash_a", true, "live", "res_1");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{{\"route\":\"POST /events\",\"payment_id\":\n",
+                valid.replace("\"payment_id\":\"pay_1\"", "\"payment_id\":null")
+            ),
+        )
+        .unwrap();
+        let e = read_journal(&path).unwrap_err();
+        let text = e.to_string();
+        assert!(
+            text.contains("line 2"),
+            "the diagnostic names the line: {text}"
+        );
+        let ev = crate::task::Evidence {
+            journal: Some("journal.jsonl".to_owned()),
+            ledger: None,
+            mandate_id: None,
+        };
+        assert!(
+            gather(&ev, &dir).is_err(),
+            "partial evidence never measures"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
