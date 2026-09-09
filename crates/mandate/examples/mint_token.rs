@@ -64,8 +64,16 @@ async fn main() -> anyhow::Result<()> {
     println!("{}/token/{token}", cfg.network.hashscan());
     println!();
     println!("To pay in it, set the asset in the mandate and the sellers:");
-    println!("  budget.service = {{ total = \"1.000000\", asset = \"{token}\" }}");
+    // The runtime knows the decimals of HBAR and USDC and nothing else, so a
+    // minted token must declare them or the mandate is refused at load.
+    println!(
+        "  budget.service = {{ total = \"1.000000\", asset = \"{token}\", decimals = {DECIMALS} }}"
+    );
     println!("  SELLER_ASSET={token} in sellers/.env");
+    println!();
+    println!("Then restart the sellers, refetch the manifest they serve and");
+    println!("pin its hash, since a manifest names the asset its listings take:");
+    println!("  harness/scripts/token-run {token}");
     println!();
     println!("The seller account must accept the token: with unlimited");
     println!("automatic associations it already does, otherwise associate it once.");
