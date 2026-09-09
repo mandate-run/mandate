@@ -91,14 +91,21 @@ The asset is a field of the mandate, so the same code path settles HBAR and
 any HTS token. To pay in a token you mint yourself:
 
 ```sh
-cargo run -p mandate --example mint_token -- MUSD 50
+cargo run -p mandate --example mint_token -- MUSD 50   # prints a token id
+harness/scripts/token-run 0.0.10430010                 # that id
 ```
 
-That prints a token id. Put it in `SELLER_ASSET` in `sellers/.env` and in the
-mandate's `budget.service`, with `decimals` when the runtime cannot know them,
-as `examples/five-pools.hts.toml` shows. `examples/*.usdc.toml` are the same
-runs in Circle's testnet USDC `0.0.429274`, for a buyer associated with it and
-funded from [faucet.circle.com](https://faucet.circle.com).
+`token-run` restarts the sellers priced in the token, refetches the manifest
+they now serve, pins its hash and your topic into `examples/five-pools.hts.toml`
+and runs it. All three steps are needed together, because a manifest names the
+asset its listings take: a mandate pointing at a stale manifest loads fine and
+matches no listing at all.
+
+A token with custom fees is refused at settlement rather than paid: those fees
+leave the buyer's account, the facilitator does not cover them, and no mandate
+budgeted for them. `examples/*.usdc.toml` are the same runs in Circle's testnet
+USDC `0.0.429274`, for a buyer associated with it and funded from
+[faucet.circle.com](https://faucet.circle.com).
 
 Exit codes: 0 delivered, 3 refused, 4 delivered with findings, 5 withheld
 because `anchor_before_delivery` is set and a receipt is not yet on HCS, 6 a

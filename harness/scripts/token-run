@@ -1,0 +1,62 @@
+#!/bin/sh
+# Runs the demo paid in an HTS token, end to end, from a token id.
+#
+#   cargo run -p mandate --example mint_token -- MUSD 50
+#   harness/scripts/token-run 0.0.10430010
+#
+# A manifest names the asset its listings take, so switching asset means
+# restarting the sellers, refetching what they now serve, and re-pinning its
+# hash into the mandate. Doing any one of those by hand leaves a mandate that
+# loads and matches nothing, which is why this exists as one command.
+set -eu
+root=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$root"
+token=${1:?usage: token-run <token id>, from `cargo run -p mandate --example mint_token`}
+port=${PROCTOR_PORT:-4021}
+
+topic=$(grep '^HCS_TOPIC_ID=' crates/mandate/.env | cut -d= -f2)
+if [ -z "$topic" ]; then
+  echo "crates/mandate/.env has no HCS_TOPIC_ID; run harness/scripts/setup first" >&2
+  exit 1
+fi
+
+echo "== sellers priced in $token"
+PROCTOR_ASSET="$token" harness/scripts/sellers up
+for _ in $(seq 40); do
+  harness/scripts/sellers ready 2>/dev/null && break
+  sleep 0.5
+done
+harness/scripts/sellers ready || {
+  echo "the sellers did not start; see .proctor/run-$port/sellers.log" >&2
+  exit 1
+}
+
+echo "== pinning the manifest they serve"
+curl -sf "http://127.0.0.1:$port/manifest.json" > examples/manifest.hts.json
+python3 - "$token" "$topic" <<'PY'
+import hashlib, json, pathlib, re, sys
+
+token, topic = sys.argv[1], sys.argv[2]
+manifest = pathlib.Path("examples/manifest.hts.json")
+served = json.loads(manifest.read_text())
+assets = {l["asset"] for l in served["listings"]}
+if assets != {token}:
+    raise SystemExit(f"the sellers price in {assets}, not {token}")
+digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+# The mandate is derived from the HBAR one, so the two stay in step.
+base = pathlib.Path("examples/five-pools.hbar.toml").read_text()
+s = base.replace(
+    'service = { total = "0.0100", asset = "0.0.0" }',
+    f'service = {{ total = "1.000000", asset = "{token}", decimals = 6 }}',
+)
+s = s.replace('manifest.hbar.json", hash = "', 'manifest.hts.json", hash = "')
+s = re.sub(r'(manifest\.hts\.json", hash = ")[0-9a-f]{64}', r"\g<1>" + digest, s)
+s = s.replace('max_single_payment = "0.0090"', 'max_single_payment = "0.900000"')
+s = re.sub(r'receipts_topic = "[0-9.]+"', f'receipts_topic = "{topic}"', s)
+pathlib.Path("examples/five-pools.hts.toml").write_text(s)
+print(f"  manifest {digest[:16]} token {token} topic {topic}")
+PY
+
+echo "== paying"
+cargo run -q -p mandate -- run examples/five-pools.hts.toml --id "hts-$(date -u +%Y%m%dT%H%M%S)"
