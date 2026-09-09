@@ -5,10 +5,8 @@
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 name=${1:?usage: run-resume <fixture>}
-work="$root/.proctor/work"
-mkdir -p "$work"
-rm -f "$work/$name.sqlite" "$work/$name.sqlite-wal" "$work/$name.sqlite-shm"
-"$root/target/debug/mandate" run "$root/harness/fixtures/$name.toml" \
-  --ledger "$work/$name.sqlite" --id "proctor-$name" --json > "$work/$name.first.json"
+port=${PROCTOR_PORT:-4021}
+work="$root/.proctor/run-$port/work"
+"$root/harness/scripts/run-mandate" "$name" > "$work/$name.first.json"
 exec "$root/target/debug/mandate" resume "$root/harness/fixtures/$name.toml" \
   --ledger "$work/$name.sqlite" --id "proctor-$name" --json

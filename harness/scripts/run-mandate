@@ -1,14 +1,36 @@
 #!/bin/sh
 # Runs one fixture mandate through the buyer under test and prints its JSON
 # report, so a task's `expect` reads the application's own account of what it
-# did. The ledger is per task, so a run never inherits another's state.
+# did.
+#
+# A ledger holding exposure is never deleted: an authorization that is
+# prepared, sent or unresolved may still settle, and its row is the only way
+# to reconcile it later. Such a run is resumed instead, and a completed
+# ledger is archived rather than overwritten.
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 name=${1:?usage: run-mandate <fixture>}
-work="$root/.proctor/work"
+port=${PROCTOR_PORT:-4021}
+work="$root/.proctor/run-$port/work"
+ledger="$work/$name.sqlite"
 mkdir -p "$work"
-rm -f "$work/$name.sqlite" "$work/$name.sqlite-wal" "$work/$name.sqlite-shm"
+
+# The buyer under test is built here, so a task never runs yesterday's binary.
+cargo build -q -p mandate --manifest-path "$root/Cargo.toml" >&2
+
+if [ -f "$ledger" ]; then
+  outstanding=$(sqlite3 "$ledger" \
+    "SELECT COUNT(*) FROM authorizations WHERE payment_state IN ('prepared','sent','unresolved')" \
+    2>/dev/null || echo 0)
+  if [ "$outstanding" != "0" ]; then
+    echo "resuming $ledger: $outstanding authorization(s) still exposure" >&2
+    exec "$root/target/debug/mandate" resume "$root/harness/fixtures/$name.toml" \
+      --ledger "$ledger" --id "proctor-$name" --json
+  fi
+  mkdir -p "$work/archive"
+  mv "$ledger" "$work/archive/$name-$(date -u +%Y%m%dT%H%M%S).sqlite"
+  rm -f "$ledger-wal" "$ledger-shm"
+fi
+
 exec "$root/target/debug/mandate" run "$root/harness/fixtures/$name.toml" \
-  --ledger "$work/$name.sqlite" \
-  --id "proctor-$name" \
-  --json
+  --ledger "$ledger" --id "proctor-$name" --json
