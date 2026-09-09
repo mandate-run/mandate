@@ -7,6 +7,9 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 name=${1:?usage: run-resume <fixture>}
 port=${PROCTOR_PORT:-4021}
 work="$root/.proctor/run-$port/work"
+# The redirect is opened before run-mandate creates the directory, so on a
+# fresh checkout the shell fails here rather than in the run.
+mkdir -p "$work"
 "$root/harness/scripts/run-mandate" "$name" > "$work/$name.first.json"
 exec "$root/target/debug/mandate" resume "$root/harness/fixtures/$name.toml" \
   --ledger "$work/$name.sqlite" --id "proctor-$name" --json

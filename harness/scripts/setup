@@ -22,8 +22,12 @@ done
 command -v protoc >/dev/null || echo "note: protoc is needed to build; install it if the build fails" >&2
 
 say "env files"
-[ -f crates/mandate/.env ] || { cp crates/mandate/.env.example crates/mandate/.env; chmod 600 crates/mandate/.env; }
+[ -f crates/mandate/.env ] || cp crates/mandate/.env.example crates/mandate/.env
 [ -f sellers/.env ] || cp sellers/.env.example sellers/.env
+# The buyer key is in this file, so it is protected whether this script
+# created it or the README told the reader to copy it first.
+chmod 600 crates/mandate/.env
+echo "  crates/mandate/.env is $(stat -f '%Lp' crates/mandate/.env 2>/dev/null || stat -c '%a' crates/mandate/.env)"
 if ! grep -q '^MANDATE_ACCOUNT_ID=0' crates/mandate/.env; then
   cat >&2 <<'MSG'
 
@@ -95,18 +99,30 @@ for _ in $(seq 40); do
 done
 harness/scripts/sellers ready || { echo "the sellers did not start; see .proctor/run-4021/sellers.log" >&2; exit 1; }
 
-say "pinning the manifest and the topic into the examples"
-curl -sf http://127.0.0.1:4021/manifest.json > examples/manifest.hbar.json
+say "pinning the manifest and the topic"
+# The examples and the harness fixtures both name a seller account and a
+# topic, so both are generated from what this machine actually serves. A
+# fixture left pointing at somebody else's seller fails recipient binding,
+# and their topic is not writable by this buyer.
+curl -sf "http://127.0.0.1:$port/manifest.json" > examples/manifest.hbar.json
+cp examples/manifest.hbar.json harness/fixtures/manifest.json
 python3 - "$topic" <<'PY'
 import hashlib, pathlib, re, sys
+
 topic = sys.argv[1]
-h = hashlib.sha256(pathlib.Path("examples/manifest.hbar.json").read_bytes()).hexdigest()
-for f in pathlib.Path("examples").glob("*.hbar.toml"):
-    s = f.read_text()
-    s = re.sub(r'(manifest\.hbar\.json", hash = ")[0-9a-f]{64}', r"\g<1>" + h, s)
-    s = re.sub(r'receipts_topic = "[0-9.]+"', f'receipts_topic = "{topic}"', s)
-    f.write_text(s)
-print(f"  manifest {h[:16]} topic {topic}")
+pins = [
+    ("examples/manifest.hbar.json", pathlib.Path("examples").glob("*.hbar.toml"), "manifest.hbar.json"),
+    ("harness/fixtures/manifest.json", pathlib.Path("harness/fixtures").glob("*.toml"), "manifest.json"),
+]
+for manifest, mandates, name in pins:
+    h = hashlib.sha256(pathlib.Path(manifest).read_bytes()).hexdigest()
+    for f in mandates:
+        s = f.read_text()
+        s = re.sub(rf'({re.escape(name)}", hash = ")[0-9a-f]{{64}}', r"\g<1>" + h, s)
+        s = re.sub(r'receipts_topic = "[0-9.]+"', f'receipts_topic = "{topic}"', s)
+        f.write_text(s)
+    print(f"  {manifest} {h[:16]}")
+print(f"  topic {topic}")
 PY
 
 cat <<'MSG'
