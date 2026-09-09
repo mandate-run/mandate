@@ -632,6 +632,91 @@ min_event_usd = "100000"
         assert_eq!(format_amount(50_000_000, 8), "0.50000000");
     }
 
+    /// Money is parsed and printed in both directions, so a budget written in
+    /// a mandate is the budget the ledger enforces. The round trip is checked
+    /// over generated values rather than a handful of chosen ones.
+    #[test]
+    fn every_amount_survives_the_round_trip() {
+        // A cheap deterministic generator: no dependency, same values always.
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for decimals in [0u32, 2, 6, 8, 18] {
+            for _ in 0..200 {
+                // Values a budget could plausibly hold, up to the i64 ceiling.
+                let atomic = (next() % (i64::MAX as u64 / 2)) as i64;
+                let text = format_amount(atomic, decimals);
+                let back = parse_amount(&text, decimals).unwrap_or_else(|e| {
+                    panic!("{atomic} at {decimals} decimals printed {text:?}: {e}")
+                });
+                assert_eq!(back, atomic, "{text:?} at {decimals} decimals");
+            }
+            // The boundaries, which a generator rarely hits.
+            for atomic in [0, 1, 9, 10, i64::MAX] {
+                let text = format_amount(atomic, decimals);
+                assert_eq!(parse_amount(&text, decimals), Ok(atomic), "{text:?}");
+            }
+        }
+    }
+
+    /// What a mandate may not say about money. Each of these would otherwise
+    /// be a budget that means something other than it appears to.
+    #[test]
+    fn an_amount_that_could_mislead_is_refused() {
+        // More precision than the asset has: 0.0000001 USDC is not 0.
+        assert!(parse_amount("0.0000001", 6).is_err());
+        assert!(parse_amount("1.234567890", 8).is_err());
+        // Signs, exponents and separators are not decimals.
+        for text in [
+            "-1", "+1", "1e6", "1E6", "0x10", "1_000", "1,000", "one", "", " ", ".", "1.2.3", "∞",
+        ] {
+            assert!(parse_amount(text, 6).is_err(), "{text:?} must not parse");
+        }
+        // Whitespace around a real number is forgiven, since a file may have it.
+        assert_eq!(parse_amount("  0.0100  ", 6), Ok(10_000));
+        // A value beyond i64 is refused rather than wrapped.
+        assert!(parse_amount("92233720368.547758080", 9).is_err());
+        assert!(
+            parse_amount("99999999999999999999", 6)
+                .unwrap_err()
+                .contains("overflows")
+        );
+    }
+
+    /// Zero has many spellings and they all mean nothing was budgeted, which
+    /// the loader must catch rather than accept as a mandate that can buy.
+    #[test]
+    fn every_spelling_of_zero_is_zero() {
+        for text in ["0", "0.0", "0.000000", "00", "000.00"] {
+            assert_eq!(parse_amount(text, 6), Ok(0), "{text:?}");
+        }
+        // And a mandate budgeted at zero is refused at load, naming the field.
+        let broke = EXAMPLE.replace(r#"total = "0.0100""#, r#"total = "0.000000""#);
+        assert_eq!(
+            field_of(Mandate::from_toml(&broke, NOW)),
+            "budget.service.total"
+        );
+    }
+
+    /// The largest and smallest amounts a mandate can hold, printed the way a
+    /// transcript shows them.
+    #[test]
+    fn amounts_print_the_way_a_reader_expects() {
+        assert_eq!(format_amount(0, 6), "0.000000");
+        assert_eq!(format_amount(1, 6), "0.000001");
+        assert_eq!(format_amount(10_000, 6), "0.010000");
+        assert_eq!(format_amount(1_000_000, 6), "1.000000");
+        assert_eq!(format_amount(1, 0), "1");
+        assert_eq!(format_amount(100_000_000, 8), "1.00000000");
+        // Negative amounts appear in accounting differences, never in a budget.
+        assert_eq!(format_amount(-1, 6), "-0.000001");
+        assert_eq!(format_amount(i64::MAX, 8), "92233720368.54775807");
+    }
+
     #[test]
     fn example_loads_with_atomic_amounts_and_defaults() {
         let m = Mandate::from_toml(EXAMPLE, NOW).unwrap();
