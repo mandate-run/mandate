@@ -575,7 +575,6 @@ pub async fn execute<Q: Quoting, P: Paying, U: Publishing>(
     let mandate = inputs.mandate;
     let manifest = inputs.manifest;
     let now = OffsetDateTime::now_utc();
-    let decimals = mandate.budget.service_decimals;
     let pools: Vec<String> = mandate
         .inputs
         .pools
@@ -697,54 +696,13 @@ pub async fn execute<Q: Quoting, P: Paying, U: Publishing>(
         refused: None,
     };
 
-    // Section 12: mandate summary.
-    let brief_bound = analysis::mandatory_brief_bound(st.pools.len());
-    st.out.say(format!(
-        "mandate {} hash {} manifest {} spec {}",
-        mandate.id,
-        &mandate.hash[..16],
-        &manifest.hash[..16],
-        crate::receipts::SPEC_VERSION
-    ));
-    st.out.say(format!(
-        "coverage all_material over {} pool(s), window {} to {} ({} h), evidence {}, citations {}",
-        st.pools.len(),
-        window.from,
-        window.to,
-        mandate.inputs.window_h,
-        mandate.requirements.evidence.as_str(),
-        mandate.requirements.citations.as_str()
-    ));
-    st.out.say(format!(
-        "service budget {} {} cap {} audit {} tinybar; assumption expected_material_pools {} until the screen; mandatory brief bound {} bytes",
-        format_amount(mandate.budget.service_total, decimals),
-        mandate.budget.service_asset,
-        format_amount(mandate.constraints.max_single_payment, decimals),
-        mandate.budget.audit_total,
-        mandate.inputs.expected_material_pools,
-        brief_bound
-    ));
-    st.out.say(format!(
-        "facilitator {} signers {:?}{}",
-        inputs.facilitator_url,
-        st.quoter.signers(),
-        inputs
-            .facilitator_note
-            .as_deref()
-            .map(|n| format!("; {n}"))
-            .unwrap_or_default()
-    ));
-    st.out.say(format!(
-        "listings eligible {} of {}: {}",
-        st.manifest.listings.len(),
+    say_summary(
+        &mut st,
         manifest.listings.len(),
-        st.manifest
-            .listings
-            .iter()
-            .map(|l| l.id.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
+        &manifest.hash,
+        &inputs.facilitator_url,
+        inputs.facilitator_note.as_deref(),
+    );
 
     // Receipt 0, durable then published. When delivery must be anchored and
     // receipt 0 cannot be, nothing is bought.
@@ -816,6 +774,18 @@ pub async fn execute<Q: Quoting, P: Paying, U: Publishing>(
         }
     }
 
+    validate_report(&mut st).await?;
+
+    finish(st, inputs.hashscan, inputs.ledger_hint).await
+}
+
+/// Section 9 over `R`: validate what was bought, sample provenance when the
+/// mandate asks for it, and move each settled delivery to `validated` or
+/// `rejected`. A run that bought nothing has nothing to validate.
+async fn validate_report<Q, P, U: Publishing>(st: &mut State<'_, Q, P, U>) -> Result<(), RunError> {
+    if !st.screened() {
+        return Ok(());
+    }
     // Section 9 over R, when anything was delivered and accepted.
     if st.screened() {
         let (mut v, blocks) = {
@@ -825,7 +795,7 @@ pub async fn execute<Q: Quoting, P: Paying, U: Publishing>(
             (v, delivered.blocks())
         };
         if let Provenance::Pending { samples } = &v.provenance {
-            let rpc = mandate.constraints.eth_rpc.clone().unwrap_or_default();
+            let rpc = st.mandate.constraints.eth_rpc.clone().unwrap_or_default();
             let checked = validate::check_provenance(st.http, &rpc, samples).await;
             v = v.with_provenance(checked);
         }
@@ -867,7 +837,7 @@ pub async fn execute<Q: Quoting, P: Paying, U: Publishing>(
         }
         // Section 6: received -> validated or rejected, one receipt per rejection.
         let reasons: Vec<String> = v.reasons().iter().map(|r| r.as_str().to_owned()).collect();
-        let auths = st.ledger.authorizations(&mandate.id)?;
+        let auths = st.ledger.authorizations(&st.mandate.id)?;
         for a in auths.iter().filter(|a| {
             a.payment_state == PaymentState::Settled && a.delivery_state == DeliveryState::Received
         }) {
@@ -877,10 +847,11 @@ pub async fn execute<Q: Quoting, P: Paying, U: Publishing>(
                 let reason = reasons.join(",");
                 st.ledger
                     .mark_rejected(a.id, &reason, OffsetDateTime::now_utc())?;
-                let mut r = purchase_receipt(&st, a, ReceiptOutcome::Failed, None, None);
+                let mut r = purchase_receipt(st, a, ReceiptOutcome::Failed, None, None);
                 r.reason = Some(format!("validation {reason}"));
                 let key = format!("{}:rejected", a.payment_id);
-                st.ledger.append_receipt_once(&mandate.id, &r, Some(&key))?;
+                st.ledger
+                    .append_receipt_once(&st.mandate.id, &r, Some(&key))?;
             }
         }
         if !v.complete || st.incomplete {
@@ -893,7 +864,67 @@ pub async fn execute<Q: Quoting, P: Paying, U: Publishing>(
         st.report.blocks = blocks;
         st.report.validation = Some(v);
     }
-    finish(st, inputs.hashscan, inputs.ledger_hint).await
+    Ok(())
+}
+
+/// Section 12's opening: what was mandated, what it may spend, and which
+/// listings survived the constraints. Printed before anything is quoted, so
+/// a transcript states the terms it was judged under.
+fn say_summary<Q: Quoting, P, U>(
+    st: &mut State<'_, Q, P, U>,
+    listings_in_manifest: usize,
+    manifest_hash: &str,
+    facilitator_url: &str,
+    facilitator_note: Option<&str>,
+) {
+    let mandate = st.mandate;
+    let decimals = st.decimals();
+    let window = st.window;
+    let brief_bound = analysis::mandatory_brief_bound(st.pools.len());
+    let lines = [
+        format!(
+            "mandate {} hash {} manifest {} spec {}",
+            mandate.id,
+            &mandate.hash[..16],
+            &manifest_hash[..16],
+            crate::receipts::SPEC_VERSION
+        ),
+        format!(
+            "coverage all_material over {} pool(s), window {} to {} ({} h), evidence {}, citations {}",
+            st.pools.len(),
+            window.from,
+            window.to,
+            mandate.inputs.window_h,
+            mandate.requirements.evidence.as_str(),
+            mandate.requirements.citations.as_str()
+        ),
+        format!(
+            "service budget {} {} cap {} audit {} tinybar; assumption expected_material_pools {} until the screen; mandatory brief bound {brief_bound} bytes",
+            format_amount(mandate.budget.service_total, decimals),
+            mandate.budget.service_asset,
+            format_amount(mandate.constraints.max_single_payment, decimals),
+            mandate.budget.audit_total,
+            mandate.inputs.expected_material_pools,
+        ),
+        format!(
+            "facilitator {facilitator_url} signers {:?}{}",
+            st.quoter.signers(),
+            facilitator_note.map_or_else(String::new, |n| format!("; {n}"))
+        ),
+        format!(
+            "listings eligible {} of {listings_in_manifest}: {}",
+            st.manifest.listings.len(),
+            st.manifest
+                .listings
+                .iter()
+                .map(|l| l.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    ];
+    for line in lines {
+        st.out.say(line);
+    }
 }
 
 /// Section 11 and 12: the queue, audit reconciliation, totals, receipts,
@@ -967,8 +998,7 @@ async fn finish<Q, P: Paying, U: Publishing>(
             .map(|(r, s)| format!(
                 "{}:{}",
                 r.seq,
-                s.map(|s| s.to_string())
-                    .unwrap_or_else(|| "pending".to_owned())
+                s.map_or_else(|| "pending".to_owned(), |s| s.to_string())
             ))
             .collect::<Vec<_>>()
             .join(" "),
@@ -1451,7 +1481,7 @@ fn plan_round<Q, P, U>(
         code: Code::OverBudget,
         detail: e.to_string(),
     })?;
-    let free = accounts.free() + st.reservation.as_ref().map(|r| r.1).unwrap_or(0);
+    let free = accounts.free() + st.reservation.as_ref().map_or(0, |r| r.1);
     let quotes: BTreeMap<(String, u64), i64> = valid
         .values()
         .map(|q| ((q.listing_id.clone(), q.request.units), q.amount))
@@ -1767,7 +1797,7 @@ async fn reject_delivery<Q, P, U: Publishing>(
     let mut r = purchase_receipt(st, a, ReceiptOutcome::Failed, None, None);
     r.reason = Some(format!(
         "validation {reason}: {}",
-        failures.first().map(|f| f.detail.as_str()).unwrap_or("")
+        failures.first().map_or("", |f| f.detail.as_str())
     ));
     let key = format!("{}:rejected", a.payment_id);
     st.ledger
@@ -1806,9 +1836,7 @@ async fn accept<Q, P, U: Publishing>(
                 screen.header.indexed_block,
                 screen
                     .header
-                    .indexed_block_timestamp
-                    .map(|t| t.to_string())
-                    .unwrap_or_else(|| "null".to_owned()),
+                    .indexed_block_timestamp.map_or_else(|| "null".to_owned(), |t| t.to_string()),
                 screen.header.coverage_shortfall,
                 screen.header.truncated,
                 screen.requests
@@ -1864,7 +1892,7 @@ async fn accept<Q, P, U: Publishing>(
             st.out.say(format!(
                 "investigate delivered: {} pool(s) screened, events for {}, blocks {}..{}, requests {}",
                 bundle.screen.pools.len(),
-                bundle.events.as_ref().map(|e| e.pools.len()).unwrap_or(0),
+                bundle.events.as_ref().map_or(0, |e| e.pools.len()),
                 bundle.screen.header.block_start,
                 bundle.screen.header.block_end,
                 bundle.requests
