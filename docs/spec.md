@@ -1,6 +1,6 @@
 # Mandate runtime specification
 
-Version 0.6, draft. MUST, MUST NOT and SHOULD follow RFC 2119. This document is authoritative; where another document disagrees, this one wins. Terms not defined here are defined in [mandate.md](mandate.md) section 13.
+Version 0.7, draft. MUST, MUST NOT and SHOULD follow RFC 2119. This document is authoritative; where another document disagrees, this one wins. Terms not defined here are defined in [mandate.md](mandate.md) section 13.
 
 ## 1. Scope
 

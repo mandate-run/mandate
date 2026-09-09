@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const MAX_BYTES: usize = 1024;
-pub const SPEC_VERSION: &str = "0.6";
+pub const SPEC_VERSION: &str = "0.7";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReceiptError {
@@ -175,7 +175,9 @@ mod tests {
         assert!(bytes.len() < 300, "{}", bytes.len());
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.contains("\"outcome\":\"start\""));
-        assert!(text.contains("\"spec_version\":\"0.6\""));
+        // The receipt names the spec it was written under, whatever that is,
+        // so a version bump does not need this test edited to stay true.
+        assert!(text.contains(&format!("\"spec_version\":\"{SPEC_VERSION}\"")));
         assert!(!text.contains("\"payment_id\""));
         assert!(!text.contains("\"step\""));
     }
