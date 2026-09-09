@@ -39,8 +39,7 @@ impl Report {
     pub fn finish(mut self, attempts: Vec<Attempt>) -> Self {
         self.outcome = attempts
             .last()
-            .map(|a| a.outcome)
-            .unwrap_or(Outcome::InfrastructureError);
+            .map_or(Outcome::InfrastructureError, |a| a.outcome);
         self.attempts = attempts;
         self.finished_at = now();
         self

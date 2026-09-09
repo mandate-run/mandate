@@ -308,11 +308,9 @@ fn is_hex(s: &str, len: usize) -> bool {
 
 /// An absolute http(s) URL with a host.
 fn is_url(s: &str) -> bool {
-    url::Url::parse(s)
-        .map(|u| {
-            matches!(u.scheme(), "http" | "https") && u.host_str().is_some_and(|h| !h.is_empty())
-        })
-        .unwrap_or(false)
+    url::Url::parse(s).is_ok_and(|u| {
+        matches!(u.scheme(), "http" | "https") && u.host_str().is_some_and(|h| !h.is_empty())
+    })
 }
 
 fn is_decimal(s: &str) -> bool {
@@ -705,7 +703,7 @@ min_event_usd = "100000"
         assert_eq!(m.budget.service_decimals, 6);
         assert_eq!(m.budget.service_total, 1_500_000);
         // Without the declaration the mandate is refused at load, naming the field.
-        let silent = token.replace(r#", decimals = 6 }"#, " }");
+        let silent = token.replace(r", decimals = 6 }", " }");
         assert_eq!(
             field_of(Mandate::from_toml(&silent, NOW)),
             "budget.service.asset"

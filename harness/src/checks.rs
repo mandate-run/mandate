@@ -79,9 +79,7 @@ pub fn judge(check: &Check, out: &crate::hooks::Output, observed: &Measurements)
 
     let allowed = |code: Option<i32>| match code {
         Some(0) => true,
-        Some(c) => u8::try_from(c)
-            .map(|c| check.allow_exit.contains(&c))
-            .unwrap_or(false),
+        Some(c) => u8::try_from(c).is_ok_and(|c| check.allow_exit.contains(&c)),
         None => false,
     };
     if out.timed_out {
@@ -93,8 +91,7 @@ pub fn judge(check: &Check, out: &crate::hooks::Output, observed: &Measurements)
             "{}: exit {}{}\n{}",
             check.name,
             out.code
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".to_owned()),
+                .map_or_else(|| "signal".to_owned(), |c| c.to_string()),
             if check.allow_exit.is_empty() {
                 String::new()
             } else {
@@ -116,8 +113,7 @@ pub fn judge(check: &Check, out: &crate::hooks::Output, observed: &Measurements)
                         findings.push(format!(
                             "{}: expected {key} to be {want}, found {}",
                             check.name,
-                            got.map(|g| g.to_string())
-                                .unwrap_or_else(|| "nothing".to_owned())
+                            got.map_or_else(|| "nothing".to_owned(), |g| g.to_string())
                         ));
                     }
                     assertions.push(Assertion {
@@ -146,8 +142,7 @@ pub fn judge(check: &Check, out: &crate::hooks::Output, observed: &Measurements)
             findings.push(format!(
                 "{}: observed {key} is {}, the contract requires {want}",
                 check.name,
-                got.map(|g| g.to_string())
-                    .unwrap_or_else(|| "unmeasured".to_owned())
+                got.map_or_else(|| "unmeasured".to_owned(), |g| g.to_string())
             ));
         }
         assertions.push(Assertion {

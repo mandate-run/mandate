@@ -366,8 +366,7 @@ impl Quoter {
             .as_ref()
             .and_then(|r| r.get("url"))
             .and_then(|u| u.as_str())
-            .map(|u| same_url(u, &listing.url))
-            .unwrap_or(false);
+            .is_some_and(|u| same_url(u, &listing.url));
         let matches_listing = |r: &Requirement| {
             r.scheme == "exact"
                 && r.network == listing.network
@@ -548,9 +547,7 @@ mod tests {
         let port = free_port();
         let base = format!("http://127.0.0.1:{port}");
         let listing = listing(&base, "post", "pool", unit_price, "hedera:testnet");
-        let url = url_override
-            .map(str::to_owned)
-            .unwrap_or_else(|| listing.url.clone());
+        let url = url_override.map_or_else(|| listing.url.clone(), str::to_owned);
         let rx = serve_on(
             port,
             "402 Payment Required",

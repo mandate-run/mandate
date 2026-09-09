@@ -685,7 +685,7 @@ impl crate::run::Quoting for FakeMarket {
             }
         };
         let amount = scripted.and_then(|s| s.amount).unwrap_or(ceiling);
-        let received = now - Duration::seconds(scripted.map(|s| s.age_s).unwrap_or(0));
+        let received = now - Duration::seconds(scripted.map_or(0, |s| s.age_s));
         self.quoted
             .lock()
             .unwrap()
@@ -766,10 +766,9 @@ impl crate::run::Paying for FakeMarket {
         &self,
         ledger: &mut crate::ledger::Ledger,
         id: i64,
-        _deadline: OffsetDateTime,
+        deadline: OffsetDateTime,
         say: &mut dyn FnMut(String),
     ) -> Result<crate::purchase::Purchase, crate::purchase::PayError> {
-        let deadline = _deadline;
         let mut a = ledger.authorization(id)?;
         let step = a.step.clone();
         // The crash point: the authorization is durable, nothing was sent.

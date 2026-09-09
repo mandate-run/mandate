@@ -646,7 +646,7 @@ pub fn build_brief(input: BriefInput<'_>, bound: usize) -> Result<Brief, BriefTo
                             json!({
                                 "k": kind.as_str(),
                                 "tx": e.transaction.id,
-                                "a": e.amount_usd.as_deref().map(brief_number).unwrap_or(Value::Null),
+                                "a": e.amount_usd.as_deref().map_or(Value::Null, brief_number),
                             }),
                         )
                     })
@@ -664,7 +664,7 @@ pub fn build_brief(input: BriefInput<'_>, bound: usize) -> Result<Brief, BriefTo
             "o": outcomes
                 .iter()
                 .map(|o| {
-                    let b = blocks.get(&o.pool).map(|b| json!([b.0, b.1])).unwrap_or(Value::Null);
+                    let b = blocks.get(&o.pool).map_or(Value::Null, |b| json!([b.0, b.1]));
                     json!({ "p": o.pool, "o": o.outcome.as_str(), "r": o.reasons, "b": b })
                 })
                 .collect::<Vec<_>>(),
