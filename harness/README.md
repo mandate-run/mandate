@@ -29,10 +29,22 @@ cargo run -p proctor -- check harness/tasks/resume.toml --dir . --json
 
 Exit codes are the four outcomes, in the precedence the design fixes:
 0 `PASS`, 1 `IMPLEMENTATION_FAILURE`, 2 `INFRASTRUCTURE_ERROR`,
-3 `PAYMENT_UNRESOLVED`. Unresolved exposure outranks everything: while money
-is neither spent nor free, nothing is reported as passing and no findings go
-to an agent. A timeout, a crash, malformed output and an unreachable service
-never become a pass.
+3 `PAYMENT_UNRESOLVED`.
+
+## What never becomes a pass
+
+- **Exposure.** Every authorization that is `prepared`, `sent` or
+  `unresolved` is money neither spent nor free. While any exists the run
+  reports `PAYMENT_UNRESOLVED` and stops before buying anything more. A check
+  marked `recovers = true` may run then; nothing else may.
+- **A timeout.** The command leads its own process group and the group is
+  terminated, so nothing keeps submitting payments after Proctor has returned.
+- **Evidence Proctor could not read in full.** A journal with one malformed
+  line is an infrastructure error naming the line number, because "nothing was
+  paid" cannot be certified from a journal that was partly unreadable.
+- **A report that could not be written.** The report is the record a reviewer
+  reads; failing to save it is an infrastructure error, not a quiet pass.
+- **A crash, malformed application output, or an unreachable dependency.**
 
 `proctor run`, the bounded agent loop, is not implemented yet.
 
@@ -85,6 +97,18 @@ From the ledger: `ledger_authorizations`, `ledger_payment_ids`,
 `ledger_settled`, `ledger_failed`, `ledger_unresolved`, `ledger_sent`,
 `ledger_prepared`, `ledger_receipts`, `ledger_receipts_published`,
 `ledger_held`.
+
+## Payment state is never discarded
+
+A ledger holding exposure is resumed, never deleted: the row is the only way
+to reconcile a payment that may still settle. A completed ledger is archived
+under `.proctor/run-<port>/work/archive/` rather than overwritten. Each run
+keeps its own journal, ledger and port under `.proctor/run-<port>/`, and stops
+only the fixture process it started, by recorded pid, so a concurrent run or a
+demo elsewhere on the machine is never killed.
+
+The runner builds the buyer under test before running it, so a check can never
+pass against yesterday's binary.
 
 ## Safety
 
