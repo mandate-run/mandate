@@ -19,7 +19,7 @@ Extra points pursued:
 |---|---|---|
 | "Pay-per-call inference, data, or compute metering rather than a flat per-request charge" | Tariffs priced per pool, per pool-window, and per input KB; the explanation is quoted at the brief's measured size, not a flat rate | done |
 | "Agent discovery via UCP, or a directory that makes your service findable by other agents" | Manifest of listings served at `/manifest.json`; every 402 carries the x402 `bazaar` discovery extension | done |
-| "HTS tokens or custom fee schedules in the settlement path" | The asset is a mandate field: HBAR `0.0.0` and USDC `0.0.429274` run the same code path. HBAR settlements are live; the USDC rerun waits on the Circle faucet, which reports sending without delivering | doing |
+| "HTS tokens or custom fee schedules in the settlement path" | The asset is a mandate field, so HBAR and any HTS token share one code path. Proven live in HTS token `0.0.10430010`, minted by `cargo run -p mandate --example mint_token`: three payments totalling 2800 units moved buyer to seller, fee-paid by the facilitator, transfers `0.0.7162784-1788916067-496072000`, `-1788916081-342304000`, `-1788916092-822056000`. Circle's USDC is the same path and waits only on their faucet | done |
 | "Verifiable payment audit trails on HCS" | One receipt per decision on an HCS topic, each keyed to its transition so a resumed run never publishes a duplicate; receipt 0 carries the mandate and manifest hashes | done |
 
 Not pursued: A2A or ACP negotiation, ERC-8004 or HCS-14 identity, Scheduled Transactions.
