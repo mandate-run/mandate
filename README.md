@@ -4,7 +4,7 @@ Give your agent a mandate, not a credit card.
 
 Mandate buys the evidence an agent needs, tracks every payment authorization against its budget, and explains when it cannot finish. It is a buyer runtime for agents that pay per request over x402: given a purpose, a budget and hard constraints, it collects live quotes, plans the cheapest path that can cover the task, reserves the final step, pays one signed Hedera transfer per purchase, validates what it bought, and writes a receipt for every decision to Hedera Consensus Service.
 
-Built from scratch for ETHOnline 2026: Hedera AI & Agentic Payments, Hedera Open Source, The Graph AI Use Case From Scratch. Status: one-pool runs settle on testnet with receipts on HCS; private until submission.
+Built from scratch for ETHOnline 2026: Hedera AI & Agentic Payments, Hedera Open Source, The Graph AI Use Case From Scratch. Status: five-pool runs settle on testnet with receipts on HCS, plan competition, recovery from lost responses and crashes, and a harness that verifies all of it. Private until submission.
 
 ## What it does
 
@@ -24,6 +24,7 @@ Built from scratch for ETHOnline 2026: Hedera AI & Agentic Payments, Hedera Open
 | sellers | four x402-gated reference endpoints with published tariffs and durable result storage | TypeScript, `@x402/hedera`, x402 HTTP resource server with per-request pricing |
 | manifest | listings and tariffs, approved and pinned by the principal; each 402 also carries the x402 `bazaar` discovery info | JSON |
 | facilitator | verifies and settles; fee payer `0.0.7162784` on testnet | Blocky402, `api.testnet.blocky402.com` |
+| proctor | harness that checks payment behavior against executable contracts, measuring the seller journal and buyer ledger independently | Rust |
 
 ## Payment flow
 
@@ -46,25 +47,84 @@ Proctor, in `harness/`, builds Hedera services from an executable acceptance con
 
 ## Setup
 
-Prerequisites: Rust 1.96 with `protoc` on the path, Node 24 with pnpm 11, and a Hedera testnet account funded from the [portal](https://portal.hedera.com). USDC runs need the account associated with `0.0.429274` and funded from [faucet.circle.com](https://faucet.circle.com); HBAR runs need nothing else. Live Graph data needs a Subgraph Studio API key; prose from a model needs an Anthropic key. Without them the sellers serve canned facts and a template explanation, which is enough for every command below.
-
-1. Buyer credentials. Copy `crates/mandate/.env.example` to `crates/mandate/.env`, fill `MANDATE_ACCOUNT_ID` and `MANDATE_PRIVATE_KEY`, and `chmod 600` the file. The key never leaves that process.
-2. Receipts topic. `cargo run -p mandate -- topic create` prints `HCS_TOPIC_ID=...`; add it to `.env` and to `duties.receipts_topic` in your mandate file.
-3. Sellers. `cd sellers && pnpm install`, copy `.env.example` to `.env`, set `SELLER_PAY_TO` to a second testnet account. Start them with canned facts and HBAR pricing: `GRAPH_FIXTURE=material SELLER_ASSET=HBAR pnpm sellers`. `GRAPH_FIXTURE=quiet` serves a pool with nothing material; a `GRAPH_API_KEY` without `GRAPH_FIXTURE` queries the subgraph live; no `SELLER_ASSET` prices in USDC.
-4. Pin the manifest. `curl http://127.0.0.1:4021/manifest.json > examples/manifest.hbar.json`, then put its `sha256sum` into `constraints.manifest.hash` of the mandate file. The shipped examples pin the manifest the fixture sellers serve for `pay_to` `0.0.10409989`; with your own seller account, refetch and re-pin.
-5. Run. From the repo root:
+Prerequisites: Rust 1.96 with `protoc` on the path, Node 24 with pnpm 11, and
+two Hedera testnet accounts from the [portal](https://portal.hedera.com). The
+buyer needs its key and a few HBAR; the seller only receives, so its id is
+enough. They must differ: a transfer to yourself is one net movement, not a
+debit and a credit, and the runtime refuses to bind it as a payment.
 
 ```sh
-cargo run -p mandate -- run examples/one-pool.hbar.toml --id demo-$(date +%s)
-cargo run -p mandate -- run examples/one-pool.hbar.toml --id demo-$(date +%s) --json
-cargo run -p mandate -- run examples/one-pool-short.hbar.toml --id short-$(date +%s)
+cp crates/mandate/.env.example crates/mandate/.env   # MANDATE_ACCOUNT_ID, MANDATE_PRIVATE_KEY
+cp sellers/.env.example sellers/.env                 # SELLER_PAY_TO
+harness/scripts/setup
 ```
 
-The `examples/*.usdc.toml` mandates are the same three runs priced in USDC against sellers started with a `GRAPH_API_KEY` and no `SELLER_ASSET`: `one-pool.usdc.toml` investigates WBTC/WETH 0.05%, a pool that is material most days by a large swap and stays under the events cap; `quiet-pool.usdc.toml` a pool with a handful of swaps; `one-pool-short.usdc.toml` refuses. They sample three cited transactions against `eth_rpc`.
+`setup` installs the seller dependencies, builds, creates a receipts topic on
+testnet, pins the served manifest and that topic into the example mandates,
+and starts the sellers with canned Graph facts. It stops with an explanation
+rather than a confusing failure if either account is missing.
 
-The first prints the transcript of spec section 12 as it happens: quotes, the three plans with `expected` and `bound`, the explain reserve, each payment with its `pay_` id and `0.0.7162784@` transaction id, settlement from the mirror node record, per-pool outcomes, validation by name, totals and the HCS sequence numbers. The second prints the report and transcript as one JSON document. The third refuses `REQUIREMENT_UNMEETABLE` before any purchase and still publishes its receipts. Exit codes: 0 delivered, 3 refused, 4 delivered with findings, 5 withheld because `anchor_before_delivery` is set and a receipt is not yet on HCS, 6 a payment neither settled nor failed, 2 a mandate or manifest that does not load. Every run needs a fresh mandate id, hence `--id`; the ledger is `mandate.sqlite` in the working directory unless `--ledger` says otherwise, and `mandate reconcile <id>` re-reads the mirror node for anything left unresolved.
+Then, from the repo root:
 
-A run that stops mid-purchase, whether the process died or a response never came, is finished by `mandate resume <file> --ledger <path> --id <id>`. It reconciles every open authorization against the mirror node, resends or retrieves the bytes already signed, and carries on where it stopped. Nothing is signed twice and no purchase acquires a second payment id, so a crash costs at most one attempt.
+```sh
+cargo run -p mandate -- run examples/five-pools.hbar.toml --id demo-$(date +%s)
+cargo run -p mandate -- run examples/five-pools-short.hbar.toml --id short-$(date +%s)
+cargo run -p proctor  -- check harness/tasks/resume.toml --dir .
+```
+
+The first buys evidence for five pools and settles three real payments on
+testnet, printing the transcript of spec section 12 as it happens: quotes, the
+three plans with `expected` and `bound`, the explain reserve, each payment with
+its `pay_` id and `0.0.7162784@` transaction id, settlement read from the
+mirror node, per-pool outcomes, validation by name, totals, and the HCS
+sequence numbers. Add `--json` for the report as one document. The second
+refuses `REQUIREMENT_UNMEETABLE` before spending anything and still publishes
+its receipts. The third is the harness checking that a resumed run never pays
+twice.
+
+No API keys are needed for any of that: the sellers serve canned Graph facts
+and a template explanation. A `GRAPH_API_KEY` from Subgraph Studio in
+`sellers/.env`, with no `GRAPH_FIXTURE`, switches them to the live Uniswap v3
+subgraph; an `ANTHROPIC_API_KEY` switches the explanation to a model. The
+`examples/*.usdc.toml` mandates are the same runs priced in USDC, for a buyer
+associated with `0.0.429274` and funded from
+[faucet.circle.com](https://faucet.circle.com).
+
+Exit codes: 0 delivered, 3 refused, 4 delivered with findings, 5 withheld
+because `anchor_before_delivery` is set and a receipt is not yet on HCS, 6 a
+payment neither settled nor failed, 2 a mandate or manifest that does not load.
+Every run needs a fresh mandate id, hence `--id`; the ledger is
+`mandate.sqlite` unless `--ledger` says otherwise, and `mandate reconcile <id>`
+re-reads the mirror node for anything left unresolved.
+
+A run that stops mid-purchase, whether the process died or a response never
+came, is finished by `mandate resume <file> --ledger <path> --id <id>`. It
+reconciles every open authorization against the mirror node, resends or
+retrieves the bytes already signed, and carries on where it stopped. Nothing is
+signed twice and no purchase acquires a second payment id, so a crash costs at
+most one attempt.
+
+## Proctor
+
+The payment behaviors above are verified by a harness in [harness/](harness/),
+not only by unit tests. Proctor runs executable task contracts in which every
+check has two halves: `expect` reads the buyer's own report, and `observe` reads
+what Proctor measured itself from the sellers' journal and the buyer's ledger.
+
+That distinction is the point. A buyer with a recovery bug reports
+`status: delivered` with correct totals while quietly paying twice; the seller's
+journal shows six signed payments where the contract allows three. Proctor
+caught exactly that defect during development, from the journal rather than from
+anything the application said about itself.
+
+```sh
+cargo run -p proctor -- check harness/tasks/lost-response.toml --dir .
+```
+
+Three contracts ship: a response lost after settlement, a resumed run that must
+not repurchase, and a refusal that must leave the seller with no signed payment
+at all. Design and the comparison with Hedera Harness:
+[docs/harness.md](docs/harness.md).
 
 ## Docs
 
