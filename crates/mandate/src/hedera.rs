@@ -764,6 +764,150 @@ mod tests {
         AccountId::from_str(s).unwrap()
     }
 
+    const PAYER: &str = "0.0.10399984";
+    const SELLER: &str = "0.0.10409989";
+    const USDC: &str = "0.0.429274";
+
+    fn want(asset: Asset, amount: i64) -> Expected {
+        Expected {
+            asset,
+            from: acct(PAYER),
+            to: acct(SELLER),
+            amount,
+        }
+    }
+
+    fn hbar(entries: &[(&str, i64)]) -> MirrorRecord {
+        MirrorRecord {
+            transaction_id: "0.0.7162784-1-2".to_owned(),
+            result: "SUCCESS".to_owned(),
+            charged_tx_fee: Some(50_000),
+            nonce: 0,
+            consensus_timestamp: "1.000000001".to_owned(),
+            transfers: entries
+                .iter()
+                .map(|(account, amount)| HbarEntry {
+                    account: (*account).to_owned(),
+                    amount: *amount,
+                })
+                .collect(),
+            token_transfers: Vec::new(),
+        }
+    }
+
+    fn token(entries: &[(&str, &str, i64)]) -> MirrorRecord {
+        MirrorRecord {
+            token_transfers: entries
+                .iter()
+                .map(|(token_id, account, amount)| TokenEntry {
+                    token_id: (*token_id).to_owned(),
+                    account: (*account).to_owned(),
+                    amount: *amount,
+                })
+                .collect(),
+            ..hbar(&[])
+        }
+    }
+
+    /// The rule that decides whether money moved. A record must carry both
+    /// halves of the agreed transfer: the payer debited by exactly the
+    /// amount, and the recipient credited by exactly the amount.
+    #[test]
+    fn a_settlement_needs_both_halves_of_the_agreed_transfer() {
+        let want = want(Asset::Hbar, 1_000);
+        // The real shape: the facilitator's fee entries sit alongside ours.
+        let paid = hbar(&[
+            ("0.0.7162784", -83_197),
+            ("0.0.98", 83_197),
+            (PAYER, -1_000),
+            (SELLER, 1_000),
+        ]);
+        assert!(has_transfers(&paid, &want), "fees alongside do not matter");
+
+        // Only one half is not a payment.
+        assert!(!has_transfers(&hbar(&[(PAYER, -1_000)]), &want));
+        assert!(!has_transfers(&hbar(&[(SELLER, 1_000)]), &want));
+        assert!(!has_transfers(&hbar(&[]), &want));
+    }
+
+    /// The amount is exact. A record that moves less, or more, is not the
+    /// payment that was authorized, whichever direction it errs in.
+    #[test]
+    fn an_amount_that_differs_is_not_the_authorized_payment() {
+        let want = want(Asset::Hbar, 1_000);
+        for amount in [999, 1_001, 0, -1_000, i64::MAX] {
+            let record = hbar(&[(PAYER, -amount), (SELLER, amount)]);
+            assert_eq!(
+                has_transfers(&record, &want),
+                amount == 1_000,
+                "a transfer of {amount} against an authorization of 1000"
+            );
+        }
+    }
+
+    /// Right amount, wrong account. A payment to somebody else is not this
+    /// purchase, however well formed the record looks.
+    #[test]
+    fn the_accounts_must_be_the_ones_authorized() {
+        let want = want(Asset::Hbar, 1_000);
+        let stranger = "0.0.99999";
+        // Credited to a stranger.
+        assert!(!has_transfers(
+            &hbar(&[(PAYER, -1_000), (stranger, 1_000)]),
+            &want
+        ));
+        // Debited from a stranger.
+        assert!(!has_transfers(
+            &hbar(&[(stranger, -1_000), (SELLER, 1_000)]),
+            &want
+        ));
+        // The halves swapped: the seller paying the buyer is not settlement.
+        assert!(!has_transfers(
+            &hbar(&[(SELLER, -1_000), (PAYER, 1_000)]),
+            &want
+        ));
+    }
+
+    /// An HTS payment and an HBAR payment are never confused for each other,
+    /// and a token transfer must name the token that was authorized.
+    #[test]
+    fn the_asset_must_be_the_one_authorized() {
+        let want_token = want(Asset::Token(HederaTokenId::from_str(USDC).unwrap()), 1_500);
+        let paid = token(&[(USDC, PAYER, -1_500), (USDC, SELLER, 1_500)]);
+        assert!(has_transfers(&paid, &want_token));
+
+        // The same movement in a different token is a different payment.
+        let other = token(&[
+            ("0.0.10430010", PAYER, -1_500),
+            ("0.0.10430010", SELLER, 1_500),
+        ]);
+        assert!(!has_transfers(&other, &want_token));
+
+        // HBAR moving cannot settle a token authorization, or the reverse.
+        assert!(!has_transfers(
+            &hbar(&[(PAYER, -1_500), (SELLER, 1_500)]),
+            &want_token
+        ));
+        assert!(!has_transfers(&paid, &want(Asset::Hbar, 1_500)));
+    }
+
+    /// A record carrying several tokens still settles the one authorized,
+    /// which is what a batched transfer looks like on the wire.
+    #[test]
+    fn one_token_settles_among_several() {
+        let want = want(Asset::Token(HederaTokenId::from_str(USDC).unwrap()), 700);
+        let mixed = token(&[
+            ("0.0.10430010", PAYER, -50),
+            ("0.0.10430010", SELLER, 50),
+            (USDC, PAYER, -700),
+            (USDC, SELLER, 700),
+        ]);
+        assert!(has_transfers(&mixed, &want));
+        // But the other token's amount does not stand in for ours.
+        let wrong = token(&[("0.0.10430010", PAYER, -700), (USDC, SELLER, 700)]);
+        assert!(!has_transfers(&wrong, &want));
+    }
+
     #[test]
     fn signs_with_fee_payer_id_nodes_and_duration() {
         let signer = Signer::ephemeral(acct("0.0.5"));
