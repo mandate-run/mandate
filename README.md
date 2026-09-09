@@ -47,7 +47,7 @@ Proctor, in `harness/`, builds Hedera services from an executable acceptance con
 
 ## Setup
 
-Prerequisites: Rust 1.96 with `protoc` on the path, Node 24 with pnpm 11, and
+Prerequisites: Rust 1.98 with `protoc` on the path, Node 24 with pnpm 11, and
 two Hedera testnet accounts from the [portal](https://portal.hedera.com). The
 buyer needs its key and a few HBAR; the seller only receives, so its id is
 enough. They must differ: a transfer to yourself is one net movement, not a
