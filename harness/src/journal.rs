@@ -47,9 +47,28 @@ impl Report {
     }
 
     /// Writes `report.json` under the run directory and returns its path.
-    pub fn write(&self, root: &Path) -> std::io::Result<PathBuf> {
-        let dir = root.join(".proctor/runs").join(&self.run);
-        std::fs::create_dir_all(&dir)?;
+    /// The directory is created exclusively, so two runs a second apart, or
+    /// concurrent ones, never overwrite each other's evidence.
+    pub fn write(&mut self, root: &Path) -> std::io::Result<PathBuf> {
+        let runs = root.join(".proctor/runs");
+        std::fs::create_dir_all(&runs)?;
+        let mut id = self.run.clone();
+        let mut dir = runs.join(&id);
+        // Exclusive creation is the collision check: whoever creates the
+        // directory owns the id, and the loser takes the next one.
+        let mut n = 1;
+        while let Err(e) = std::fs::create_dir(&dir) {
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(e);
+            }
+            id = format!("{}-{n}", self.run);
+            dir = runs.join(&id);
+            n += 1;
+            if n > 1000 {
+                return Err(std::io::Error::other("cannot find a free run id"));
+            }
+        }
+        self.run = id;
         let path = dir.join("report.json");
         std::fs::write(&path, serde_json::to_vec_pretty(self)?)?;
         Ok(path)
@@ -108,13 +127,43 @@ run = "true"
         assert!(!report.proctor_version.is_empty());
 
         let dir = std::env::temp_dir().join(format!("proctor-report-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
+        let mut report = report;
         let path = report.write(&dir).unwrap();
         let back: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(back["outcome"], "IMPLEMENTATION_FAILURE");
         assert_eq!(back["task_hash"], task.hash);
         assert_eq!(back["attempts"][0]["checks"][0]["findings"][0], "c: exit 1");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The probe: four runs in the same second left one report. Every run
+    /// keeps its own evidence, whatever the clock's resolution.
+    #[test]
+    fn runs_in_the_same_second_each_keep_their_evidence() {
+        let task = Task::from_toml(TASK).unwrap();
+        let dir = std::env::temp_dir().join(format!("proctor-collide-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ids = std::collections::BTreeSet::new();
+        for _ in 0..4 {
+            let mut report = Report::new(&task, now()).finish(vec![Attempt::new(
+                &task,
+                1,
+                vec![],
+                Measurements::new(),
+            )]);
+            let path = report.write(&dir).unwrap();
+            assert!(path.exists());
+            ids.insert(report.run.clone());
+        }
+        assert_eq!(ids.len(), 4, "four runs, four reports: {ids:?}");
+        let written = std::fs::read_dir(dir.join(".proctor/runs"))
+            .unwrap()
+            .count();
+        assert_eq!(written, 4);
         std::fs::remove_dir_all(&dir).ok();
     }
 
