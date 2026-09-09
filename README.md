@@ -85,10 +85,20 @@ twice.
 No API keys are needed for any of that: the sellers serve canned Graph facts
 and a template explanation. A `GRAPH_API_KEY` from Subgraph Studio in
 `sellers/.env`, with no `GRAPH_FIXTURE`, switches them to the live Uniswap v3
-subgraph; an `ANTHROPIC_API_KEY` switches the explanation to a model. The
-`examples/*.usdc.toml` mandates are the same runs priced in USDC, for a buyer
-associated with `0.0.429274` and funded from
-[faucet.circle.com](https://faucet.circle.com).
+subgraph; an `ANTHROPIC_API_KEY` switches the explanation to a model.
+
+The asset is a field of the mandate, so the same code path settles HBAR and
+any HTS token. To pay in a token you mint yourself:
+
+```sh
+cargo run -p mandate --example mint_token -- MUSD 50
+```
+
+That prints a token id. Put it in `SELLER_ASSET` in `sellers/.env` and in the
+mandate's `budget.service`, with `decimals` when the runtime cannot know them,
+as `examples/five-pools.hts.toml` shows. `examples/*.usdc.toml` are the same
+runs in Circle's testnet USDC `0.0.429274`, for a buyer associated with it and
+funded from [faucet.circle.com](https://faucet.circle.com).
 
 Exit codes: 0 delivered, 3 refused, 4 delivered with findings, 5 withheld
 because `anchor_before_delivery` is set and a receipt is not yet on HCS, 6 a
