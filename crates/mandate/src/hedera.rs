@@ -743,6 +743,7 @@ fn has_transfers(r: &MirrorRecord, e: &Expected) -> bool {
                 && r.transfers
                     .iter()
                     .any(|t| t.account == to && t.amount == e.amount)
+                && !charges_beyond_the_payment(r, &from, e)
         }
         Asset::Token(token) => {
             let token = token.to_string();
@@ -752,8 +753,48 @@ fn has_transfers(r: &MirrorRecord, e: &Expected) -> bool {
                 && r.token_transfers
                     .iter()
                     .any(|t| t.token_id == token && t.account == to && t.amount == e.amount)
+                && !charges_beyond_the_payment(r, &from, e)
         }
     }
+}
+
+/// Whether the record debits the runtime account for anything other than the
+/// payment itself. An HTS token may carry custom fees, which the facilitator
+/// does not pay and the mandate never budgeted: a fixed HBAR fee, a
+/// fractional cut of the transfer, or a royalty in a third token. Any of
+/// those leaves the account, so a record carrying one is not the payment
+/// that was authorized, whatever else it also contains. Section 10 and I5.
+///
+/// The facilitator is the fee payer, so a settled payment moves no HBAR from
+/// the runtime account at all; for an HBAR payment the only permitted debit
+/// is the amount itself.
+fn charges_beyond_the_payment(r: &MirrorRecord, from: &str, e: &Expected) -> bool {
+    let permitted_hbar = match e.asset {
+        Asset::Hbar => -e.amount,
+        Asset::Token(_) => 0,
+    };
+    let hbar_taken: i64 = r
+        .transfers
+        .iter()
+        .filter(|t| t.account == from && t.amount < 0)
+        .map(|t| t.amount)
+        .sum();
+    if hbar_taken < permitted_hbar {
+        return true;
+    }
+    let permitted_token = match e.asset {
+        Asset::Hbar => None,
+        Asset::Token(token) => Some(token.to_string()),
+    };
+    r.token_transfers.iter().any(|t| {
+        t.account == from
+            && t.amount < 0
+            && permitted_token.as_deref().is_none_or(|want| {
+                // A second debit in the paid token, or any debit in another,
+                // is a fee rather than the payment.
+                t.token_id != want || t.amount != -e.amount
+            })
+    })
 }
 
 #[cfg(test)]
@@ -891,21 +932,65 @@ mod tests {
         assert!(!has_transfers(&paid, &want(Asset::Hbar, 1_500)));
     }
 
-    /// A record carrying several tokens still settles the one authorized,
-    /// which is what a batched transfer looks like on the wire.
+    /// A token's custom fees are charged on top of the transfer and the
+    /// facilitator does not pay them, so they leave the buyer's account
+    /// outside the budget. A record carrying one is not the payment that was
+    /// authorized, however correct the payment leg looks.
     #[test]
-    fn one_token_settles_among_several() {
-        let want = want(Asset::Token(HederaTokenId::from_str(USDC).unwrap()), 700);
-        let mixed = token(&[
-            ("0.0.10430010", PAYER, -50),
-            ("0.0.10430010", SELLER, 50),
+    fn a_fee_beyond_the_payment_is_not_the_payment() {
+        let usdc = Asset::Token(HederaTokenId::from_str(USDC).unwrap());
+        let clean = token(&[(USDC, PAYER, -700), (USDC, SELLER, 700)]);
+        assert!(has_transfers(&clean, &want(usdc, 700)));
+
+        // A fixed HBAR fee alongside a correct token payment.
+        let mut hbar_fee = clean.clone();
+        hbar_fee.transfers = vec![
+            HbarEntry {
+                account: PAYER.to_owned(),
+                amount: -100_000_000,
+            },
+            HbarEntry {
+                account: "0.0.800".to_owned(),
+                amount: 100_000_000,
+            },
+        ];
+        assert!(
+            !has_transfers(&hbar_fee, &want(usdc, 700)),
+            "1 HBAR left the account and no budget covered it"
+        );
+
+        // A royalty in another token, the fractional-fee shape.
+        let royalty = token(&[
             (USDC, PAYER, -700),
             (USDC, SELLER, 700),
+            ("0.0.10430010", PAYER, -50),
+            ("0.0.10430010", "0.0.800", 50),
         ]);
-        assert!(has_transfers(&mixed, &want));
-        // But the other token's amount does not stand in for ours.
+        assert!(!has_transfers(&royalty, &want(usdc, 700)));
+
+        // A second debit in the paid token, which a fractional fee looks like.
+        let cut = token(&[
+            (USDC, PAYER, -700),
+            (USDC, SELLER, 700),
+            (USDC, PAYER, -35),
+            (USDC, "0.0.800", 35),
+        ]);
+        assert!(!has_transfers(&cut, &want(usdc, 700)));
+
+        // An HBAR payment permits exactly its own debit and nothing more.
+        let hbar_ok = hbar(&[(PAYER, -1_000), (SELLER, 1_000)]);
+        assert!(has_transfers(&hbar_ok, &want(Asset::Hbar, 1_000)));
+        let hbar_plus = hbar(&[
+            (PAYER, -1_000),
+            (SELLER, 1_000),
+            (PAYER, -5),
+            ("0.0.800", 5),
+        ]);
+        assert!(!has_transfers(&hbar_plus, &want(Asset::Hbar, 1_000)));
+
+        // The other token's amount never stands in for ours.
         let wrong = token(&[("0.0.10430010", PAYER, -700), (USDC, SELLER, 700)]);
-        assert!(!has_transfers(&wrong, &want));
+        assert!(!has_transfers(&wrong, &want(usdc, 700)));
     }
 
     #[test]
