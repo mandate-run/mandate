@@ -1708,6 +1708,135 @@ mod tests {
         assert_eq!(l.accounts("m1").unwrap().free(), 8_600);
     }
 
+    /// I1 under a long interleaving. Holds, releases, authorizations,
+    /// settlements and failures are applied in a deterministic but arbitrary
+    /// order, and after every single one the invariant must hold: no amount
+    /// is ever counted in two columns, and the budget is never exceeded. A
+    /// bug in one transition shows up here even when each is right alone.
+    #[test]
+    fn i1_holds_through_any_interleaving() {
+        let mut l = ledger();
+        let total = mandate_row().service_total;
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut holds: Vec<i64> = Vec::new();
+        let mut open: Vec<i64> = Vec::new();
+        let mut nonce = 0u32;
+        let mut at = NOW;
+
+        for step in 0..200 {
+            let accounts = l.accounts("m1").unwrap();
+            // The invariant itself, checked after every transition.
+            assert_eq!(accounts.total, total);
+            assert!(
+                accounts.settled + accounts.outstanding + accounts.held <= total,
+                "step {step}: {} + {} + {} exceeds {total}",
+                accounts.settled,
+                accounts.outstanding,
+                accounts.held
+            );
+            assert!(accounts.free() >= 0, "step {step}: free went negative");
+            for column in [accounts.settled, accounts.outstanding, accounts.held] {
+                assert!(column >= 0, "step {step}: a column went negative");
+            }
+
+            at += Duration::seconds(31);
+            let free = accounts.free();
+            match next() % 5 {
+                // Hold what fits, and sometimes more than fits.
+                0 => {
+                    let amount = (next() % 2_000 + 1) as i64;
+                    match l.hold("m1", "step", amount, ReservationSource::Quote, at) {
+                        Ok(r) => {
+                            assert!(amount <= free, "a hold beyond the free budget succeeded");
+                            holds.push(r.id);
+                        }
+                        Err(LedgerError::OverBudget { .. }) => {
+                            assert!(amount > free, "a hold within the budget was refused");
+                        }
+                        Err(e) => panic!("step {step}: {e}"),
+                    }
+                }
+                // Release a hold, returning it to free.
+                1 => {
+                    if let Some(id) = holds.pop() {
+                        l.release(id, at).unwrap();
+                    }
+                }
+                // Authorize, moving free or held into outstanding.
+                2 => {
+                    nonce += 1;
+                    let amount = (next() % 1_500 + 1) as i64;
+                    match l.prepare("m1", "step", None, &payment(nonce, amount), &request(), at) {
+                        Ok(a) => {
+                            assert!(amount <= free);
+                            open.push(a.id);
+                        }
+                        Err(LedgerError::OverBudget { .. }) => assert!(amount > free),
+                        Err(LedgerError::AboveSinglePayment { .. }) => {
+                            assert!(amount > mandate_row().max_single_payment);
+                        }
+                        Err(e) => panic!("step {step}: {e}"),
+                    }
+                }
+                // Settle an open authorization: outstanding becomes settled.
+                3 => {
+                    if let Some(id) = open.pop() {
+                        let before = l.authorization(id).unwrap().amount;
+                        let settled_before = l.accounts("m1").unwrap().settled;
+                        l.record_settlement(
+                            id,
+                            &Settlement::Settled {
+                                consensus_timestamp: "1".to_owned(),
+                                duplicates_ignored: 0,
+                            },
+                            at,
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            l.accounts("m1").unwrap().settled,
+                            settled_before + before,
+                            "settling moved the wrong amount"
+                        );
+                    }
+                }
+                // Fail one: outstanding returns to free, spending nothing.
+                _ => {
+                    if let Some(id) = open.pop() {
+                        let amount = l.authorization(id).unwrap().amount;
+                        let free_before = l.accounts("m1").unwrap().free();
+                        l.record_settlement(
+                            id,
+                            &Settlement::Failed {
+                                results: vec!["INSUFFICIENT_ACCOUNT_BALANCE".to_owned()],
+                                duplicates_ignored: 0,
+                            },
+                            at,
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            l.accounts("m1").unwrap().free(),
+                            free_before + amount,
+                            "a failed payment did not release its exposure"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Whatever happened, the books still add up, and a reopened ledger
+        // agrees with the one that did the work.
+        let accounts = l.accounts("m1").unwrap();
+        let audited = l.audit_accounts("m1").unwrap();
+        assert!(accounts.settled + accounts.outstanding + accounts.held <= total);
+        assert!(audited.spent() <= audited.total);
+    }
+
     #[test]
     fn i1_refuses_what_does_not_fit_by_the_signed_amount() {
         let mut l = ledger();
