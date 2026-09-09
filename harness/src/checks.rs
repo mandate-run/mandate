@@ -236,6 +236,7 @@ mod tests {
         Check {
             name: "recovery".to_owned(),
             run: "x".to_owned(),
+            recovers: false,
             expect: expect
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.clone()))

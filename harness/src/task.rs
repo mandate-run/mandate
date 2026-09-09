@@ -88,6 +88,11 @@ pub struct Check {
     /// Exit codes that are not a failure. Default: 0 only.
     #[serde(default)]
     pub allow_exit: Vec<u8>,
+    /// This check recovers exposure rather than adding to it, so it may run
+    /// while authorizations are outstanding. Everything else is stopped:
+    /// nothing new is bought while money is in the air.
+    #[serde(default)]
+    pub recovers: bool,
     #[serde(default = "default_timeout")]
     pub timeout_s: u64,
 }

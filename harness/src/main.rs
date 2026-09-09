@@ -67,15 +67,29 @@ async fn main() -> ExitCode {
     }
 }
 
+/// An infrastructure error before a task could run: still structured when
+/// `--json`, so a caller always gets a document rather than bare text.
+fn fail_early(problem: &str, json: bool) -> ExitCode {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "outcome": Outcome::InfrastructureError.as_str(),
+                "problem": problem,
+            })
+        );
+    } else {
+        eprintln!("proctor: INFRASTRUCTURE_ERROR: {problem}");
+    }
+    ExitCode::from(Outcome::InfrastructureError.exit_code())
+}
+
 /// One attempt: setup, ready, every check, teardown, report. Teardown always
 /// runs, so a failing check never leaves a fixture behind.
 async fn check(path: &Path, dir: Option<&Path>, json: bool) -> ExitCode {
     let task = match Task::load(path) {
         Ok(t) => t,
-        Err(e) => {
-            eprintln!("proctor: {e}");
-            return ExitCode::from(Outcome::InfrastructureError.exit_code());
-        }
+        Err(e) => return fail_early(&format!("{e}"), json),
     };
     let dir = dir
         .map(Path::to_path_buf)
@@ -96,8 +110,7 @@ async fn check(path: &Path, dir: Option<&Path>, json: bool) -> ExitCode {
     // and must never cause a rewrite of working payment code.
     for url in &task.requires.reachable {
         if let Err(e) = hedera::reachable(url, Duration::from_secs(10)).await {
-            eprintln!("proctor: INFRASTRUCTURE_ERROR: {e}");
-            return ExitCode::from(Outcome::InfrastructureError.exit_code());
+            return fail_early(&format!("{url} is unreachable: {e}"), json);
         }
     }
 
@@ -142,9 +155,18 @@ async fn check(path: &Path, dir: Option<&Path>, json: bool) -> ExitCode {
                     break;
                 }
             };
-            // Measure after the check, so the journal and ledger show what it did.
-            let observed = observe::gather(&task.evidence, &dir);
+            // Measure after the check, so the journal and ledger show what it
+            // did. Evidence Proctor cannot read in full stops the run: a
+            // contract must never be judged against partial evidence.
+            let observed = match observe::gather(&task.evidence, &dir) {
+                Ok(m) => m,
+                Err(e) => {
+                    infrastructure = Some(format!("evidence: {e}"));
+                    break;
+                }
+            };
             let result = checks::judge(c, &out, &observed);
+            let stop = !result.findings.is_empty() && c.name == "build";
             if !json {
                 println!("{} ({} ms)", result.outcome.as_str(), result.ms);
                 for f in &result.findings {
@@ -154,6 +176,34 @@ async fn check(path: &Path, dir: Option<&Path>, json: bool) -> ExitCode {
                 }
             }
             results.push(result);
+            // A build that fails makes every later check meaningless: it
+            // would test whatever binary happened to be lying around.
+            if stop {
+                if !json {
+                    println!("  stopping: the remaining checks would test a stale build");
+                }
+                break;
+            }
+            // Exposure stops the run before anything else is bought. A check
+            // that recovers exposure is the exception, and says so.
+            let held = hedera::exposure(&observed);
+            if !held.is_empty() {
+                let next_recovers = task
+                    .checks
+                    .iter()
+                    .skip_while(|x| x.name != c.name)
+                    .nth(1)
+                    .is_some_and(|x| x.recovers);
+                if !next_recovers {
+                    if !json {
+                        println!(
+                            "  stopping: {} authorization(s) are exposure; nothing more is bought",
+                            held.iter().map(|(_, n)| n).sum::<i64>()
+                        );
+                    }
+                    break;
+                }
+            }
         }
     }
 
@@ -161,7 +211,13 @@ async fn check(path: &Path, dir: Option<&Path>, json: bool) -> ExitCode {
         let _ = hooks::run(teardown, &dir, &env, hook_timeout).await;
     }
 
-    let observed = observe::gather(&task.evidence, &dir);
+    let observed = match observe::gather(&task.evidence, &dir) {
+        Ok(m) => m,
+        Err(e) => {
+            infrastructure.get_or_insert(format!("evidence: {e}"));
+            checks::Measurements::new()
+        }
+    };
     // Exposure the ledger still holds outranks whatever the checks decided.
     hedera::reclassify(&mut results, &observed);
     let mut attempt = Attempt::new(&task, 1, results, observed);
@@ -171,9 +227,22 @@ async fn check(path: &Path, dir: Option<&Path>, json: bool) -> ExitCode {
             println!("  INFRASTRUCTURE_ERROR: {problem}");
         }
     }
-    let outcome = attempt.outcome;
-    let report = Report::new(&task, started).finish(vec![attempt]);
+    let mut outcome = attempt.outcome;
+    let mut report = Report::new(&task, started).finish(vec![attempt]);
     let written = report.write(&dir);
+    // A run whose evidence was not saved cannot be certified: the report is
+    // the record a reviewer reads, so failing to write it is infrastructure.
+    if let Err(e) = &written {
+        let problem = format!("the report could not be written: {e}");
+        eprintln!("proctor: INFRASTRUCTURE_ERROR: {problem}");
+        if outcome < Outcome::PaymentUnresolved {
+            outcome = Outcome::InfrastructureError;
+            report.outcome = outcome;
+            if let Some(a) = report.attempts.first_mut() {
+                a.outcome = outcome;
+            }
+        }
+    }
     if json {
         println!(
             "{}",
