@@ -1,0 +1,121 @@
+#!/bin/sh
+# One command from a clean clone to a runnable demo. Creates the two env
+# files, installs the seller dependencies, builds, creates a receipts topic
+# on Hedera testnet, and rewrites the example mandates to point at the topic
+# and the seller account this machine actually has.
+#
+#   harness/scripts/setup
+#
+# Everything it needs is in crates/mandate/.env: a funded testnet account and
+# its key. Nothing else is required for the HBAR demos, which serve canned
+# Graph facts and a template explanation.
+set -eu
+root=$(cd "$(dirname "$0")/.." && cd .. && pwd)
+cd "$root"
+
+say() { printf '\n== %s\n' "$1"; }
+
+say "checking the toolchain"
+for tool in cargo pnpm curl python3; do
+  command -v "$tool" >/dev/null || { echo "missing $tool" >&2; exit 1; }
+done
+command -v protoc >/dev/null || echo "note: protoc is needed to build; install it if the build fails" >&2
+
+say "env files"
+[ -f crates/mandate/.env ] || { cp crates/mandate/.env.example crates/mandate/.env; chmod 600 crates/mandate/.env; }
+[ -f sellers/.env ] || cp sellers/.env.example sellers/.env
+if ! grep -q '^MANDATE_ACCOUNT_ID=0' crates/mandate/.env; then
+  cat >&2 <<'MSG'
+
+crates/mandate/.env needs a funded Hedera testnet account before this can go on:
+
+  MANDATE_ACCOUNT_ID=0.0.xxxxxxx
+  MANDATE_PRIVATE_KEY=302e0201...
+
+Create one at https://portal.hedera.com, then run this script again. The key
+is read by the buyer process only and is never sent anywhere but Hedera.
+MSG
+  exit 1
+fi
+
+say "seller dependencies"
+(cd sellers && pnpm install --silent)
+
+say "building"
+cargo build --workspace --quiet
+
+say "seller account"
+# The sellers must be paid to a different account than the buyer: a transfer
+# to yourself is one net movement, not a debit and a credit, and the runtime
+# refuses to bind such a payment. Any funded testnet account will do; only
+# its id is needed, never its key.
+if ! grep -q '^SELLER_PAY_TO=0' sellers/.env; then
+  cat >&2 <<'MSG'
+
+sellers/.env needs SELLER_PAY_TO, a second Hedera testnet account:
+
+  SELLER_PAY_TO=0.0.xxxxxxx
+
+It only receives, so its key is never needed. Create one at
+https://portal.hedera.com and run this script again. It must differ from
+MANDATE_ACCOUNT_ID, because a payment to yourself is not a payment.
+MSG
+  exit 1
+fi
+buyer=$(grep '^MANDATE_ACCOUNT_ID=' crates/mandate/.env | cut -d= -f2)
+seller=$(grep '^SELLER_PAY_TO=' sellers/.env | cut -d= -f2)
+if [ "$buyer" = "$seller" ]; then
+  echo "SELLER_PAY_TO must differ from MANDATE_ACCOUNT_ID: a payment to yourself is not a payment" >&2
+  exit 1
+fi
+echo "  buyer $buyer pays seller $seller"
+
+say "receipts topic"
+topic=$(grep '^HCS_TOPIC_ID=' crates/mandate/.env | cut -d= -f2)
+if [ -z "$topic" ]; then
+  line=$(cargo run -q -p mandate -- topic create | grep '^HCS_TOPIC_ID=')
+  topic=${line#HCS_TOPIC_ID=}
+  python3 - "$topic" <<'PY'
+import sys, pathlib
+topic = sys.argv[1]
+p = pathlib.Path("crates/mandate/.env")
+p.write_text(p.read_text().replace("HCS_TOPIC_ID=", f"HCS_TOPIC_ID={topic}"))
+PY
+  echo "  created $topic"
+else
+  echo "  using $topic"
+fi
+
+say "starting the sellers"
+harness/scripts/sellers down 2>/dev/null || true
+PROCTOR_FIXTURE=mixed PROCTOR_ASSET=HBAR harness/scripts/sellers up
+for _ in $(seq 40); do
+  harness/scripts/sellers ready 2>/dev/null && break
+  sleep 0.5
+done
+harness/scripts/sellers ready || { echo "the sellers did not start; see .proctor/run-4021/sellers.log" >&2; exit 1; }
+
+say "pinning the manifest and the topic into the examples"
+curl -sf http://127.0.0.1:4021/manifest.json > examples/manifest.hbar.json
+python3 - "$topic" <<'PY'
+import hashlib, pathlib, re, sys
+topic = sys.argv[1]
+h = hashlib.sha256(pathlib.Path("examples/manifest.hbar.json").read_bytes()).hexdigest()
+for f in pathlib.Path("examples").glob("*.hbar.toml"):
+    s = f.read_text()
+    s = re.sub(r'(manifest\.hbar\.json", hash = ")[0-9a-f]{64}', r"\g<1>" + h, s)
+    s = re.sub(r'receipts_topic = "[0-9.]+"', f'receipts_topic = "{topic}"', s)
+    f.write_text(s)
+print(f"  manifest {h[:16]} topic {topic}")
+PY
+
+cat <<'MSG'
+
+== ready
+
+  cargo run -p mandate -- run examples/five-pools.hbar.toml --id demo-$(date +%s)
+  cargo run -p proctor  -- check harness/tasks/resume.toml --dir .
+
+The sellers are running on port 4021 with canned Graph facts. Stop them with
+harness/scripts/sellers down.
+MSG
