@@ -70,32 +70,93 @@ pub async fn run(
     for (k, v) in extra {
         cmd.env(k, v);
     }
-    let child = cmd.spawn().map_err(|e| HookError::Spawn {
+    // The child leads its own process group, so a timeout can end everything
+    // it started, not just the shell. A payment loop that outlived its check
+    // could otherwise keep submitting after Proctor reported failure.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().map_err(|e| HookError::Spawn {
         command: command.to_owned(),
         problem: e.to_string(),
     })?;
-    let finished = tokio::time::timeout(timeout, child.wait_with_output()).await;
-    match finished {
-        Ok(Ok(out)) => Ok(Output {
-            code: out.status.code(),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    let group = child.id().map(|pid| pid as i32);
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let reader = async move {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let a = async {
+            if let Some(mut s) = stdout {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut out).await;
+            }
+            out
+        };
+        let b = async {
+            if let Some(mut s) = stderr {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut err).await;
+            }
+            err
+        };
+        tokio::join!(a, b)
+    };
+    let wait = async {
+        let status = child.wait().await;
+        let (out, err) = reader.await;
+        (status, out, err)
+    };
+    match tokio::time::timeout(timeout, wait).await {
+        Ok((Ok(status), out, err)) => Ok(Output {
+            code: status.code(),
+            stdout: String::from_utf8_lossy(&out).into_owned(),
+            stderr: String::from_utf8_lossy(&err).into_owned(),
             ms: started.elapsed().as_millis(),
             timed_out: false,
         }),
-        Ok(Err(e)) => Err(HookError::Spawn {
+        Ok((Err(e), _, _)) => Err(HookError::Spawn {
             command: command.to_owned(),
             problem: e.to_string(),
         }),
-        // A timeout is never a pass, section "Outcomes".
-        Err(_) => Ok(Output {
-            code: None,
-            stdout: String::new(),
-            stderr: format!("timed out after {} s", timeout.as_secs()),
-            ms: started.elapsed().as_millis(),
-            timed_out: true,
-        }),
+        // A timeout is never a pass, and never leaves work running behind it.
+        Err(_) => {
+            let killed = kill_group(group).await;
+            Ok(Output {
+                code: None,
+                stdout: String::new(),
+                stderr: format!("timed out after {} s; {killed}", timeout.as_secs()),
+                ms: started.elapsed().as_millis(),
+                timed_out: true,
+            })
+        }
     }
+}
+
+/// Ends a timed-out command and everything it started: `SIGTERM` to the
+/// group, a moment to exit, then `SIGKILL`. Returns what happened, for the
+/// finding.
+async fn kill_group(group: Option<i32>) -> String {
+    let Some(pid) = group else {
+        return "the process had already exited".to_owned();
+    };
+    // Negative pid signals the group the child leads.
+    let signal = |sig: i32| unsafe { libc::kill(-pid, sig) };
+    if signal(libc::SIGTERM) == -1 {
+        return "the process group had already exited".to_owned();
+    }
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // ESRCH means nothing in the group is left.
+        if unsafe { libc::kill(-pid, 0) } == -1 {
+            return format!("process group {pid} terminated");
+        }
+    }
+    signal(libc::SIGKILL);
+    format!("process group {pid} killed")
 }
 
 /// Polls `command` until it succeeds or the timeout passes: the fixture is up.
@@ -152,6 +213,44 @@ mod tests {
         assert!(out.timed_out);
         assert!(!out.ok(), "a timeout never passes");
         assert!(out.stderr.contains("timed out"));
+    }
+
+    /// A timed-out command must leave nothing running. A payment loop that
+    /// outlived its check could keep submitting after Proctor reported
+    /// failure, so the whole process group goes, not just the shell.
+    #[tokio::test]
+    async fn a_timeout_leaves_nothing_running() {
+        let dir = std::env::temp_dir().join(format!("proctor-kill-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("still-running");
+        std::fs::remove_file(&marker).ok();
+        let none = BTreeMap::new();
+        // A grandchild that would write well after the timeout.
+        let out = run(
+            &format!("(sleep 1; touch {}) & wait", marker.display()),
+            &dir,
+            &none,
+            Duration::from_millis(200),
+        )
+        .await
+        .unwrap();
+        assert!(out.timed_out);
+        assert!(
+            out.stderr.contains("terminated") || out.stderr.contains("killed"),
+            "the finding says what happened: {}",
+            out.stderr
+        );
+        assert!(
+            !marker.exists(),
+            "nothing wrote at the moment Proctor returned"
+        );
+        // And nothing writes afterwards either.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            !marker.exists(),
+            "a descendant survived the timeout and kept working"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
