@@ -31,7 +31,9 @@ fn bad(field: &'static str, problem: impl Into<String>) -> MandateError {
     }
 }
 
-/// Decimals of the assets the runtime knows how to price.
+/// Decimals of the assets the runtime knows without being told. Any other
+/// HTS token is priced once the mandate states its decimals, since a budget
+/// in a token nobody can size is not a budget.
 pub fn asset_decimals(asset: &str) -> Option<u32> {
     match asset {
         HBAR => Some(HBAR_DECIMALS),
@@ -39,6 +41,28 @@ pub fn asset_decimals(asset: &str) -> Option<u32> {
         _ => None,
     }
 }
+
+/// The decimals to price `asset` in: what the mandate declares, else what the
+/// runtime knows. A declaration that contradicts a known asset is refused
+/// rather than silently believed, so a mandate cannot make HBAR cheap by
+/// calling it two decimals.
+pub fn decimals_for(asset: &str, declared: Option<u32>) -> Result<u32, String> {
+    match (asset_decimals(asset), declared) {
+        (Some(known), None) => Ok(known),
+        (Some(known), Some(d)) if d == known => Ok(known),
+        (Some(known), Some(d)) => Err(format!(
+            "{asset} has {known} decimals, the mandate declares {d}"
+        )),
+        (None, Some(d)) if d <= MAX_DECIMALS => Ok(d),
+        (None, Some(d)) => Err(format!("{d} decimals is more than {MAX_DECIMALS}")),
+        (None, None) => Err(format!(
+            "{asset} has unknown decimals; state budget.service.decimals"
+        )),
+    }
+}
+
+/// An HTS token has at most this many decimals.
+pub const MAX_DECIMALS: u32 = 18;
 
 /// `"0.0100"` with 6 decimals is 10000. Rejects signs, exponents and more
 /// fractional digits than the asset has.
@@ -202,6 +226,9 @@ struct RawBudget {
 struct RawMoney {
     total: String,
     asset: String,
+    /// Decimals of an HTS token the runtime does not know. Optional, and
+    /// checked against the known value when there is one.
+    decimals: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -309,12 +336,8 @@ impl Mandate {
         let raw = toml::from_str::<File>(text)?.mandate;
 
         let service_asset = raw.budget.service.asset.trim().to_owned();
-        let service_decimals = asset_decimals(&service_asset).ok_or_else(|| {
-            bad(
-                "budget.service.asset",
-                format!("{service_asset} has unknown decimals"),
-            )
-        })?;
+        let service_decimals = decimals_for(&service_asset, raw.budget.service.decimals)
+            .map_err(|e| bad("budget.service.asset", e))?;
         let service_total = parse_amount(&raw.budget.service.total, service_decimals)
             .map_err(|e| bad("budget.service.total", e))?;
         if service_total <= 0 {
@@ -647,6 +670,46 @@ min_event_usd = "100000"
             Err(MandateError::Field { field, .. }) => field.to_owned(),
             other => panic!("expected a field error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn any_hts_token_prices_once_the_mandate_states_its_decimals() {
+        // What the runtime knows, it does not need told.
+        assert_eq!(decimals_for("0.0.0", None), Ok(8));
+        assert_eq!(decimals_for("0.0.429274", None), Ok(6));
+        assert_eq!(decimals_for("0.0.429274", Some(6)), Ok(6));
+        // A declaration that contradicts a known asset is refused, so a
+        // mandate cannot make HBAR cheap by calling it two decimals.
+        assert!(
+            decimals_for("0.0.0", Some(2))
+                .unwrap_err()
+                .contains("has 8 decimals, the mandate declares 2")
+        );
+        // Any other token prices once the mandate says how.
+        assert_eq!(decimals_for("0.0.10430010", Some(6)), Ok(6));
+        assert_eq!(decimals_for("0.0.10430010", Some(0)), Ok(0));
+        assert!(
+            decimals_for("0.0.10430010", None)
+                .unwrap_err()
+                .contains("state budget.service.decimals")
+        );
+        assert!(decimals_for("0.0.10430010", Some(19)).is_err());
+
+        // End to end through a mandate file.
+        let token = EXAMPLE.replace(
+            r#"service = { total = "0.0100", asset = "0.0.429274" }"#,
+            r#"service = { total = "1.500000", asset = "0.0.10430010", decimals = 6 }"#,
+        );
+        let m = Mandate::from_toml(&token, NOW).unwrap();
+        assert_eq!(m.budget.service_asset, "0.0.10430010");
+        assert_eq!(m.budget.service_decimals, 6);
+        assert_eq!(m.budget.service_total, 1_500_000);
+        // Without the declaration the mandate is refused at load, naming the field.
+        let silent = token.replace(r#", decimals = 6 }"#, " }");
+        assert_eq!(
+            field_of(Mandate::from_toml(&silent, NOW)),
+            "budget.service.asset"
+        );
     }
 
     #[test]
