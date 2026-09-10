@@ -584,7 +584,17 @@ pub async fn execute<Q: Quoting, P: Paying, U: Publishing>(
     // The window is the task. A first run fixes it from the clock, hour
     // aligned; a resume restores what the ledger holds, so evidence already
     // bought is never judged against a window that moved under it.
-    let stored = ledger.mandate(&mandate.id).ok().map(|m| m.window);
+    let stored = match ledger.mandate(&mandate.id) {
+        Ok(m) => Some(m.window),
+        Err(LedgerError::MandateNotFound(_)) => None,
+        Err(e) => return Err(e.into()),
+    };
+    if inputs.resume
+        && stored.is_some_and(|(from, to)| to <= from)
+        && !ledger.authorizations(&mandate.id)?.is_empty()
+    {
+        return Err(RunError::Other("legacy ledger has paid work without a pinned analysis window; reconcile payments before migrating its window from the stored requests".to_owned()));
+    }
     let window = match stored {
         Some((from, to)) if inputs.resume && to > from => Window { from, to },
         _ => {

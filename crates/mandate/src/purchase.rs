@@ -408,6 +408,9 @@ impl Payer<'_> {
         if let Some(r) = quote.refusal() {
             return Err(PayError::Refused(r));
         }
+        // A consensus-time custom fee would already have spent money by the
+        // time reconciliation detects it. Refuse it before creating a signature.
+        self.mirror.check_payment_asset(&quote.asset).await?;
         let nodes = self.mirror.node_account_ids(5).await?;
         self.sign_and_persist(ledger, mandate_id, step, reservation_id, quote, &nodes)
     }
@@ -416,7 +419,7 @@ impl Payer<'_> {
     /// the quote is still usable and the mandate deadline has not passed,
     /// signs, binds, and persists. I12 is enforced here with the same
     /// instant the transfer's `valid_start` is derived from.
-    pub fn sign_and_persist(
+    pub(crate) fn sign_and_persist(
         &self,
         ledger: &mut Ledger,
         mandate_id: &str,

@@ -44,6 +44,8 @@ pub enum Error {
     Proto(#[from] prost::DecodeError),
     #[error("receipt carries no topic id")]
     MissingTopicId,
+    #[error("token {asset} cannot be used for bounded payments: {reason}")]
+    UnsafeToken { asset: String, reason: String },
 }
 
 impl From<hedera::Error> for Error {
@@ -539,6 +541,65 @@ pub struct MirrorRecord {
     pub token_transfers: Vec<TokenEntry>,
 }
 
+/// Immutable, fee-free fungible tokens are the only HTS assets whose debit
+/// can be bounded by the signed transfer alone. Reject incomplete metadata.
+pub fn validate_payment_token(asset: &str, info: &serde_json::Value) -> Result<(), Error> {
+    let refuse = |reason: &str| Error::UnsafeToken {
+        asset: asset.to_owned(),
+        reason: reason.to_owned(),
+    };
+    if info.get("token_id").and_then(serde_json::Value::as_str) != Some(asset)
+        || info.get("type").and_then(serde_json::Value::as_str) != Some("FUNGIBLE_COMMON")
+    {
+        return Err(refuse(
+            "metadata does not identify the requested fungible token",
+        ));
+    }
+    if info.get("fee_schedule_key") != Some(&serde_json::Value::Null) {
+        return Err(refuse(
+            "fee schedule can change, or its immutability is unknown",
+        ));
+    }
+    let fees = info
+        .get("custom_fees")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| refuse("custom fee metadata is missing"))?;
+    for name in ["fixed_fees", "fractional_fees"] {
+        if !fees
+            .get(name)
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty)
+        {
+            return Err(refuse("custom fees are present or could not be verified"));
+        }
+    }
+    // The mirror node omits royalties for fungible tokens.
+    if let Some(royalties) = fees.get("royalty_fees")
+        && !royalties.as_array().is_some_and(Vec::is_empty)
+    {
+        return Err(refuse("unexpected royalty fees"));
+    }
+    Ok(())
+}
+
+impl MirrorNode {
+    pub async fn check_payment_asset(&self, asset: &str) -> Result<(), Error> {
+        let Asset::Token(token) = Asset::parse(asset)? else {
+            return Ok(());
+        };
+        let asset = token.to_string();
+        let url = format!("{}/api/v1/tokens/{asset}", self.base_url);
+        let response = self.client.get(&url).send().await?;
+        if !response.status().is_success() {
+            return Err(Error::Status {
+                status: response.status().as_u16(),
+                url,
+            });
+        }
+        validate_payment_token(&asset, &response.json().await?)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct HbarEntry {
     pub account: String,
@@ -633,6 +694,39 @@ impl TopicMessage {
 }
 
 impl MirrorNode {
+    /// Locate an HCS publication whose submit acknowledgment was lost.
+    pub async fn topic_message_at(
+        &self,
+        topic: &str,
+        timestamp: &str,
+    ) -> Result<Option<TopicMessage>, Error> {
+        #[derive(Deserialize)]
+        struct Messages {
+            messages: Vec<TopicMessage>,
+        }
+        let url = format!("{}/api/v1/topics/{topic}/messages", self.base_url);
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("timestamp", &format!("eq:{timestamp}"))
+            .append_pair("limit", "1")
+            .finish();
+        let response = self.client.get(format!("{url}?{query}")).send().await?;
+        if response.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(Error::Status {
+                status: response.status().as_u16(),
+                url,
+            });
+        }
+        Ok(response
+            .json::<Messages>()
+            .await?
+            .messages
+            .into_iter()
+            .find(|m| m.consensus_timestamp == timestamp))
+    }
+
     /// One topic message by sequence number; None until the mirror node has it.
     pub async fn topic_message(
         &self,
@@ -773,28 +867,31 @@ fn charges_beyond_the_payment(r: &MirrorRecord, from: &str, e: &Expected) -> boo
         Asset::Hbar => -e.amount,
         Asset::Token(_) => 0,
     };
-    let hbar_taken: i64 = r
+    let hbar_taken: i128 = r
         .transfers
         .iter()
         .filter(|t| t.account == from && t.amount < 0)
-        .map(|t| t.amount)
+        .map(|t| i128::from(t.amount))
         .sum();
-    if hbar_taken < permitted_hbar {
+    if hbar_taken < i128::from(permitted_hbar) {
         return true;
     }
     let permitted_token = match e.asset {
         Asset::Hbar => None,
         Asset::Token(token) => Some(token.to_string()),
     };
-    r.token_transfers.iter().any(|t| {
-        t.account == from
-            && t.amount < 0
-            && permitted_token.as_deref().is_none_or(|want| {
-                // A second debit in the paid token, or any debit in another,
-                // is a fee rather than the payment.
-                t.token_id != want || t.amount != -e.amount
-            })
-    })
+    let mut paid_token_debits = 0_i128;
+    for t in r
+        .token_transfers
+        .iter()
+        .filter(|t| t.account == from && t.amount < 0)
+    {
+        if permitted_token.as_deref() != Some(t.token_id.as_str()) {
+            return true;
+        }
+        paid_token_debits += i128::from(t.amount);
+    }
+    paid_token_debits < -i128::from(e.amount)
 }
 
 #[cfg(test)]
@@ -808,6 +905,63 @@ mod tests {
     const PAYER: &str = "0.0.10399984";
     const SELLER: &str = "0.0.10409989";
     const USDC: &str = "0.0.429274";
+
+    #[test]
+    fn payment_tokens_need_an_immutable_empty_fee_schedule() {
+        let safe = serde_json::json!({"token_id": USDC, "type": "FUNGIBLE_COMMON", "fee_schedule_key": null,
+            "custom_fees": {"fixed_fees": [], "fractional_fees": []}});
+        validate_payment_token(USDC, &safe).unwrap();
+        for (field, value) in [
+            ("token_id", serde_json::json!("0.0.9")),
+            ("type", serde_json::json!("NON_FUNGIBLE_UNIQUE")),
+            ("fee_schedule_key", serde_json::json!({"key": "mutable"})),
+            (
+                "custom_fees",
+                serde_json::json!({"fixed_fees": [{"amount": 1}], "fractional_fees": []}),
+            ),
+            (
+                "custom_fees",
+                serde_json::json!({"fixed_fees": [], "fractional_fees": [{"amount": 1}]}),
+            ),
+            ("custom_fees", serde_json::json!({"fixed_fees": []})),
+        ] {
+            let mut unsafe_info = safe.clone();
+            unsafe_info[field] = value;
+            assert!(
+                validate_payment_token(USDC, &unsafe_info).is_err(),
+                "{field}"
+            );
+        }
+        for field in ["fee_schedule_key", "custom_fees"] {
+            let mut incomplete = safe.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            assert!(validate_payment_token(USDC, &incomplete).is_err());
+        }
+    }
+
+    #[test]
+    fn repeated_debits_cannot_hide_a_fee_or_overflow() {
+        let expected = want(Asset::parse(USDC).unwrap(), 1000);
+        let duplicate = token(&[
+            (USDC, PAYER, -1000),
+            (USDC, PAYER, -1000),
+            (USDC, SELLER, 1000),
+        ]);
+        assert!(matches!(
+            settlement(&[duplicate], &expected),
+            Settlement::Anomaly { .. }
+        ));
+        let overflow = hbar(&[
+            (PAYER, -1000),
+            (SELLER, 1000),
+            (PAYER, i64::MIN),
+            (PAYER, i64::MIN),
+        ]);
+        assert!(matches!(
+            settlement(&[overflow], &want(Asset::Hbar, 1000)),
+            Settlement::Anomaly { .. }
+        ));
+    }
 
     fn want(asset: Asset, amount: i64) -> Expected {
         Expected {
