@@ -120,10 +120,21 @@ for manifest, mandates, name in pins:
     for f in mandates:
         s = f.read_text()
         s = re.sub(rf'({re.escape(name)}", hash = ")[0-9a-f]{{64}}', r"\g<1>" + h, s)
-        s = re.sub(r'receipts_topic = "[0-9.]+"', f'receipts_topic = "{topic}"', s)
         f.write_text(s)
     print(f"  {manifest} {h[:16]}")
-print(f"  topic {topic}")
+
+# Every mandate that ships carries a topic, and only this buyer can write to
+# the one this clone just created. The manifest hash above is rewritten only
+# where the manifest was refetched, but a topic from another machine is wrong
+# in any mandate, whatever asset it is priced in.
+retopic = 0
+for f in [*pathlib.Path("examples").glob("*.toml"), *pathlib.Path("harness/fixtures").glob("*.toml")]:
+    s = f.read_text()
+    fixed = re.sub(r'receipts_topic = "[0-9.]+"', f'receipts_topic = "{topic}"', s)
+    if fixed != s:
+        f.write_text(fixed)
+        retopic += 1
+print(f"  topic {topic} in {retopic} mandates")
 PY
 
 cat <<'MSG'
