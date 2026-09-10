@@ -9,7 +9,7 @@ Up to 3 teams, $2,000 each. Video: five minutes or less.
 | Requirement, quoted | Satisfied by | Status |
 |---|---|---|
 | "Host a live x402-gated service on Hedera testnet or mainnet, settled through the Blocky402 facilitator." | Four seller endpoints on `hedera:testnet` settling through `api.testnet.blocky402.com`; every demo run pays them for real | done |
-| "Build a platform or agent that consumes that service and completes at least one real paid request end to end." | `mandate run` over five pools: three settlements, transaction ids in the transcript, receipts on HCS topic `0.0.10410389`; verified again from a clean clone with its own topic | done |
+| "Build a platform or agent that consumes that service and completes at least one real paid request end to end." | `mandate run` over five pools: three settlements, transaction ids in the transcript, receipts on an HCS topic the run creates; verified again from a clean clone with its own topic | done |
 | "Public GitHub repo with a README covering setup, architecture, and the payment flow." | README has Architecture, Payment flow, Setup and Proctor; `harness/scripts/setup` takes a clean clone to a settled run, tested from a fresh clone. Repo made public before submission | doing |
 | "Demo video of five minutes or less showing the paid request executing." | One video, 3 to 4 minutes, shared with The Graph; every scene it needs is reproducible today | todo |
 
@@ -19,7 +19,7 @@ Extra points pursued:
 |---|---|---|
 | "Pay-per-call inference, data, or compute metering rather than a flat per-request charge" | Tariffs priced per pool, per pool-window, and per input KB; the explanation is quoted at the brief's measured size, not a flat rate | done |
 | "Agent discovery via UCP, or a directory that makes your service findable by other agents" | Manifest of listings served at `/manifest.json`; every 402 carries the x402 `bazaar` discovery extension | done |
-| "HTS tokens or custom fee schedules in the settlement path" | The asset is a mandate field, so HBAR and any HTS token share one code path. Proven live in HTS token `0.0.10430010`, minted by `cargo run -p mandate --example mint_token`: three payments totalling 2800 units moved buyer to seller, fee-paid by the facilitator, transfers `0.0.7162784-1788916067-496072000`, `-1788916081-342304000`, `-1788916092-822056000`. Circle's USDC is the same path and waits only on their faucet | done |
+| "HTS tokens or custom fee schedules in the settlement path" | The asset is a mandate field, so HBAR and any HTS token share one code path. Proven live in HTS token `0.0.10430010`, minted by `cargo run -p mandate --example mint_token`: three payments totalling 2800 units moved buyer to seller, fee-paid by the facilitator, transfers `0.0.7162784-1788916067-496072000`, `-1788916081-342304000`, `-1788916092-822056000`. Circle's USDC needs no new code, only a funded account; their testnet faucet never delivered, so the minted token is what is proven | done |
 | "Verifiable payment audit trails on HCS" | One receipt per decision on an HCS topic, each keyed to its transition so a resumed run never publishes a duplicate; receipt 0 carries the mandate and manifest hashes | done |
 
 Not pursued: A2A or ACP negotiation, ERC-8004 or HCS-14 identity, Scheduled Transactions.
