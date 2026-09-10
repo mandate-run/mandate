@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const MAX_BYTES: usize = 1024;
-pub const SPEC_VERSION: &str = "0.7";
+pub const SPEC_VERSION: &str = "0.8";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReceiptError {
