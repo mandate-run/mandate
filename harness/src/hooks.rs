@@ -53,13 +53,30 @@ pub async fn run(
     extra: &BTreeMap<String, String>,
     timeout: Duration,
 ) -> Result<Output, HookError> {
+    run_with_stdin(command, dir, extra, timeout, None).await
+}
+
+/// `run`, with `input` written to the child's stdin and the pipe closed. An
+/// agent adapter reads its task and findings that way, so nothing sensitive
+/// has to pass through a command line other processes can read.
+pub async fn run_with_stdin(
+    command: &str,
+    dir: &std::path::Path,
+    extra: &BTreeMap<String, String>,
+    timeout: Duration,
+    input: Option<&str>,
+) -> Result<Output, HookError> {
     let started = Instant::now();
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg("-c")
         .arg(command)
         .current_dir(dir)
         .env_clear()
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for key in ALLOWED {
@@ -88,6 +105,16 @@ pub async fn run(
     let group = child.id().map(|pid| pid as i32);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    // Feeding stdin concurrently with draining stdout: an adapter that
+    // reports as it reads would otherwise fill a pipe and wait forever.
+    let mut sink = child.stdin.take();
+    let payload = input.map(str::to_owned);
+    let writer = async move {
+        if let (Some(mut s), Some(text)) = (sink.take(), payload) {
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut s, text.as_bytes()).await;
+            // Dropping the handle closes the pipe, so the child sees EOF.
+        }
+    };
     let reader = async move {
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -108,7 +135,7 @@ pub async fn run(
     let wait = async {
         // Drain both pipes while the child runs. Waiting first deadlocks as
         // soon as a compiler or JSON report fills either pipe.
-        let (status, (out, err)) = tokio::join!(child.wait(), reader);
+        let (status, (out, err), ()) = tokio::join!(child.wait(), reader, writer);
         (status, out, err)
     };
     match tokio::time::timeout(timeout, wait).await {
