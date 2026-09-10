@@ -1,0 +1,43 @@
+#!/bin/sh
+# Runs one demo scenario, start to finish, with the fixture state it needs.
+#
+#   harness/scripts/demo 1     normal completion
+#   harness/scripts/demo 2     the investigate seller quotes below its ceiling
+#   harness/scripts/demo 3     refusal before the first cent
+#   harness/scripts/demo 4     the events seller quotes above its ceiling
+#   harness/scripts/demo 5     the response is lost after settlement
+#
+# Each scenario needs its own seller fault, so the sellers are restarted
+# rather than left as the previous scenario left them. Recording a video
+# means typing one command per scene instead of four, which is the point.
+set -eu
+root=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$root"
+
+scenario=${1:?usage: demo <1|2|3|4|5>}
+case "$scenario" in
+  1) fault=""                        mandate="examples/five-pools.hbar.toml" ;;
+  2) fault="quote-drift"             mandate="examples/five-pools.hbar.toml" ;;
+  3) fault=""                        mandate="examples/five-pools-short.hbar.toml" ;;
+  4) fault="quote-above-ceiling:events" mandate="examples/five-pools.hbar.toml" ;;
+  5) fault="drop-response-after-settle" mandate="examples/five-pools.hbar.toml" ;;
+  *) echo "unknown scenario $scenario; see docs/demo.md" >&2; exit 2 ;;
+esac
+
+echo "== scenario $scenario${fault:+, seller fault $fault}"
+harness/scripts/sellers down >/dev/null 2>&1 || true
+# shellcheck disable=SC2086
+harness/scripts/sellers up $fault
+i=0
+while [ "$i" -lt 40 ]; do
+  harness/scripts/sellers ready 2>/dev/null && break
+  i=$((i + 1))
+  sleep 0.5
+done
+harness/scripts/sellers ready || {
+  echo "the sellers did not start; see .proctor/run-${PROCTOR_PORT:-4021}/sellers.log" >&2
+  exit 1
+}
+
+echo
+cargo run -q -p mandate -- run "$mandate" --id "demo$scenario-$(date -u +%Y%m%dT%H%M%S)"

@@ -112,6 +112,9 @@ the runtime mints instead. Like any mandate written elsewhere, they pin a
 manifest hash and a receipts topic from the machine that wrote them, so a
 clone regenerates both before running one.
 
+Each scene of the demo runs as one command, `harness/scripts/demo <n>`, which
+restarts the sellers with the fault that scene needs. `docs/demo.md` lists them.
+
 Exit codes: 0 delivered, 3 refused, 4 delivered with findings, 5 withheld
 because `anchor_before_delivery` is set and a receipt is not yet on HCS, 6 a
 payment neither settled nor failed, 2 a mandate or manifest that does not load.

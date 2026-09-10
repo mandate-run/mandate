@@ -1,19 +1,25 @@
 # Demo
 
-One video, 3 to 4 minutes, one terminal. Arithmetic is in [mandate.md](mandate.md) section 6; rules are in [spec.md](spec.md). Tariffs are the sellers' fixture values; once the fixture exists this table is regenerated from it. Seller controls for scenarios 2, 4 and 5 are the fault switches in `sellers/src/faults.ts`, passed as an argument to `harness/scripts/sellers up`. This file fixes what the buyer must print. Provenance reads `not_run` throughout: the canned Graph facts carry synthetic transaction hashes, so every example sets `provenance_samples = 0` rather than sample hashes that cannot exist on Ethereum. A run against the live subgraph with `constraints.eth_rpc` set is what samples them.
+One video, 3 to 4 minutes, one terminal. Arithmetic is in [mandate.md](mandate.md) section 6; rules are in [spec.md](spec.md). Tariffs are the sellers' fixture values; once the fixture exists this table is regenerated from it. Seller controls for scenarios 2, 4 and 5 are the fault switches in `sellers/src/faults.ts`, passed as an argument to `harness/scripts/sellers up`. This file fixes what the buyer must show, not the exact characters it prints. Amounts are written here to four places for reading; the runtime prints an asset's full precision, so HBAR shows `0.00100000` where this table says `0.0010`. Lines also carry more than the fragments quoted here, such as the unit count and the steps of a plan. Provenance reads `not_run` throughout: the canned Graph facts carry synthetic transaction hashes, so every example sets `provenance_samples = 0` rather than sample hashes that cannot exist on Ethereum. A run against the live subgraph with `constraints.eth_rpc` set is what samples them.
 
 Common setup: five Uniswap v3 pools on Ethereum mainnet, 24 h window, coverage all material pools, transaction-level citations required, `degrade` false, service budget 0.0100 USDC, per-payment cap 0.0090, USDC on `hedera:testnet`, four sellers up with published tariffs. At start only screen and investigate can be quoted live; events and explain are tariff estimates until their inputs exist.
 
 | # | Scenario | Change from baseline | Must appear on screen |
 |---|---|---|---|
-| 1 | Normal completion | none | `screen 0.0010 live, within ceiling`; `investigate 0.0080 live, within ceiling`; `events 0.0015 per pool ceiling`; `explain 0.0008 ceiling`; `plan staged expected 0.0033 bound 0.0093 chosen`; `plan hybrid expected 0.0042 bound 0.0090`; `plan bundle 0.0080`; `reserve explain 0.0008 held`; screen `pay_` id and `0.0.7162784@` tx id; `payment settled: record matches`; `outcomes after screen: 1 pending, 4 non_material`; `events 0.0023 vs bundle 0.0032; buying events`; `outcomes: 1 supported, 4 non_material; claims 4`; `brief 5 KB; explain quoted 0.0005; reserve released 0.0003`; `validation passed: coverage 5/5, calculations, citations, provenance not_run`; `unspent 0.0070`; HCS topic id |
+| 1 | Normal completion | none | `screen 0.0010 live, within ceiling`; `investigate 0.0080 live, within ceiling`; `events 0.0015 per pool ceiling`; `explain 0.0008 ceiling`; `plan staged expected 0.0033 bound 0.0093 chosen`; `plan hybrid expected 0.0042 bound 0.0090`; `plan bundle 0.0080`; `reserve explain 0.0008 held`; screen `pay_` id and `0.0.7162784@` tx id; `payment settled: record matches`; `outcomes after screen: 1 pending, 4 non_material`; `events 0.0023 vs bundle 0.0032; buying events`; `outcomes: 4 non_material, 1 supported; claims 16`; `brief 5 KB; explain quoted 0.0005; reserve released 0.0003`; `validation passed: coverage 5/5, calculations, citations, provenance not_run`; `unspent 0.0070`; HCS topic id |
 | 2 | Economic adaptation | investigate seller quotes 0.0030 live, below its 0.0080 ceiling | `investigate 0.0030 live, within ceiling`; `plan bundle 0.0030 chosen`; one tx id; same report shape |
 | 3 | Safe incompletion | service budget 0.0030 | `REFUSED REQUIREMENT_UNMEETABLE bound 0.0080 expected 0.0033 available 0.0030`; `settled 0`; `audit spent` nonzero; no tx id |
-| 3b | Degraded run, optional per decision 0002 | service budget 0.0030, `degrade` true | screen bought; `report incomplete: screening only`; `unspent 0.0020` |
 | 4 | Integrity refusal | events seller quotes 0.0020 above its 0.0015 ceiling | after screen: `REFUSED events OFF_TARIFF ceiling 0.0015 quoted 0.0020`; `plan hybrid 0.0032 chosen`; `unspent 0.0058` |
 | 5 | Lost response | events seller settles, then drops the response | `events sent, no response; submissions 3`; `payment settled: record matches`; `delivery none; retrieval 1 with original payment`; `delivery received`; one tx id; `unspent 0.0070` |
 | 6 | Absent record | events seller never settles; no record appears | `events unresolved; 0.0015 reserved`; `run: mandate reconcile <id>`; report lists the unresolved authorization |
-| 7 | Duplicate record | buyer resends once; mirror shows a DUPLICATE_TRANSACTION record and a SUCCESS record | `records 2, duplicates ignored 1`; `payment settled: record matches`; one tx id |
+
+Each scenario runs as one command, which restarts the sellers with the fault
+it needs and then runs its mandate:
+
+```sh
+harness/scripts/demo 1     # normal completion
+harness/scripts/demo 4     # the events seller quotes above its ceiling
+```
 
 Main cut:
 
