@@ -106,8 +106,9 @@ pub async fn run(
         tokio::join!(a, b)
     };
     let wait = async {
-        let status = child.wait().await;
-        let (out, err) = reader.await;
+        // Drain both pipes while the child runs. Waiting first deadlocks as
+        // soon as a compiler or JSON report fills either pipe.
+        let (status, (out, err)) = tokio::join!(child.wait(), reader);
         (status, out, err)
     };
     match tokio::time::timeout(timeout, wait).await {
@@ -125,6 +126,8 @@ pub async fn run(
         // A timeout is never a pass, and never leaves work running behind it.
         Err(_) => {
             let killed = kill_group(group).await;
+            // Reap the direct child before returning to evidence collection.
+            let _ = child.wait().await;
             Ok(Output {
                 code: None,
                 stdout: String::new(),
@@ -167,10 +170,17 @@ pub async fn wait_ready(
     timeout: Duration,
 ) -> Result<Output, HookError> {
     let deadline = Instant::now() + timeout;
-    let mut last = run(command, dir, extra, Duration::from_secs(10)).await?;
+    let mut last = run(command, dir, extra, timeout.min(Duration::from_secs(10))).await?;
     while !last.ok() && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        last = run(command, dir, extra, Duration::from_secs(10)).await?;
+        tokio::time::sleep(
+            Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now())),
+        )
+        .await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        last = run(command, dir, extra, remaining.min(Duration::from_secs(10))).await?;
     }
     Ok(last)
 }
@@ -202,6 +212,21 @@ mod tests {
             .unwrap();
         assert_eq!(failed.code, Some(3));
         assert!(!failed.ok());
+    }
+
+    #[tokio::test]
+    async fn drains_large_stdout_and_stderr_before_waiting() {
+        let out = run(
+            "head -c 1048576 /dev/zero; head -c 1048576 /dev/zero >&2",
+            &here(),
+            &BTreeMap::new(),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert!(out.ok(), "{}", out.stderr);
+        assert_eq!(out.stdout.len(), 1048576);
+        assert_eq!(out.stderr.len(), 1048576);
     }
 
     #[tokio::test]

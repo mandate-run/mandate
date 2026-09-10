@@ -18,19 +18,7 @@ mkdir -p "$work"
 # The buyer under test is built here, so a task never runs yesterday's binary.
 cargo build -q -p mandate --manifest-path "$root/Cargo.toml" >&2
 
-if [ -f "$ledger" ]; then
-  outstanding=$(sqlite3 "$ledger" \
-    "SELECT COUNT(*) FROM authorizations WHERE payment_state IN ('prepared','sent','unresolved')" \
-    2>/dev/null || echo 0)
-  if [ "$outstanding" != "0" ]; then
-    echo "resuming $ledger: $outstanding authorization(s) still exposure" >&2
-    exec "$root/target/debug/mandate" resume "$root/harness/fixtures/$name.toml" \
-      --ledger "$ledger" --id "proctor-$name" --json
-  fi
-  mkdir -p "$work/archive"
-  mv "$ledger" "$work/archive/$name-$(date -u +%Y%m%dT%H%M%S).sqlite"
-  rm -f "$ledger-wal" "$ledger-shm"
-fi
+action=$(python3 "$root/harness/scripts/ledger-action.py" "$ledger")
 
-exec "$root/target/debug/mandate" run "$root/harness/fixtures/$name.toml" \
+exec "$root/target/debug/mandate" "$action" "$root/harness/fixtures/$name.toml" \
   --ledger "$ledger" --id "proctor-$name" --json

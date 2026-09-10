@@ -17,6 +17,8 @@ dist/
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
+*.sqlite.lock
+__pycache__/
 
 # os and editors
 .DS_Store

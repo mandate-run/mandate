@@ -9,39 +9,16 @@
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 port=${PROCTOR_PORT:-4021}
-run="$root/.proctor/run-$port"
-pidfile="$run/sellers.pid"
 
 case "${1:-}" in
   up)
-    fault=${2:-}
-    "$0" down
-    mkdir -p "$run/journal"
-    rm -f "$run/journal/sellers-journal.jsonl"
-    cd "$root/sellers"
-    GRAPH_FIXTURE=${PROCTOR_FIXTURE:-mixed} \
-    SELLER_ASSET=${PROCTOR_ASSET:-HBAR} \
-    JOURNAL_DIR="$run/journal" \
-    FAULT="$fault" \
-    PORT="$port" \
-      nohup pnpm -s sellers > "$run/sellers.log" 2>&1 &
-    # The process group, so the whole node tree stops with one signal.
-    echo $! > "$pidfile"
+    exec python3 "$root/harness/scripts/fixture-process.py" up "${2:-}"
     ;;
   ready)
     curl -sf "http://127.0.0.1:$port/manifest.json" > /dev/null
     ;;
   down)
-    if [ -f "$pidfile" ]; then
-      pid=$(cat "$pidfile")
-      # The recorded process and its children, never a pattern match.
-      pkill -P "$pid" 2>/dev/null || true
-      kill "$pid" 2>/dev/null || true
-      sleep 1
-      pkill -9 -P "$pid" 2>/dev/null || true
-      kill -9 "$pid" 2>/dev/null || true
-      rm -f "$pidfile"
-    fi
+    exec python3 "$root/harness/scripts/fixture-process.py" down
     ;;
   *)
     echo "usage: sellers up [fault] | ready | down" >&2

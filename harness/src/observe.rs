@@ -139,86 +139,112 @@ pub fn from_journal(entries: &[Entry]) -> Measurements {
 }
 
 /// What the buyer's own ledger holds, read as a file rather than asked for.
-/// A missing ledger yields nothing, so a task that never pays needs none.
-pub fn from_ledger(path: &Path, mandate_id: &str) -> Measurements {
+/// A configured but unreadable ledger cannot prove that no money is at risk.
+pub fn from_ledger(path: &Path, mandate_id: &str) -> Result<Measurements, EvidenceError> {
     let mut m = Measurements::new();
-    let Ok(conn) = rusqlite::Connection::open_with_flags(
+    let problem = |e: rusqlite::Error| EvidenceError::Unreadable {
+        path: path.display().to_string(),
+        problem: e.to_string(),
+    };
+    let conn = rusqlite::Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    ) else {
-        return m;
-    };
-    let count = |sql: &str| -> Option<i64> {
+    )
+    .map_err(problem)?;
+    let count = |sql: &str| -> Result<i64, EvidenceError> {
         conn.query_row(sql, rusqlite::params![mandate_id], |r| r.get(0))
-            .ok()
+            .map_err(problem)
     };
-    if let Some(n) = count("SELECT COUNT(*) FROM authorizations WHERE mandate_id = ?1") {
+    {
+        let n = count("SELECT COUNT(*) FROM authorizations WHERE mandate_id = ?1")?;
         m.insert("ledger_authorizations".into(), n.into());
     }
-    if let Some(n) =
-        count("SELECT COUNT(DISTINCT payment_id) FROM authorizations WHERE mandate_id = ?1")
     {
+        let n =
+            count("SELECT COUNT(DISTINCT payment_id) FROM authorizations WHERE mandate_id = ?1")?;
         m.insert("ledger_payment_ids".into(), n.into());
     }
-    if let Some(n) =
-        count("SELECT COUNT(DISTINCT signature) FROM authorizations WHERE mandate_id = ?1")
     {
+        let n =
+            count("SELECT COUNT(DISTINCT signature) FROM authorizations WHERE mandate_id = ?1")?;
         m.insert("ledger_signed_payloads".into(), n.into());
     }
-    if let Some(n) =
-        count("SELECT COALESCE(SUM(submissions), 0) FROM authorizations WHERE mandate_id = ?1")
     {
+        let n = count(
+            "SELECT COALESCE(SUM(submissions), 0) FROM authorizations WHERE mandate_id = ?1",
+        )?;
         m.insert("ledger_submissions".into(), n.into());
     }
-    if let Some(n) =
-        count("SELECT COALESCE(SUM(retrievals), 0) FROM authorizations WHERE mandate_id = ?1")
     {
+        let n =
+            count("SELECT COALESCE(SUM(retrievals), 0) FROM authorizations WHERE mandate_id = ?1")?;
         m.insert("ledger_retrievals".into(), n.into());
     }
     for state in ["settled", "failed", "unresolved", "sent", "prepared"] {
-        if let Ok(n) = conn.query_row(
-            "SELECT COUNT(*) FROM authorizations WHERE mandate_id = ?1 AND payment_state = ?2",
-            rusqlite::params![mandate_id, state],
-            |r| r.get::<_, i64>(0),
-        ) {
-            m.insert(format!("ledger_{state}"), n.into());
-        }
+        let n = conn
+            .query_row(
+                "SELECT COUNT(*) FROM authorizations WHERE mandate_id = ?1 AND payment_state = ?2",
+                rusqlite::params![mandate_id, state],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(problem)?;
+        m.insert(format!("ledger_{state}"), n.into());
     }
-    if let Some(n) = count("SELECT COUNT(*) FROM receipts WHERE mandate_id = ?1") {
+    {
+        let n = count("SELECT COUNT(*) FROM receipts WHERE mandate_id = ?1")?;
         m.insert("ledger_receipts".into(), n.into());
     }
-    if let Some(n) =
-        count("SELECT COUNT(*) FROM receipts WHERE mandate_id = ?1 AND hcs_sequence IS NOT NULL")
     {
+        let n = count(
+            "SELECT COUNT(*) FROM receipts WHERE mandate_id = ?1 AND hcs_sequence IS NOT NULL",
+        )?;
         m.insert("ledger_receipts_published".into(), n.into());
     }
-    if let Some(n) = count(
-        "SELECT COALESCE(SUM(amount), 0) FROM reservations WHERE mandate_id = ?1 AND state = 'held'",
-    ) {
+    {
+        let n = count(
+            "SELECT COALESCE(SUM(amount), 0) FROM reservations WHERE mandate_id = ?1 AND state = 'held'",
+        )?;
         m.insert("ledger_held".into(), n.into());
     }
-    m
+    Ok(m)
 }
 
 /// Everything Proctor measured for one attempt, or why it could not. An
 /// evidence source the task names and Proctor cannot read in full stops the
 /// run: assertions over partial evidence would certify the wrong thing.
-pub fn gather(evidence: &crate::task::Evidence, dir: &Path) -> Result<Measurements, EvidenceError> {
-    let mut m = Measurements::new();
+#[derive(Debug, Default)]
+pub struct Observation {
+    pub measurements: Measurements,
+    pub errors: Vec<String>,
+}
+
+/// Read sources independently: a corrupt journal cannot hide a readable
+/// ledger's outstanding authorizations. Missing files are allowed only
+/// before the command that is expected to create them.
+pub fn gather(evidence: &crate::task::Evidence, dir: &Path, required: bool) -> Observation {
+    let mut out = Observation::default();
     if let Some(journal) = &evidence.journal {
         let path = dir.join(journal);
-        // A journal the fixture has not written yet is not evidence of
-        // anything, and a check before the first request is legitimate.
-        if path.exists() {
-            m.extend(from_journal(&read_journal(&path)?));
+        if required || path.exists() {
+            match read_journal(&path) {
+                Ok(entries) => out.measurements.extend(from_journal(&entries)),
+                Err(e) => out.errors.push(e.to_string()),
+            }
         } else {
-            m.insert("fixture_journal_missing".into(), true.into());
+            out.measurements
+                .insert("fixture_journal_missing".into(), true.into());
         }
     }
     if let (Some(ledger), Some(id)) = (&evidence.ledger, &evidence.mandate_id) {
-        m.extend(from_ledger(&dir.join(ledger), id));
+        let path = dir.join(ledger);
+        if required || path.exists() {
+            match from_ledger(&path, id) {
+                Ok(m) => out.measurements.extend(m),
+                Err(e) => out.errors.push(e.to_string()),
+            }
+        }
     }
-    Ok(m)
+    out
 }
 
 #[cfg(test)]
@@ -291,7 +317,7 @@ mod tests {
             ledger: None,
             mandate_id: None,
         };
-        let m = gather(&ev, Path::new("/tmp")).unwrap();
+        let m = gather(&ev, Path::new("/tmp"), false).measurements;
         assert_eq!(m["fixture_journal_missing"], true);
     }
 
@@ -325,7 +351,7 @@ mod tests {
             mandate_id: None,
         };
         assert!(
-            gather(&ev, &dir).is_err(),
+            !gather(&ev, &dir, true).errors.is_empty(),
             "partial evidence never measures"
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -348,7 +374,7 @@ mod tests {
                 .unwrap();
             l.commit_submission(a.id, now).unwrap();
         }
-        let m = from_ledger(&path, "m1");
+        let m = from_ledger(&path, "m1").unwrap();
         assert_eq!(m["ledger_authorizations"], 1);
         assert_eq!(m["ledger_payment_ids"], 1);
         assert_eq!(m["ledger_signed_payloads"], 1);
@@ -356,8 +382,26 @@ mod tests {
         assert_eq!(m["ledger_prepared"], 0);
         assert_eq!(m["ledger_sent"], 1);
         assert_eq!(m["ledger_settled"], 0);
-        // A ledger that is not there measures nothing, rather than failing.
-        assert!(from_ledger(&dir.join("absent.sqlite"), "m1").is_empty());
+        // A missing ledger cannot prove zero exposure.
+        assert!(from_ledger(&dir.join("absent.sqlite"), "m1").is_err());
+        std::fs::write(dir.join("journal.jsonl"), "malformed payment record\n").unwrap();
+        let observed = gather(
+            &crate::task::Evidence {
+                journal: Some("journal.jsonl".into()),
+                ledger: Some("ledger.sqlite".into()),
+                mandate_id: Some("m1".into()),
+            },
+            &dir,
+            true,
+        );
+        assert_eq!(observed.errors.len(), 1);
+        assert_eq!(
+            observed.measurements["ledger_sent"], 1,
+            "bad journal cannot hide ledger exposure"
+        );
+        assert!(!crate::hedera::exposure(&observed.measurements).is_empty());
+        std::fs::write(dir.join("corrupt.sqlite"), "not a database").unwrap();
+        assert!(from_ledger(&dir.join("corrupt.sqlite"), "m1").is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

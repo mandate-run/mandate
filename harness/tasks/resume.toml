@@ -21,6 +21,7 @@ mandate_id = "proctor-resume"
 
 [[check]]
 name = "resume"
+recovers = true
 run = "harness/scripts/run-resume resume"
 timeout_s = 300
 # The explanation is priced by the brief's size, so the total is an outcome,

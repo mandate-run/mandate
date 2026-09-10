@@ -106,43 +106,66 @@ async fn check(path: &Path, dir: Option<&Path>, json: bool) -> ExitCode {
         println!("  task {} in {}", &task.hash[..16], dir.display());
     }
 
-    // Proctor's own probe first: a service it cannot reach is its problem,
-    // and must never cause a rewrite of working payment code.
-    for url in &task.requires.reachable {
-        if let Err(e) = hedera::reachable(url, Duration::from_secs(10)).await {
-            return fail_early(&format!("{url} is unreachable: {e}"), json);
-        }
-    }
-
     let env: BTreeMap<String, String> = BTreeMap::new();
     let hook_timeout = Duration::from_secs(task.hooks.timeout_s);
     let mut results: Vec<CheckResult> = Vec::new();
+    let mut infrastructure = Vec::new();
+    let mut observed = checks::Measurements::new();
+    // A second check must not replace the first check's fixture or journal.
+    let run_lock = (|| -> std::io::Result<std::fs::File> {
+        std::fs::create_dir_all(dir.join(".proctor"))?;
+        let file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join(".proctor/check.lock"))?;
+        file.try_lock().map_err(|e| {
+            std::io::Error::other(format!("another Proctor check owns this worktree: {e}"))
+        })?;
+        Ok(file)
+    })();
+    if let Err(e) = &run_lock {
+        infrastructure.push(e.to_string());
+    }
 
-    let mut infrastructure: Option<String> = None;
-
-    // Setup and ready are the fixture's, not the application's: a failure
-    // here stops the loop rather than blaming the code under test.
-    if let Some(setup) = &task.hooks.setup {
-        match hooks::run(setup, &dir, &env, hook_timeout).await {
-            Ok(out) if out.ok() => {}
-            Ok(out) => infrastructure = Some(format!("setup failed: {}", out.tail(8))),
-            Err(e) => infrastructure = Some(format!("setup: {e}")),
+    // All loaded tasks go through report finalization, even if preflight fails.
+    for url in &task.requires.reachable {
+        if let Err(e) = hedera::reachable(url, Duration::from_secs(10)).await {
+            infrastructure.push(format!("{url} is unreachable: {e}"));
+            break;
         }
     }
-    if infrastructure.is_none()
-        && let Some(ready) = &task.hooks.ready
-    {
-        match hooks::wait_ready(ready, &dir, &env, hook_timeout).await {
-            Ok(out) if out.ok() => {}
-            Ok(out) => {
-                infrastructure = Some(format!("the fixture never became ready: {}", out.tail(8)))
+    let mut setup_started = false;
+    if infrastructure.is_empty() {
+        setup_started = true;
+        if let Some(setup) = &task.hooks.setup {
+            match hooks::run(setup, &dir, &env, hook_timeout).await {
+                Ok(out) if out.ok() => {}
+                Ok(out) => infrastructure.push(format!("setup failed: {}", out.tail(8))),
+                Err(e) => infrastructure.push(format!("setup: {e}")),
             }
-            Err(e) => infrastructure = Some(format!("ready: {e}")),
+        }
+        if infrastructure.is_empty()
+            && let Some(ready) = &task.hooks.ready
+        {
+            match hooks::wait_ready(ready, &dir, &env, hook_timeout).await {
+                Ok(out) if out.ok() => {}
+                Ok(out) => infrastructure.push(format!("fixture never ready: {}", out.tail(8))),
+                Err(e) => infrastructure.push(format!("ready: {e}")),
+            }
         }
     }
-
-    if infrastructure.is_none() {
+    if infrastructure.is_empty() {
         for c in &task.checks {
+            let before = observe::gather(&task.evidence, &dir, false);
+            observed.extend(before.measurements);
+            infrastructure.extend(before.errors);
+            if !infrastructure.is_empty()
+                || (!hedera::exposure(&observed).is_empty() && !c.recovers)
+            {
+                break;
+            }
             if !json {
                 print!("  {} ... ", c.name);
                 use std::io::Write as _;
@@ -151,82 +174,55 @@ async fn check(path: &Path, dir: Option<&Path>, json: bool) -> ExitCode {
             let out = match hooks::run(&c.run, &dir, &env, Duration::from_secs(c.timeout_s)).await {
                 Ok(out) => out,
                 Err(e) => {
-                    infrastructure = Some(format!("{}: {e}", c.name));
+                    infrastructure.push(format!("{}: {e}", c.name));
                     break;
                 }
             };
-            // Measure after the check, so the journal and ledger show what it
-            // did. Evidence Proctor cannot read in full stops the run: a
-            // contract must never be judged against partial evidence.
-            let observed = match observe::gather(&task.evidence, &dir) {
-                Ok(m) => m,
-                Err(e) => {
-                    infrastructure = Some(format!("evidence: {e}"));
-                    break;
-                }
-            };
-            let result = checks::judge(c, &out, &observed);
-            let stop = !result.findings.is_empty() && c.name == "build";
+            let after = observe::gather(&task.evidence, &dir, c.name != "build");
+            // Retain the last known exposure if another source becomes unreadable.
+            observed.extend(after.measurements.clone());
+            infrastructure.extend(after.errors);
+            let result = checks::judge(c, &out, &after.measurements);
+            let failed = result.outcome != Outcome::Pass;
             if !json {
                 println!("{} ({} ms)", result.outcome.as_str(), result.ms);
                 for f in &result.findings {
-                    for line in f.lines() {
-                        println!("      {line}");
-                    }
+                    println!("      {f}");
                 }
             }
             results.push(result);
-            // A build that fails makes every later check meaningless: it
-            // would test whatever binary happened to be lying around.
-            if stop {
-                if !json {
-                    println!("  stopping: the remaining checks would test a stale build");
-                }
+            // A failed prerequisite must not invoke later paid commands. A
+            // deliberate crash is expressed with allow_exit in its contract.
+            if failed || !infrastructure.is_empty() {
                 break;
             }
-            // Exposure stops the run before anything else is bought. A check
-            // that recovers exposure is the exception, and says so.
-            let held = hedera::exposure(&observed);
-            if !held.is_empty() {
-                let next_recovers = task
-                    .checks
-                    .iter()
-                    .skip_while(|x| x.name != c.name)
-                    .nth(1)
-                    .is_some_and(|x| x.recovers);
-                if !next_recovers {
-                    if !json {
-                        println!(
-                            "  stopping: {} authorization(s) are exposure; nothing more is bought",
-                            held.iter().map(|(_, n)| n).sum::<i64>()
-                        );
-                    }
-                    break;
-                }
+        }
+    }
+    // Capture evidence before teardown as well: cleanup cannot erase exposure.
+    let before_cleanup = observe::gather(&task.evidence, &dir, false);
+    observed.extend(before_cleanup.measurements);
+    infrastructure.extend(before_cleanup.errors);
+    if setup_started && let Some(teardown) = &task.hooks.teardown {
+        match hooks::run(teardown, &dir, &env, hook_timeout).await {
+            Ok(out) if out.ok() => {}
+            Ok(out) => infrastructure.push(format!("teardown failed: {}", out.tail(8))),
+            Err(e) => infrastructure.push(format!("teardown: {e}")),
+        }
+    }
+    // Teardown is fixture cleanup, not payment reconciliation. It must not
+    // lower the exposure observed after the last check.
+    let exposure_outcome = hedera::reclassify(&mut results, &observed);
+    let mut attempt = Attempt::new(&task, 1, results, observed);
+    attempt.outcome = attempt.outcome.max(exposure_outcome);
+    if !infrastructure.is_empty() {
+        attempt.outcome = attempt.outcome.max(Outcome::InfrastructureError);
+        if !json {
+            for problem in &infrastructure {
+                println!("  INFRASTRUCTURE_ERROR: {problem}");
             }
         }
     }
-
-    if let Some(teardown) = &task.hooks.teardown {
-        let _ = hooks::run(teardown, &dir, &env, hook_timeout).await;
-    }
-
-    let observed = match observe::gather(&task.evidence, &dir) {
-        Ok(m) => m,
-        Err(e) => {
-            infrastructure.get_or_insert(format!("evidence: {e}"));
-            checks::Measurements::new()
-        }
-    };
-    // Exposure the ledger still holds outranks whatever the checks decided.
-    hedera::reclassify(&mut results, &observed);
-    let mut attempt = Attempt::new(&task, 1, results, observed);
-    if let Some(problem) = &infrastructure {
-        attempt.outcome = Outcome::InfrastructureError;
-        if !json {
-            println!("  INFRASTRUCTURE_ERROR: {problem}");
-        }
-    }
+    attempt.infrastructure = infrastructure;
     let mut outcome = attempt.outcome;
     let mut report = Report::new(&task, started).finish(vec![attempt]);
     let written = report.write(&dir);
@@ -235,6 +231,7 @@ async fn check(path: &Path, dir: Option<&Path>, json: bool) -> ExitCode {
     if let Err(e) = &written {
         let problem = format!("the report could not be written: {e}");
         eprintln!("proctor: INFRASTRUCTURE_ERROR: {problem}");
+        report.attempts[0].infrastructure.push(problem);
         if outcome < Outcome::PaymentUnresolved {
             outcome = Outcome::InfrastructureError;
             report.outcome = outcome;

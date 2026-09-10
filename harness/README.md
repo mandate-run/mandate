@@ -113,17 +113,25 @@ pass against yesterday's binary.
 ## Safety
 
 Every child process starts from an empty environment with `PATH`, `HOME` and
-`TERM`, plus whatever the task names. Payment credentials reach the buyer from
-its own env file and never enter a hook, a check or an agent adapter. A git
-worktree contains changes; it is not a security sandbox.
+`TERM`. A task can set additional variables explicitly in its command. Payment
+credentials are not inherited; the buyer reads its own env file. Hooks and
+checks execute local code with filesystem access, so this does not isolate
+secrets from malicious commands. A git worktree is not a security sandbox.
 
-Proctor, its fixtures and the task contracts live outside the tree an agent
-edits, and a wrong test is corrected in a separate change, never inside the
-attempt it would turn green.
+The task is loaded and hashed before execution. The agent loop and a separate
+protected verifier worktree are not implemented. A check holds a worktree lock
+for its lifetime so another check cannot replace its fixture or journal.
+Timeouts stop the command's process group; fixture teardown stops its owned
+descendants. Ledgers containing recoverable payments, pending receipts or audit
+charges are resumed. Unreadable ledgers stop the run and remain in place.
+
+Script regressions use temporary databases and a local test server, without
+payment credentials: `python3 harness/scripts/test_scripts.py`.
 
 ## Reports
 
 Each run writes `.proctor/runs/<id>/report.json`: the outcome, every check with
-its assertions and findings, the measurements, and the hashes of the task and
-the verifier. It is written even when the run fails, because that is when a
-reviewer needs it.
+its assertions and findings, infrastructure diagnostics, the measurements,
+the task hash and Proctor's package version. It does not yet hash the verifier
+binary. Loaded tasks produce a report even when setup or preflight fails;
+an unreadable task produces an early structured error with `--json`.

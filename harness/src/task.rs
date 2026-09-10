@@ -158,6 +158,11 @@ impl Task {
                 "a task needs at least one check".to_owned(),
             ));
         }
+        if task.evidence.ledger.is_some() != task.evidence.mandate_id.is_some() {
+            return Err(TaskError::Field(
+                "evidence.ledger and evidence.mandate_id must be set together".to_owned(),
+            ));
+        }
         let mut seen = std::collections::BTreeSet::new();
         for c in &task.checks {
             if !seen.insert(&c.name) {
@@ -246,6 +251,8 @@ observe = { fixture_settlements = 1, fixture_distinct_payloads = 1 }
 
     #[test]
     fn a_contract_must_name_distinct_checks_that_run_something() {
+        assert!(Task::from_toml(&TASK.replace("mandate_id = \"lost\"", "")).is_err());
+        assert!(Task::from_toml(&TASK.replace("ledger = \"run.sqlite\"", "")).is_err());
         assert!(
             Task::from_toml("[task]\nname = \"x\"\n").is_err(),
             "no checks"

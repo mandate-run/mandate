@@ -187,6 +187,7 @@ pub struct Attempt {
     pub task_hash: String,
     pub checks: Vec<CheckResult>,
     pub observed: Measurements,
+    pub infrastructure: Vec<String>,
     pub at: String,
 }
 
@@ -204,6 +205,7 @@ impl Attempt {
             task_hash: task.hash.clone(),
             checks,
             observed,
+            infrastructure: Vec::new(),
             at: time::OffsetDateTime::now_utc()
                 .format(&time::format_description::well_known::Rfc3339)
                 .unwrap_or_default(),

@@ -16,6 +16,7 @@ jobs:
       - run: cargo build --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - run: python3 harness/scripts/test_scripts.py
   sellers:
     runs-on: ubuntu-latest
     defaults:
