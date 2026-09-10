@@ -6,7 +6,7 @@
 
 use time::OffsetDateTime;
 
-use crate::hedera::{self, Consensus, HederaTopicId, MirrorNode, RECORD_GRACE};
+use crate::hedera::{self, Consensus, HederaTopicId, MirrorNode};
 use crate::ledger::{Ledger, LedgerError};
 
 /// Tinybars reserved per receipt before the submit; the record decides the real fee.
@@ -49,6 +49,32 @@ impl Publisher<'_> {
                     break;
                 }
             };
+            match recover_publication(
+                ledger,
+                self.mirror,
+                &self.topic.to_string(),
+                mandate_id,
+                seq,
+                &message,
+            )
+            .await
+            {
+                Ok(Recovery::Published(p)) => {
+                    out.push(p);
+                    continue;
+                }
+                Ok(Recovery::Ready) => {}
+                Ok(Recovery::Pending) => {
+                    say(format!(
+                        "receipt {seq} awaits the original HCS transaction; no replacement submitted"
+                    ));
+                    break;
+                }
+                Err(e) => {
+                    say(format!("receipt {seq} reconciliation failed: {e}"));
+                    break;
+                }
+            }
             let now = OffsetDateTime::now_utc();
             let charge = match ledger.reserve_audit(
                 mandate_id,
@@ -115,8 +141,8 @@ impl Publisher<'_> {
         Ok(out)
     }
 
-    /// Replaces submitted caps with the fees the records charged; a charge
-    /// with no record after validity plus grace is released.
+    /// Replaces submitted caps with the fees the records charged. An absent
+    /// record never proves a submit was free, even after transaction expiry.
     pub async fn reconcile_audit(
         &self,
         ledger: &mut Ledger,
@@ -134,21 +160,254 @@ impl Publisher<'_> {
                 .filter(|r| r.nonce == 0 && r.result != hedera::DUPLICATE)
                 .filter_map(|r| r.charged_tx_fee)
                 .max();
-            match charged {
-                Some(fee) => {
-                    ledger.audit_reconciled(c.id, fee, now)?;
-                }
-                None => {
-                    if let Some(until) = c.valid_until
-                        && now > until + RECORD_GRACE
-                    {
-                        ledger.audit_not_recorded(c.id, now)?;
-                    }
-                }
+            if let Some(fee) = charged {
+                ledger.audit_reconciled(c.id, fee, now)?;
             }
         }
         Ok(())
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Recovery {
+    Ready,
+    Pending,
+    Published(Published),
+}
+
+/// Reuse a publication's persisted identity instead of signing a replacement
+/// when consensus accepted it but its response or local acknowledgment was lost.
+async fn recover_publication(
+    ledger: &mut Ledger,
+    mirror: &MirrorNode,
+    topic: &str,
+    mandate_id: &str,
+    seq: u64,
+    message: &[u8],
+) -> Result<Recovery, ReconcileError> {
+    let Some(c) = ledger.latest_audit_charge(mandate_id, &format!("receipt {seq}"))? else {
+        return Ok(Recovery::Ready);
+    };
+    if c.state == "released" {
+        return Ok(Recovery::Ready);
+    }
+    if c.state == "reserved" {
+        // No transaction was handed to the network before audit_submitted.
+        ledger.release_audit(c.id, OffsetDateTime::now_utc())?;
+        return Ok(Recovery::Ready);
+    }
+    let (Some(id), Some(tx_id)) = (c.mirror_id.as_deref(), c.tx_id.as_deref()) else {
+        return Ok(Recovery::Pending);
+    };
+    let records = mirror.records(id).await?;
+    let records: Vec<_> = records
+        .iter()
+        .filter(|r| r.nonce == 0 && r.result != hedera::DUPLICATE)
+        .collect();
+    if records.len() != 1 {
+        return Ok(Recovery::Pending);
+    }
+    let record = records[0];
+    let Some(fee) = record.charged_tx_fee.filter(|f| *f >= 0) else {
+        return Ok(Recovery::Pending);
+    };
+    if c.state == "submitted" {
+        ledger.audit_reconciled(c.id, fee, OffsetDateTime::now_utc())?;
+    }
+    if record.result != "SUCCESS" {
+        return Ok(Recovery::Ready);
+    }
+    let Some(found) = mirror
+        .topic_message_at(topic, &record.consensus_timestamp)
+        .await?
+    else {
+        return Ok(Recovery::Pending);
+    };
+    if found.bytes().ok().as_deref() != Some(message) {
+        return Ok(Recovery::Pending);
+    }
+    ledger.mark_published(
+        mandate_id,
+        seq,
+        found.sequence_number,
+        tx_id,
+        OffsetDateTime::now_utc(),
+    )?;
+    Ok(Recovery::Published(Published {
+        seq,
+        hcs_sequence: found.sequence_number,
+        tx_id: tx_id.to_owned(),
+    }))
+}
+
 pub use crate::purchase::ReconcileError;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::Network,
+        receipts::Receipt,
+        testing::{mandate_row, test_signer},
+    };
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use std::io::{BufRead as _, Write as _};
+
+    fn mirror(replies: Vec<serde_json::Value>) -> (MirrorNode, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let thread = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            for reply in replies {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((s, _)) => break s,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "missing mirror request"
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                        }
+                        Err(e) => panic!("{e}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let mut line = String::new();
+                std::io::BufReader::new(&stream)
+                    .read_line(&mut line)
+                    .unwrap();
+                if reply.get("messages").is_some() {
+                    assert!(
+                        line.contains(
+                            "/api/v1/topics/0.0.99/messages?timestamp=eq%3A1.000000001&limit=1"
+                        ),
+                        "{line}"
+                    );
+                } else {
+                    assert!(line.contains("/api/v1/transactions/"), "{line}");
+                }
+                let body = reply.to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        (MirrorNode::new(client, format!("http://{address}")), thread)
+    }
+
+    fn submitted() -> (Ledger, Vec<u8>) {
+        let now = OffsetDateTime::now_utc() - time::Duration::days(7);
+        let mut ledger = Ledger::in_memory().unwrap();
+        ledger.insert_mandate(&mandate_row(), now).unwrap();
+        let receipt = Receipt::start("m1", "h", "m", "t");
+        ledger.append_receipt("m1", &receipt).unwrap();
+        let charge = ledger
+            .reserve_audit("m1", "receipt 0", FEE_CAP_TINYBAR, now)
+            .unwrap();
+        ledger
+            .audit_submitted(
+                charge.id,
+                "0.0.7@1.1",
+                "0.0.7-1-000000001",
+                now + time::Duration::seconds(120),
+                now,
+            )
+            .unwrap();
+        (ledger, receipt.message().unwrap())
+    }
+
+    fn record(result: &str) -> serde_json::Value {
+        serde_json::json!({"transactions": [{"transaction_id": "0.0.7-1-000000001", "nonce": 0, "result": result,
+            "charged_tx_fee": 1000, "consensus_timestamp": "1.000000001"}]})
+    }
+
+    #[tokio::test]
+    async fn absence_after_expiry_keeps_the_cap_and_blocks_republication() {
+        let (mut ledger, message) = submitted();
+        let empty = serde_json::json!({"transactions": []});
+        let (mirror, thread) = mirror(vec![empty.clone(), empty]);
+        let consensus = test_signer().consensus(Network::Testnet);
+        let publisher = Publisher {
+            consensus: &consensus,
+            mirror: &mirror,
+            topic: "0.0.99".parse().unwrap(),
+            fee_cap: FEE_CAP_TINYBAR,
+        };
+        publisher.reconcile_audit(&mut ledger, "m1").await.unwrap();
+        assert_eq!(
+            recover_publication(&mut ledger, &mirror, "0.0.99", "m1", 0, &message)
+                .await
+                .unwrap(),
+            Recovery::Pending
+        );
+        assert_eq!(
+            ledger.audit_accounts("m1").unwrap().reserved,
+            FEE_CAP_TINYBAR
+        );
+        thread.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn lost_acknowledgment_recovers_the_original_message_and_fee() {
+        let (mut ledger, message) = submitted();
+        let (mirror, thread) = mirror(vec![
+            record("SUCCESS"),
+            serde_json::json!({"messages": [{
+            "message": STANDARD.encode(&message), "sequence_number": 17, "consensus_timestamp": "1.000000001"}]}),
+        ]);
+        let recovered = recover_publication(&mut ledger, &mirror, "0.0.99", "m1", 0, &message)
+            .await
+            .unwrap();
+        assert_eq!(
+            recovered,
+            Recovery::Published(Published {
+                seq: 0,
+                hcs_sequence: 17,
+                tx_id: "0.0.7@1.1".into()
+            })
+        );
+        assert!(ledger.unpublished("m1").unwrap().is_empty());
+        assert_eq!(ledger.audit_accounts("m1").unwrap().spent(), 1000);
+        assert_eq!(
+            ledger
+                .latest_audit_charge("m1", "receipt 0")
+                .unwrap()
+                .unwrap()
+                .id,
+            1
+        );
+        thread.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_a_positive_failure_allows_a_replacement() {
+        for result in ["DUPLICATE_TRANSACTION", "INVALID_TOPIC_ID", "SUCCESS"] {
+            let (mut ledger, message) = submitted();
+            let mut replies = vec![record(result)];
+            if result == "SUCCESS" {
+                replies.push(serde_json::json!({"messages": []}));
+            }
+            let (mirror, thread) = mirror(replies);
+            let recovered = recover_publication(&mut ledger, &mirror, "0.0.99", "m1", 0, &message)
+                .await
+                .unwrap();
+            assert_eq!(
+                recovered,
+                if result == "INVALID_TOPIC_ID" {
+                    Recovery::Ready
+                } else {
+                    Recovery::Pending
+                }
+            );
+            assert_eq!(ledger.unpublished("m1").unwrap(), vec![0]);
+            thread.join().unwrap();
+        }
+    }
+}
