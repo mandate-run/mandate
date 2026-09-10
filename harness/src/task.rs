@@ -119,6 +119,23 @@ pub struct Requires {
     pub reachable: Vec<String>,
 }
 
+/// The coding agent `proctor run` drives. One adapter executable, invoked
+/// with the task and the previous attempt's findings on stdin, expected to
+/// edit the worktree and exit 0. Absent means `proctor run` has nothing to
+/// drive and says so rather than looping without effect.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSpec {
+    /// Command run through `sh -c`, like every other hook.
+    pub adapter: Option<String>,
+    #[serde(default = "default_agent_timeout")]
+    pub timeout_s: u64,
+}
+
+fn default_agent_timeout() -> u64 {
+    900
+}
+
 /// Where Proctor reads its own measurements.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -141,6 +158,8 @@ pub struct Task {
     pub requires: Requires,
     #[serde(default)]
     pub evidence: Evidence,
+    #[serde(default)]
+    pub agent: AgentSpec,
     #[serde(rename = "check")]
     pub checks: Vec<Check>,
     /// SHA-256 of the file, set by the loader. A run records it so a changed
