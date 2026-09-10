@@ -98,7 +98,7 @@ for _ in $(seq 40); do
   harness/scripts/sellers ready 2>/dev/null && break
   sleep 0.5
 done
-harness/scripts/sellers ready || { echo "the sellers did not start; see .proctor/run-4021/sellers.log" >&2; exit 1; }
+harness/scripts/sellers ready || { echo "the sellers did not start; see .proctor/run-$port/sellers.log" >&2; exit 1; }
 
 say "pinning the manifest and the topic"
 # The examples and the harness fixtures both name a seller account and a

@@ -70,12 +70,14 @@ ready = "harness/scripts/sellers ready"
 teardown = "harness/scripts/sellers down"
 
 [evidence]
-journal = ".proctor/journal/sellers-journal.jsonl"
-ledger = ".proctor/work/resume.sqlite"
+journal = ".proctor/run-4021/journal/sellers-journal.jsonl"
+ledger = ".proctor/run-4021/work/resume.sqlite"
 mandate_id = "proctor-resume"
 
 [[check]]
 name = "resume"
+# Only a check marked this way may run while exposure is outstanding.
+recovers = true
 run = "harness/scripts/run-resume resume"
 expect = { status = "delivered", "totals.outstanding" = "0.00000000" }
 observe = { fixture_distinct_payloads = 3, fixture_settlements = 3 }
@@ -83,6 +85,12 @@ observe = { fixture_distinct_payloads = 3, fixture_settlements = 3 }
 
 The task's SHA-256 is recorded in every report, so a contract edited to turn a
 run green is a different task.
+
+The evidence paths name port 4021, the default the scripts serve on. A
+contract holds literal paths and expands nothing, so running the sellers on
+another port through `PROCTOR_PORT` means editing the paths in the task too.
+That is deliberate: a contract that resolved its own evidence location could
+pass by reading a journal from a different run.
 
 ## Measurements
 
