@@ -28,10 +28,13 @@ command -v python3 >/dev/null 2>&1 || {
 prompt=$(python3 "$here/brief-to-prompt.py") || exit 2
 [ -n "$prompt" ] || { echo "adapter: the prompt came out empty" >&2; exit 2; }
 
+# The prompt goes on stdin rather than the command line: it carries the whole
+# contract, which is longer than an argument list should hold, and stdin has
+# already been read to EOF by the builder above.
+#
 # The adapter edits the worktree and must not wait for a human, so the
 # permission decision is made here rather than prompted for. It is deliberately
 # narrow: no network tools, and nothing that could reach a wallet.
-exec claude --print \
+printf '%s' "$prompt" | claude --print \
   --permission-mode acceptEdits \
-  --allowed-tools "Read,Edit,Write,Grep,Glob" \
-  "$prompt"
+  --allowed-tools "Read,Edit,Write,Grep,Glob"
