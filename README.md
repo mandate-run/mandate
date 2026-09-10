@@ -103,9 +103,14 @@ matches no listing at all.
 
 A token with custom fees, a mutable fee schedule, or incomplete fee metadata is
 refused before signing. The runtime checks the token's mirror-node metadata;
-settlement reconciliation also rejects extra buyer debits. `examples/*.usdc.toml` are the same runs in Circle's testnet
-USDC `0.0.429274`, for a buyer associated with it and funded from
-[faucet.circle.com](https://faucet.circle.com).
+settlement reconciliation also rejects extra buyer debits.
+
+`examples/*.usdc.toml` are the same mandates priced in Circle's testnet USDC
+`0.0.429274`. They are templates, not exercised runs: Circle's faucet never
+delivered to the buyer account, so the token demonstration above uses a token
+the runtime mints instead. Like any mandate written elsewhere, they pin a
+manifest hash and a receipts topic from the machine that wrote them, so a
+clone regenerates both before running one.
 
 Exit codes: 0 delivered, 3 refused, 4 delivered with findings, 5 withheld
 because `anchor_before_delivery` is set and a receipt is not yet on HCS, 6 a
