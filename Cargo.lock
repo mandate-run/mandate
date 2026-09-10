@@ -1456,6 +1456,7 @@ dependencies = [
  "clap",
  "hedera",
  "hedera-proto",
+ "mandate",
  "num-bigint",
  "num-traits",
  "prost 0.13.5",

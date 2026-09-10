@@ -14,6 +14,9 @@ pub mod quote;
 pub mod receipts;
 pub mod refusal;
 pub mod run;
+// Compiled for this crate's own unit tests, and for anything that asks for
+// the fixtures by name. A release build of the binary has neither.
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub mod testing;
 pub mod transcript;

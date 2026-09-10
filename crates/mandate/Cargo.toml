@@ -15,6 +15,13 @@ path = "src/lib.rs"
 name = "mandate"
 path = "src/main.rs"
 
+[features]
+# Fixtures for tests in this crate, its integration tests and the harness.
+# Off by default, so a release binary carries no throwaway key or fake
+# market: the module says it is not part of the runtime's behavior, and
+# this is what makes that true of the shipped artifact.
+testing = []
+
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
@@ -37,3 +44,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+mandate = { path = ".", features = ["testing"] }
