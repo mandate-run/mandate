@@ -21,6 +21,7 @@ Protocol amounts are integers in the asset's atomic unit; USDC has 6 decimals, H
 | purpose | string | The task in one sentence |
 | budget.service.total | amount | Hard cap on service exposure: settled + outstanding + held |
 | budget.service.asset | token id | Payment asset; `0.0.0` is HBAR |
+| budget.service.decimals | integer | Required when the runtime does not know the asset's decimals, as for a token it has not been taught. At most 18. A value contradicting a known asset is refused, so a mandate cannot make HBAR cheap by calling it two decimals |
 | budget.audit.total | amount | Hard cap on HBAR spent on HCS messages and token association |
 | budget.reserve_completion | bool | Hold the final step before discretionary spend |
 | coverage | enum | `all_material`: every material pool receives deep evidence. Capped coverage is not supported in this version |
@@ -116,7 +117,7 @@ The ledger is durable, in SQLite. Every state change below is one transaction.
 - I7. Accounting moves are atomic transfers: `held -> outstanding` on `prepared`; `outstanding -> settled` on `settled`; `outstanding -> free` on `failed`. No amount is counted in two columns.
 - I8. Only a persisted authorization is transmitted. `submissions` MUST NOT exceed 3. `retrievals` are bounded by the deadline. A counter is committed before the send it counts, so a crash between commit and send costs one attempt and never bypasses the cap. After a crash, every authorization that is not terminal, or that is `settled` with `delivery_state` `none` or `received`, resumes under section 6; nothing is re-signed.
 - I9. Receipts are durable locally in `seq` order before publication. Publication failure never repeats a purchase. When `anchor_before_delivery` is false, the report is delivered with `audit_pending` listing unpublished sequence numbers.
-- I10. `audit_spent <= budget.audit.total`. A refusal with zero service spend may still spend audit budget.
+- I10. `audit_spent <= budget.audit.total`. A refusal with zero service spend may still spend audit budget. A submission whose fee cap exceeds what is free is rejected as `AUDIT_OVER_BUDGET`, which stops that message rather than refusing the run: it is a ledger error, not one of the section 2.7 refusal codes, and a run that cannot anchor ends `not_anchored` when the mandate requires anchoring.
 - I11. No amount, recipient or key material originates from model output. Every claim in a report is computed by the runtime from purchased facts; a model only turns claims into prose.
 - I12. Nothing is authorized after `constraints.deadline`.
 - I13. The chain pinned listing, quote, signed transfer, settlement record MUST match at every link. A broken link is refused or recorded as failed; it is never repaired by re-signing.
