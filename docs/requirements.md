@@ -11,7 +11,7 @@ Up to 3 teams, $2,000 each. Video: five minutes or less.
 | "Host a live x402-gated service on Hedera testnet or mainnet, settled through the Blocky402 facilitator." | Four seller endpoints on `hedera:testnet` settling through `api.testnet.blocky402.com`; every demo run pays them for real | done |
 | "Build a platform or agent that consumes that service and completes at least one real paid request end to end." | `mandate run` over five pools: three settlements, transaction ids in the transcript, receipts on an HCS topic the run creates; verified again from a clean clone with its own topic | done |
 | "Public GitHub repo with a README covering setup, architecture, and the payment flow." | README has Architecture, Payment flow, Setup and Proctor; `harness/scripts/setup` takes a clean clone to a settled run, tested from a fresh clone. Repo made public before submission | doing |
-| "Demo video of five minutes or less showing the paid request executing." | One video, 3 to 4 minutes, shared with The Graph; every scene it needs is reproducible today | todo |
+| "Demo video of five minutes or less showing the paid request executing." | One video, 3 to 4 minutes, shared with The Graph. Every scene of the main cut runs as one command and was verified against testnet on 2026-09-10: normal completion, the quote drift that flips the plan, the refusal, the off-tariff refusal and re-plan, the lost response, and the Proctor before and after | todo |
 
 Extra points pursued:
 
