@@ -27,6 +27,8 @@ pub const RETRY_SPACING: time::Duration = time::Duration::seconds(30);
 
 #[derive(Debug, thiserror::Error)]
 pub enum LedgerError {
+    #[error("ledger file: {0}")]
+    File(#[from] std::io::Error),
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("json: {0}")]
@@ -519,8 +521,7 @@ pub struct MandateRow {
 /// One audit budget charge. `reserved` before the transaction id exists,
 /// `submitted` once the id is known and until the mirror record decides,
 /// `reconciled` at the charged fee, `overrun` when the record charged more
-/// than the cap, `released` when nothing was ever sent or nothing was recorded
-/// after the validity plus grace.
+/// than the cap, `released` only when nothing was ever sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditCharge {
     pub id: i64,
@@ -604,8 +605,6 @@ CREATE TABLE IF NOT EXISTS receipts (
   event_key TEXT,
   PRIMARY KEY (mandate_id, seq)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS receipts_event ON receipts (mandate_id, event_key)
-  WHERE event_key IS NOT NULL;
 CREATE TABLE IF NOT EXISTS audit_charges (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   mandate_id TEXT NOT NULL REFERENCES mandates(id),
@@ -623,6 +622,8 @@ CREATE TABLE IF NOT EXISTS audit_charges (
 
 pub struct Ledger {
     conn: Connection,
+    // One runtime owns recovery and publication decisions for this file.
+    _lock: Option<std::fs::File>,
 }
 
 fn rfc3339(t: OffsetDateTime) -> Result<String> {
@@ -638,21 +639,71 @@ impl Ledger {
     /// Opens or creates the ledger file. WAL keeps committed transactions
     /// durable across a process kill.
     pub fn open(path: &Path) -> Result<Self> {
+        let absolute = if path.exists() {
+            path.canonicalize()?
+        } else {
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            parent.canonicalize()?.join(
+                path.file_name()
+                    .ok_or_else(|| std::io::Error::other("ledger needs a filename"))?,
+            )
+        };
+        let mut lock_path = absolute.as_os_str().to_owned();
+        lock_path.push(".lock");
+        let lock = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)?;
+        lock.try_lock().map_err(|e| {
+            std::io::Error::other(format!("another runtime owns {}: {e}", absolute.display()))
+        })?;
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
-        Self::init(conn)
+        let mut ledger = Self::init(conn)?;
+        ledger._lock = Some(lock);
+        Ok(ledger)
     }
 
     pub fn in_memory() -> Result<Self> {
         Self::init(Connection::open_in_memory()?)
     }
 
-    fn init(conn: Connection) -> Result<Self> {
+    fn init(mut conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.execute_batch(SCHEMA)?;
-        Ok(Self { conn })
+        let tx = conn.transaction()?;
+        tx.execute_batch(SCHEMA)?;
+        // CREATE IF NOT EXISTS does not upgrade an existing ledger. Add the
+        // recovery fields before creating an index that references them.
+        for (table, column, declaration) in [
+            ("mandates", "window_from", "INTEGER NOT NULL DEFAULT 0"),
+            ("mandates", "window_to", "INTEGER NOT NULL DEFAULT 0"),
+            ("authorizations", "last_submission_at", "TEXT"),
+            ("authorizations", "last_retrieval_at", "TEXT"),
+            ("receipts", "event_key", "TEXT"),
+        ] {
+            let mut statement = tx.prepare(&format!("PRAGMA table_info({table})"))?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            if !columns.iter().any(|name| name == column) {
+                tx.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+                ))?;
+            }
+        }
+        tx.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS receipts_event ON receipts (mandate_id, event_key) WHERE event_key IS NOT NULL;")?;
+        // Old rows keep a conservative retry time, never an immediate resend.
+        tx.execute_batch("UPDATE authorizations SET last_submission_at = updated_at WHERE submissions > 0 AND last_submission_at IS NULL;
+            UPDATE authorizations SET last_retrieval_at = updated_at WHERE retrievals > 0 AND last_retrieval_at IS NULL;")?;
+        tx.commit()?;
+        Ok(Self { conn, _lock: None })
     }
 
     /// Records a mandate. Idempotent for the same hash.
@@ -1223,8 +1274,8 @@ impl Ledger {
     }
 
     /// The transaction id is known and about to be sent. From here the charge
-    /// can only be reconciled from the mirror node, or released once the
-    /// validity plus grace has passed with no record.
+    /// can only be reconciled from a positive mirror-node record. Expiry
+    /// and an absent record do not release it.
     pub fn audit_submitted(
         &mut self,
         id: i64,
@@ -1286,10 +1337,10 @@ impl Ledger {
         Ok(c)
     }
 
-    /// No record after the validity plus grace: the network never charged.
-    pub fn audit_not_recorded(&mut self, id: i64, now: OffsetDateTime) -> Result<AuditCharge> {
-        let tx = self.conn.transaction()?;
-        let c = audit_charge_in(&tx, id)?;
+    /// Mirror-node absence cannot establish that a submitted transaction was free.
+    /// Keep the cap until a positive record supplies the charged fee.
+    pub fn audit_not_recorded(&mut self, id: i64, _now: OffsetDateTime) -> Result<AuditCharge> {
+        let c = audit_charge_in(&self.conn, id)?;
         if c.state != "submitted" {
             return Err(LedgerError::AuditWrongState {
                 id,
@@ -1297,22 +1348,6 @@ impl Ledger {
                 wanted: "submitted",
             });
         }
-        let valid_until = c.valid_until.ok_or(LedgerError::NotFound {
-            what: "audit validity",
-            id,
-        })?;
-        if now <= valid_until + RECORD_GRACE {
-            return Err(LedgerError::AuditStillValid {
-                id,
-                valid_until: rfc3339(valid_until)?,
-            });
-        }
-        tx.execute(
-            "UPDATE audit_charges SET state = 'released', updated_at = ?2 WHERE id = ?1",
-            params![id, rfc3339(now)?],
-        )?;
-        let c = audit_charge_in(&tx, id)?;
-        tx.commit()?;
         Ok(c)
     }
 
@@ -1347,6 +1382,18 @@ impl Ledger {
         ids.into_iter()
             .map(|id| audit_charge_in(&self.conn, id))
             .collect()
+    }
+
+    pub fn latest_audit_charge(
+        &self,
+        mandate_id: &str,
+        purpose: &str,
+    ) -> Result<Option<AuditCharge>> {
+        let id = self.conn.query_row(
+            "SELECT id FROM audit_charges WHERE mandate_id = ?1 AND purpose = ?2 ORDER BY id DESC LIMIT 1",
+            params![mandate_id, purpose], |r| r.get::<_, i64>(0),
+        ).optional()?;
+        id.map(|id| audit_charge_in(&self.conn, id)).transpose()
     }
 }
 
@@ -2289,10 +2336,12 @@ mod tests {
             l.audit_reconciled(c.id, -50, NOW),
             Err(LedgerError::AuditChargeNegative { .. })
         ));
-        assert!(matches!(
-            l.audit_not_recorded(c.id, valid_until + Duration::seconds(30)),
-            Err(LedgerError::AuditStillValid { .. })
-        ));
+        assert_eq!(
+            l.audit_not_recorded(c.id, valid_until + Duration::seconds(30))
+                .unwrap()
+                .state,
+            "submitted"
+        );
         let done = l.audit_reconciled(c.id, 61_000, NOW).unwrap();
         assert_eq!(
             (done.state.as_str(), done.charged),
@@ -2330,11 +2379,11 @@ mod tests {
         let released = l
             .audit_not_recorded(n.id, valid_until + Duration::seconds(31))
             .unwrap();
-        assert_eq!(released.state, "released");
+        assert_eq!(released.state, "submitted");
 
         let d = l.reserve_audit("m1", "receipt:3", 5_000_000, NOW).unwrap();
         l.release_audit(d.id, NOW).unwrap();
-        assert_eq!(l.audit_accounts("m1").unwrap().spent(), 63_500);
+        assert_eq!(l.audit_accounts("m1").unwrap().spent(), 5_063_500);
     }
 
     #[test]
@@ -2360,7 +2409,26 @@ mod tests {
                 .unwrap();
             (a.id, r.id)
         };
+        // Upgrade a populated ledger that predates recovery metadata.
+        {
+            let legacy = Connection::open(&path).unwrap();
+            legacy
+                .execute_batch(
+                    "DROP INDEX receipts_event;
+                ALTER TABLE mandates DROP COLUMN window_from;
+                ALTER TABLE mandates DROP COLUMN window_to;
+                ALTER TABLE authorizations DROP COLUMN last_submission_at;
+                ALTER TABLE authorizations DROP COLUMN last_retrieval_at;
+                ALTER TABLE receipts DROP COLUMN event_key;",
+                )
+                .unwrap();
+        }
         let mut l = Ledger::open(&path).unwrap();
+        assert!(
+            Ledger::open(&path).is_err(),
+            "another runtime cannot sign against the same ledger"
+        );
+        assert_eq!(l.mandate("m1").unwrap().window, (0, 0));
         l.insert_mandate(&mandate_row(), NOW).unwrap();
         let a = l.authorization(auth_id).unwrap();
         assert_eq!(
@@ -2385,6 +2453,11 @@ mod tests {
             l.insert_mandate(&other, NOW),
             Err(LedgerError::MandateHashDiffers(_))
         ));
+        drop(l);
+        assert!(
+            Ledger::open(&path).is_ok(),
+            "migration and lock acquisition are repeatable"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }
