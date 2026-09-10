@@ -4,6 +4,13 @@ Working name. Proctor builds Hedera services from an acceptance contract, tests 
 
 ![Proctor loop](img/proctor-loop.svg)
 
+**What is built.** `proctor check` and everything it needs: hooks, task
+contracts, independent measurement from the seller journal and the buyer
+ledger, and the four outcomes. `proctor run`, the agent loop, is not: it
+prints that and exits 2, so the `[agent]` and `[live]` sections below and the
+adapter are design, not schema. `harness/README.md` documents the contract
+that ships; this document is why it is shaped that way.
+
 ## Why a second harness
 
 Hedera Harness drives Cursor or Claude Code to build features into scaffold-hbar projects, Next.js with Hardhat or Foundry, and validates with static checks, Playwright, a semantic grader and an on-chain tier that completes testnet transactions from a burner signer. The official x402 end-to-end suite tests client, server and facilitator combinations across languages, Hedera included. Neither tests what happens between payment and delivery: a quote that drifts from the agreed price, a response lost after settlement, a process that dies after signing. Those behaviors decide whether an agent can be trusted with money. Proctor tests them and drives a coding agent to fix them.
@@ -20,7 +27,7 @@ Hedera Harness drives Cursor or Claude Code to build features into scaffold-hbar
 ## Commands
 
 - `proctor check tasks/<task>.toml` runs the contract once against the current implementation. No agent. A task with only protocol checks against a URL is the smallest task.
-- `proctor run tasks/<task>.toml` runs the bounded loop: check, hand failures to the coding agent, inspect the change, recheck, stop at pass, at the attempt limit, or at the first infrastructure error. Output: a patch on branch `proctor/<run>`, a report, and transaction references.
+- `proctor run tasks/<task>.toml`, not implemented yet, runs the bounded loop: check, hand failures to the coding agent, inspect the change, recheck, stop at pass, at the attempt limit, or at the first infrastructure error. Output: a patch on branch `proctor/<run>`, a report, and transaction references.
 
 ## Independent measurement
 
@@ -30,7 +37,9 @@ Proctor, the verifier, the fixtures and the adapters live outside the worktree t
 
 ## Task contract
 
-Example, illustrative until the crate exists:
+Example, from the design. The shipped schema differs: hooks take a fault as a bare
+argument rather than a flag, evidence paths are named under `[evidence]`, and there
+is no `[agent]` or `[live]` section. `harness/README.md` has a contract that runs.
 
 ```toml
 [task]
@@ -98,6 +107,8 @@ Fixtures are the reference sellers with fault switches, run locally. A live pass
 | checks | run checks, compare `expect` to application output and `observe` to journal and ledger, classify into the four outcomes |
 | journal | persist attempts, hashes of task, verifier, fixtures and adapter, configuration, evidence, transaction ids and any unresolved exposure under `.proctor/runs/<id>/` |
 | hedera | inspect 402 requirements, execute bounded test purchases as mandates through Mandate core, reconcile settlement from mirror record sets, optionally publish the report hash to HCS |
+| observe | take the journal and ledger measurements a check compares against |
+| task | load a contract, hash it, and reject one that names nothing to run |
 
 Proctor depends on Mandate core for signing, reconciliation and the ledger. Mandate does not depend on Proctor.
 

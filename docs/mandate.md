@@ -132,7 +132,7 @@ The ceilings make the choice depend on what screening finds. With one to three m
 | 1 | Quote screen and investigate live; estimate events and explain. Staged expected 0.0033, bound 0.0093. Hybrid expected 0.0042, bound 0.0090. Bundle 0.0080. All feasible. Choose staged | 0 | 0.0008 | 0.0092 |
 | 2 | Buy screen for five pools | 0.0010 | 0.0008 | 0.0082 |
 | 3 | One pool material. Re-plan: events plus explain 0.0023 against a one-pool bundle 0.0032. Buy events for that pool | 0.0025 | 0.0008 | 0.0067 |
-| 4 | The runtime computes outcomes and claims; the brief is 5 KB; explain quotes 0.0005. Consume the reserve, release 0.0003. Buy. Validator confirms coverage, every calculation and citation, and three sampled transactions on Ethereum | 0.0030 | 0 | 0.0070 |
+| 4 | The runtime computes outcomes and claims; the brief is 5 KB; explain quotes 0.0005. Consume the reserve, release 0.0003. Buy. Validator confirms coverage, every calculation and every citation; provenance samples transactions on Ethereum when the mandate sets `eth_rpc` and a positive `provenance_samples`, which the fixture runs do not | 0.0030 | 0 | 0.0070 |
 | 5 | Receipts published. Deliver the report; 0.0070 unspent | 0.0030 | 0 | 0.0070 |
 
 **Economic adaptation.** The bundle seller quotes 0.0030 live for five pools, below its published ceiling of 0.0080 and below the staged expectation of 0.0033. The bundle is chosen before any screening. Nothing else changed.
