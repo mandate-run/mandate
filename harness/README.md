@@ -46,7 +46,38 @@ Exit codes are the four outcomes, in the precedence the design fixes:
   reads; failing to save it is an infrastructure error, not a quiet pass.
 - **A crash, malformed application output, or an unreachable dependency.**
 
-`proctor run`, the bounded agent loop, is not implemented yet.
+## Driving an agent
+
+`proctor run` repeats the same contract, handing each failure to a coding
+agent, until it passes or a stop condition is reached.
+
+```sh
+cargo run -p proctor -- run harness/tasks/resume.toml --dir . --attempts 3
+```
+
+The task names the adapter, an executable that receives a JSON brief on
+stdin: the contract as written, the outcome of the last attempt, every failed
+assertion, and what Proctor measured itself. It edits the worktree and exits
+0 if it ran. What it claims about its own work is never read, because an
+agent is not evidence about itself; the next attempt re-runs the contract and
+the journal decides.
+
+```toml
+[agent]
+adapter = "harness/adapters/claude-code"
+```
+
+The loop stops at the first pass, at the attempt limit, and at anything that
+makes another attempt meaningless. **Only an implementation failure reaches
+an agent.** An infrastructure error says nothing about the code under test,
+so retrying spends attempts against a broken environment. Unresolved exposure
+is stricter still: money is neither spent nor free, and editing the code and
+running the contract again could sign a second payment against the first.
+That is the failure this harness exists to catch, so it must never cause it.
+
+`--attempts` lowers the contract's own limit and never raises it, and a
+contract edited mid-run aborts, because every earlier attempt was judged
+against a different task.
 
 ## Tasks
 
