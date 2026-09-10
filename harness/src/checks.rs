@@ -375,4 +375,82 @@ mod tests {
         .collect();
         assert_eq!(codes.len(), 4);
     }
+
+    #[test]
+    fn exposure_never_reaches_an_agent_however_many_attempts_remain() {
+        // The rule Proctor exists to enforce, so it must hold at every point
+        // in the loop, not only at the last attempt.
+        for attempt in 1..=5 {
+            assert_eq!(
+                next_after(Outcome::PaymentUnresolved, attempt, 5),
+                Next::Stop("exposure is unresolved, so nothing goes to an agent"),
+                "attempt {attempt} handed money in the air to an agent"
+            );
+        }
+    }
+
+    #[test]
+    fn only_an_implementation_failure_is_the_agents_to_fix() {
+        // A broken environment says nothing about the code, so retrying it
+        // spends attempts and possibly money against the wrong problem.
+        assert!(matches!(
+            next_after(Outcome::InfrastructureError, 1, 3),
+            Next::Stop(_)
+        ));
+        assert!(matches!(next_after(Outcome::Pass, 1, 3), Next::Stop(_)));
+        assert_eq!(
+            next_after(Outcome::ImplementationFailure, 1, 3),
+            Next::Agent
+        );
+    }
+
+    #[test]
+    fn the_last_attempt_calls_no_agent() {
+        // Calling one would edit the worktree after the final judgment, so a
+        // reviewer would read a report about code that no longer exists.
+        assert_eq!(
+            next_after(Outcome::ImplementationFailure, 3, 3),
+            Next::Stop("attempts ran out")
+        );
+        assert_eq!(
+            next_after(Outcome::ImplementationFailure, 4, 3),
+            Next::Stop("attempts ran out"),
+            "a count past the limit still stops"
+        );
+        assert_eq!(
+            next_after(Outcome::ImplementationFailure, 2, 3),
+            Next::Agent
+        );
+    }
+}
+
+/// Why a `proctor run` loop stopped, or that it continues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Next {
+    /// Hand the findings to the agent and attempt again.
+    Agent,
+    /// Stop, with the reason a reader needs.
+    Stop(&'static str),
+}
+
+/// Whether another attempt may follow `outcome`.
+///
+/// Only an implementation failure is the agent's to fix. An infrastructure
+/// error says nothing about the code under test, so retrying it burns
+/// attempts against a broken environment. Unresolved exposure is the strict
+/// rule: money is neither spent nor free, and editing the code and running
+/// the contract again could sign a second payment against the first. Proctor
+/// exists to catch that failure, so it must never cause it.
+pub fn next_after(outcome: Outcome, attempt: u32, allowed: u32) -> Next {
+    match outcome {
+        Outcome::Pass => Next::Stop("the task passes"),
+        Outcome::PaymentUnresolved => {
+            Next::Stop("exposure is unresolved, so nothing goes to an agent")
+        }
+        Outcome::InfrastructureError => {
+            Next::Stop("the environment failed, so the code is not what is wrong")
+        }
+        Outcome::ImplementationFailure if attempt >= allowed => Next::Stop("attempts ran out"),
+        Outcome::ImplementationFailure => Next::Agent,
+    }
 }
