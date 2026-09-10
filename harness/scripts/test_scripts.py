@@ -18,6 +18,11 @@ spec = importlib.util.spec_from_file_location("ledger_action", SCRIPTS / "ledger
 ledger_action = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ledger_action)
 
+ADAPTERS = SCRIPTS.parent / "adapters"
+spec = importlib.util.spec_from_file_location("brief_to_prompt", ADAPTERS / "brief-to-prompt.py")
+brief_to_prompt = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(brief_to_prompt)
+
 
 class Scripts(unittest.TestCase):
     def setUp(self):
@@ -129,6 +134,61 @@ class Scripts(unittest.TestCase):
                 self.assertTrue(listening(), "unrelated listener must stay alive")
         finally:
             call("down")
+
+
+class AgentBrief(unittest.TestCase):
+    """What an agent is told is the reviewable part of the loop."""
+
+    def brief(self, **over):
+        b = {
+            "task_toml": '[task]\nname = "x"',
+            "task_name": "x",
+            "task_hash": "abc",
+            "attempt": 2,
+            "attempts_allowed": 3,
+            "outcome": "IMPLEMENTATION_FAILURE",
+            "findings": ["answer: expected value to be 3, found 1"],
+            "observed": {"ledger_settled": 6},
+        }
+        b.update(over)
+        return b
+
+    def test_the_prompt_carries_the_contract_and_the_measurements(self):
+        text = brief_to_prompt.prompt(self.brief())
+        # The contract itself, so the agent reads what Proctor hashed.
+        self.assertIn('name = "x"', text)
+        self.assertIn("found 1", text)
+        # The independent half is labelled as independent: an agent that
+        # thinks it can satisfy `observe` by printing will waste an attempt.
+        self.assertIn("ledger_settled = 6", text)
+        self.assertIn("application does not write", text)
+        self.assertIn("attempt 2 of 3", text)
+
+    def test_the_prompt_forbids_editing_the_contract(self):
+        # The one instruction that keeps a run meaningful.
+        text = brief_to_prompt.prompt(self.brief())
+        self.assertIn("never the task contract", text)
+        self.assertIn("outstanding", text, "a payment rule must reach the agent")
+
+    def test_a_brief_without_findings_still_says_what_to_do(self):
+        # PAYMENT_UNRESOLVED never reaches an agent, but an attempt can fail
+        # on measurements alone, so an empty findings list is not a crash.
+        text = brief_to_prompt.prompt(self.brief(findings=[], observed={}))
+        self.assertIn("no assertion failed", text)
+        self.assertIn("Make the change now", text)
+
+    def test_a_brief_that_is_not_a_brief_is_refused(self):
+        def run(payload):
+            return subprocess.run(
+                ["python3", str(ADAPTERS / "brief-to-prompt.py")],
+                input=payload, capture_output=True, text=True, check=False,
+            )
+
+        self.assertNotEqual(run("not json").returncode, 0)
+        # A JSON document missing what the prompt needs is refused rather
+        # than turned into a prompt with holes in it.
+        self.assertNotEqual(run(json.dumps({"attempt": 1})).returncode, 0)
+        self.assertEqual(run(json.dumps(self.brief())).returncode, 0)
 
 
 if __name__ == "__main__":
