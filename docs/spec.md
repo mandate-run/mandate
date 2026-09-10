@@ -245,9 +245,15 @@ Reconciliation: a `TransactionReceiptQuery` against consensus nodes, free of cha
 
 The runtime payment account holds exactly `budget.service.total` of the service asset, is associated with that token when it is an HTS token, and holds `budget.audit.total` in HBAR for association and HCS fees. The facilitator pays transfer fees.
 
+Before signing an HTS payment, the runtime requires mirror-node metadata for the exact fungible token, an absent fee-schedule key, and an explicitly empty custom-fee schedule. Mutable, fee-bearing or unverifiable tokens are refused. Reconciliation checks aggregate buyer debits as well as the expected transfer. One runtime at a time owns a ledger file; it holds an operating-system file lock until the ledger closes.
+
+Opening an older ledger adds missing recovery columns without deleting payments or receipts. Retry timestamps are conservatively backfilled from the last stored update. If a legacy mandate has paid work but no persisted analysis window, resuming refuses to choose a new window; reconcile its payments and migrate the original window from the stored requests first.
+
 ## 11. Receipts
 
 One HCS message per receipt: JSON, at most 1024 bytes, section 2.6 fields only. Never inputs, prompts, evidence, reports or payment ids. One configured topic; `mandate_id` and `seq` identify the run. Receipts are written to the local ledger first and published by a queue that retries; I9 governs delivery.
+
+An audit submit's transaction id is persisted before submission. A lost acknowledgment does not authorize a replacement: the queue looks up the original transaction and matches its consensus timestamp and message bytes on the configured topic to recover the sequence number. A positive failure permits retry after fee reconciliation. An absent or ambiguous record retains the fee cap even after expiry. A confirmed success with a message not yet available leaves the receipt pending without submitting it again.
 
 ## 12. Transcript
 

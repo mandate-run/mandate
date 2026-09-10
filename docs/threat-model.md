@@ -9,6 +9,8 @@ Scope: the buyer runtime. Sellers, the network path and the facilitator are untr
 | Recipient or fee payer substitution in the signed transfer | buyer | both fixed inside the transfer the buyer signs; fee payer pinned to `/supported` | none | I2 |
 | Facilitator submits a different transaction under the reserved id | buyer, ledger | settlement requires a record whose transfers match debit, credit, asset and amount; a receipt status is never evidence | misaccounting prevented; delay | I5 |
 | Overspend across steps | buyer | cap on settled + outstanding + held; completion reserve; full-coverage bound before the first purchase | none | I1, I4, 5 |
+| HTS custom fees outside the service budget | buyer | before signing, exact token metadata must prove an immutable empty fee schedule; aggregate record debits checked afterward | refused when metadata is unavailable | I1, 10 |
+| Concurrent runtimes using one ledger | buyer | exclusive file lock covers planning, signing, recovery and publication | other processes must use the runtime rather than bypass its lock | I1, I6 |
 | Double payment on retry | buyer, ledger | one payment id per purchase; resend the same signed bytes; submissions capped and committed before sending; tx id single-use on ledger | none | I6, I8 |
 | Crash between sign and send, after settlement before saving the result, or after saving before validation | buyer | signed bytes, request and response persisted; payment and delivery tracked separately; recovery resends, fetches or validates | none | I8, 6 |
 | No ledger record after expiry | buyer | stays unresolved and reserved; only a later record changes it | funds held until a record appears | I5 |
@@ -24,6 +26,6 @@ Scope: the buyer runtime. Sellers, the network path and the facilitator are untr
 | Input leakage while quoting | buyer | only pinned, allowed sellers contacted; receipts hold hashes | task input seen by quoted sellers | 4, 11 |
 | Runaway loop | buyer | each logical purchase once; deadline | none | I6, I12 |
 | Wrong or tampered manifest | trust | principal approves and pins; hash in receipt 0; quotes still checked | on-tariff payments to a wrong seller, within caps | 2.2, I3 |
-| HCS publication failure | buyer | local durable receipts; retry queue; `audit_pending`; never a repurchase | audit trail delayed | I9 |
+| HCS publication failure or lost acknowledgment | buyer | persisted transaction id; recover sequence by timestamp and message bytes; no replacement while outcome is unknown; absent records retain the fee cap | audit trail delayed; fee reservation may remain held | I9, I10 |
 
 Out of scope for this build: seller identity, escrow and refunds, rate limits across mandates, mainnet key custody.
