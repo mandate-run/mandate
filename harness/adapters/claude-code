@@ -1,0 +1,37 @@
+#!/bin/sh
+# Proctor agent adapter for the Claude Code CLI.
+#
+# Reads a brief on stdin, as `proctor run` writes it: the task contract, the
+# outcome of the last attempt, every failed assertion, and what Proctor
+# measured itself. Runs one non-interactive Claude Code turn against the
+# worktree.
+#
+#   [agent]
+#   adapter = "harness/adapters/claude-code"
+#
+# The adapter never reports whether it fixed anything, only whether it ran.
+# An agent's opinion of its own work is not evidence: the next attempt
+# re-runs the contract, and the journal decides.
+set -eu
+
+here=$(cd "$(dirname "$0")" && pwd)
+
+command -v claude >/dev/null 2>&1 || {
+  echo "adapter: the claude CLI is not on PATH" >&2
+  exit 2
+}
+command -v python3 >/dev/null 2>&1 || {
+  echo "adapter: python3 is not on PATH" >&2
+  exit 2
+}
+
+prompt=$(python3 "$here/brief-to-prompt.py") || exit 2
+[ -n "$prompt" ] || { echo "adapter: the prompt came out empty" >&2; exit 2; }
+
+# The adapter edits the worktree and must not wait for a human, so the
+# permission decision is made here rather than prompted for. It is deliberately
+# narrow: no network tools, and nothing that could reach a wallet.
+exec claude --print \
+  --permission-mode acceptEdits \
+  --allowed-tools "Read,Edit,Write,Grep,Glob" \
+  "$prompt"
