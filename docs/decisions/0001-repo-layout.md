@@ -13,3 +13,9 @@ current stable: the workspace builds, tests, lints and formats clean on it,
 and a project submitted for review should be on the compiler a reviewer has.
 The pin lives in `rust-toolchain.toml` alone, so CI and a clean clone follow
 it without a second place to update.
+
+**Amended 2026-09-10.** CI grew past what this decision recorded: the sellers
+run their test suite rather than only building and typechecking, and the
+harness's Python helpers run their own tests. The fixtures the tests share
+sit behind a `testing` feature on the `mandate` crate, off by default, so a
+release binary carries no throwaway key and no fake market.
