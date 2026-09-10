@@ -132,7 +132,7 @@ Proctor depends on Mandate core for signing, reconciliation and the ledger. Mand
 | "Demo video (≤5 minutes) showing improvement" | The Proctor before-and-after segment of the project video |
 | "Harness for uncovered language/framework" | Rust workspaces and Node services |
 | "New service coverage" | x402 payment recovery on Hedera, HCS receipts, HTS association |
-| "Clear before/after developer experience evidence" | Manual reproduction of a payment bug versus `proctor run`; Mandate's recovery increments built through it |
+| "Clear before/after developer experience evidence" | Manual reproduction of a payment bug versus `proctor check`: reverting the recovery fix in a clone makes the resume task report six settlements where the contract allows three, and restoring it passes |
 
 ## Deferred
 
