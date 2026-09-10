@@ -111,6 +111,51 @@ async function paid(base: string, path: string, header: string, method = "GET", 
 
 const ID = "pay_0123456789abcdef";
 
+test("disconnect during settlement keeps ownership until the stored result is ready", { timeout: 5000 }, async () => {
+  const fake = fakeFacilitator();
+  const original = fake.client.settle.bind(fake.client);
+  const deferred = () => {
+    let resolve: () => void = () => undefined;
+    const promise = new Promise<void>((done) => { resolve = done; });
+    return { promise, resolve };
+  };
+  const entered = deferred();
+  const release = deferred();
+  fake.client.settle = async (...args) => {
+    entered.resolve();
+    await release.promise;
+    return original(...args);
+  };
+  let work = 0;
+  const store = new MemoryStore();
+  const app = createSeller({ network: "hedera:testnet", payTo: "0.0.111", facilitatorUrl: "http://127.0.0.1:9", asset: USDC_TESTNET,
+    store, journal: new Journal(null), facilitator: fake.client }, [
+    { path: "/slow", price: fixedPrice(1000), description: "slow", handler: (_req, res) => void res.json({ nonce: ++work }) },
+  ]);
+  const server = app.listen(0);
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const header = headerFor(await quote(base, "/slow"), ID, "AA==");
+    const controller = new AbortController();
+    const first = fetch(`${base}/slow`, { headers: { "PAYMENT-SIGNATURE": header }, signal: controller.signal });
+    await entered.promise;
+    controller.abort();
+    await assert.rejects(first);
+    const retry = paid(base, "/slow", header);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    release.resolve();
+    const result = await retry;
+    assert.equal(result.status, 200);
+    assert.equal(work, 1);
+    assert.deepEqual(fake.calls, { verify: 1, settle: 1 });
+    assert.equal(store.size, 1);
+  } finally {
+    release.resolve();
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
 test("a paid request settles once and an identical resend is served from the store", async () => {
   const s = start();
   try {

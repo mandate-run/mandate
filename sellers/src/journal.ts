@@ -33,7 +33,7 @@ export class Journal {
     this.entries.push(entry);
     if (this.path === null) return;
     mkdirSync(dirname(this.path), { recursive: true });
-    appendFileSync(this.path, `${JSON.stringify(entry)}\n`);
+    appendFileSync(this.path, `${JSON.stringify(entry)}\n`, { flush: true });
   }
 
   all(): readonly JournalEntry[] {

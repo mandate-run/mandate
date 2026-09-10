@@ -59,7 +59,7 @@ export class FileStore extends MemoryStore {
 
   override set(id: string, result: StoredResult): void {
     mkdirSync(dirname(this.path), { recursive: true });
-    appendFileSync(this.path, `${JSON.stringify({ id, result })}\n`);
+    appendFileSync(this.path, `${JSON.stringify({ id, result })}\n`, { flush: true });
     super.set(id, result);
   }
 }
@@ -219,7 +219,10 @@ export function replayMiddleware(store: ResultStore, claims: Claims): RequestHan
         continue;
       }
       res.locals.release = claim.release;
-      res.once("close", claim.release);
+      // A disconnected buyer does not cancel the handler or settlement.
+      // Hold ownership until capture has persisted its result and ended the
+      // response; otherwise a retry can run the same purchase concurrently.
+      res.once("finish", claim.release);
       return next();
     }
     conflict(res, "payment-identifier is contended; retry");
