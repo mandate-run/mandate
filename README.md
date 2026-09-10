@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/img/mandate-banner.svg" alt="Mandate" width="820">
+<img src="docs/img/mandate-banner.png" alt="Mandate — Give your agent a mandate, not a credit card." width="820">
 
 # Mandate
 
