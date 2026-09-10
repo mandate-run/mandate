@@ -2,20 +2,13 @@
 
 <img src="docs/img/mandate-banner.png" alt="Mandate — Give your agent a mandate, not a credit card." width="820">
 
-# Mandate
-
-**Give your agent a mandate, not a credit card.**
-
-A buyer runtime for agents that pay per request. It plans what to buy, refuses
-what it cannot justify, and proves every payment from the ledger.
-
 [![CI](https://github.com/mandate-run/mandate/actions/workflows/ci.yml/badge.svg)](https://github.com/mandate-run/mandate/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.98-orange.svg)](rust-toolchain.toml)
 [![Hedera](https://img.shields.io/badge/Hedera-testnet-7040ff.svg)](https://hashscan.io/testnet/topic/0.0.10410389)
 [![x402](https://img.shields.io/badge/x402-exact%20scheme-black.svg)](docs/spec.md)
 
-[Quick start](#quick-start) · [How it works](#how-it-works) · [Proctor](#proctor-the-harness) · [Docs](#documentation)
+**[Quick start](#quick-start) · [How it works](#how-it-works) · [Proctor](#proctor-the-harness) · [Docs](#documentation)**
 
 </div>
 
