@@ -4,12 +4,12 @@ Working name. Proctor builds Hedera services from an acceptance contract, tests 
 
 ![Proctor loop](img/proctor-loop.svg)
 
-**What is built.** `proctor check` and everything it needs: hooks, task
-contracts, independent measurement from the seller journal and the buyer
-ledger, and the four outcomes. `proctor run`, the agent loop, is not: it
-prints that and exits 2, so the `[agent]` and `[live]` sections below and the
-adapter are design, not schema. `harness/README.md` documents the contract
-that ships; this document is why it is shaped that way.
+**What is built.** `proctor check`, `proctor run` and everything they need:
+hooks, task contracts, an agent adapter, independent measurement from the
+seller journal and the buyer ledger, and the four outcomes. The `[live]`
+section below is still design rather than schema, and a run leaves a report
+rather than a branch. `harness/README.md` documents the contract that ships;
+this document is why it is shaped that way.
 
 ## Why a second harness
 
@@ -27,7 +27,7 @@ Hedera Harness drives Cursor or Claude Code to build features into scaffold-hbar
 ## Commands
 
 - `proctor check tasks/<task>.toml` runs the contract once against the current implementation. No agent. A task with only protocol checks against a URL is the smallest task.
-- `proctor run tasks/<task>.toml`, not implemented yet, runs the bounded loop: check, hand failures to the coding agent, inspect the change, recheck, stop at pass, at the attempt limit, or at the first infrastructure error. Output: a patch on branch `proctor/<run>`, a report, and transaction references.
+- `proctor run tasks/<task>.toml` runs the bounded loop: check, hand the findings to the agent adapter, recheck, stop at pass, at the attempt limit, or at anything that makes another attempt meaningless. Only an implementation failure reaches an agent. Output: a report over every attempt, and the worktree the adapter left behind.
 
 ## Independent measurement
 
@@ -38,8 +38,9 @@ Proctor, the verifier, the fixtures and the adapters live outside the worktree t
 ## Task contract
 
 Example, from the design. The shipped schema differs: hooks take a fault as a bare
-argument rather than a flag, evidence paths are named under `[evidence]`, and there
-is no `[agent]` or `[live]` section. `harness/README.md` has a contract that runs.
+argument rather than a flag, evidence paths are named under `[evidence]`, `[agent]`
+takes an `adapter` command and no `[live]` section exists. `harness/README.md` has a
+contract that runs.
 
 ```toml
 [task]
@@ -132,7 +133,7 @@ Proctor depends on Mandate core for signing, reconciliation and the ledger. Mand
 | "Demo video (≤5 minutes) showing improvement" | The Proctor before-and-after segment of the project video |
 | "Harness for uncovered language/framework" | Rust workspaces and Node services |
 | "New service coverage" | x402 payment recovery on Hedera, HCS receipts, HTS association |
-| "Clear before/after developer experience evidence" | Manual reproduction of a payment bug versus `proctor check`: reverting the recovery fix in a clone makes the resume task report six settlements where the contract allows three, and restoring it passes |
+| "Clear before/after developer experience evidence" | Manual reproduction of a payment bug versus `proctor run`: reverting the recovery fix in a clone makes the resume task report six settlements where the contract allows three, and one loop attempt takes it back to three and a pass |
 
 ## Deferred
 
