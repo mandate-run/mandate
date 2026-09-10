@@ -90,7 +90,8 @@ From the journal: `fixture_requests`, `fixture_signed_payloads`,
 `fixture_distinct_payloads`, `fixture_payment_ids`, `fixture_settle_calls`,
 `fixture_settlements`, `fixture_served_from_store`, `fixture_dropped`,
 `fixture_rejected`, `fixture_distinct_results`, `fixture_errors`,
-`fixture_routes`, `fixture_requests_<route>`.
+`fixture_routes`, `fixture_requests_<route>`, and `fixture_journal_missing`
+when the task names a journal the fixture has not written yet.
 
 From the ledger: `ledger_authorizations`, `ledger_payment_ids`,
 `ledger_signed_payloads`, `ledger_submissions`, `ledger_retrievals`,
