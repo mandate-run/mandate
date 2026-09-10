@@ -32,7 +32,10 @@ async fn main() -> anyhow::Result<()> {
         .transpose()
         .context("amount must be a whole number of units")?
         .unwrap_or(20);
-    let supply = whole * 10u64.pow(DECIMALS);
+    let supply = whole
+        .checked_mul(10u64.pow(DECIMALS))
+        .filter(|supply| *supply > 0 && *supply <= i64::MAX as u64)
+        .context("supply must be positive and fit in signed 64-bit atomic units")?;
 
     let cfg = Config::load()?;
     let signer = cfg.signer()?;

@@ -363,3 +363,31 @@ async fn a_late_reconciliation_appends_a_resolution_receipt() {
     assert!(again.is_empty(), "a terminal row is not reconciled again");
     assert_eq!(ledger.receipts("m1").unwrap().len(), before + 1);
 }
+
+#[tokio::test]
+async fn fee_bearing_token_is_refused_before_authorization_or_node_lookup() {
+    let info = serde_json::json!({"token_id": "0.0.429274", "type": "FUNGIBLE_COMMON", "fee_schedule_key": null,
+        "custom_fees": {"fixed_fees": [{"amount": 500}], "fractional_fees": []}});
+    // The stub's non-transaction endpoint supplies the token metadata.
+    let stub = Stub::start("{}".into(), Some(info.to_string()));
+    let http = reqwest::Client::new();
+    let mirror = MirrorNode::new(http.clone(), stub.url());
+    let signer = test_signer();
+    let payer = payer(&signer, &mirror, &http);
+    let now = OffsetDateTime::now_utc();
+    let mut ledger = Ledger::in_memory().unwrap();
+    ledger.insert_mandate(&mandate_row(), now).unwrap();
+    let quote = mandate::testing::quote_fixture(1500, now);
+    let error = payer
+        .prepare(&mut ledger, "m1", "events", None, &quote)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("custom fees"), "{error}");
+    assert!(ledger.authorizations("m1").unwrap().is_empty());
+    assert_eq!(
+        stub.seller_calls.load(Ordering::SeqCst),
+        1,
+        "only token metadata was requested"
+    );
+    assert_eq!(stub.mirror_calls.load(Ordering::SeqCst), 0);
+}

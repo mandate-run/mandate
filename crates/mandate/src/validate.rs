@@ -432,8 +432,20 @@ fn check_header(
             format!("{what}: indexed_block_timestamp is null"),
         ),
         Some(ts) => {
-            let age = quoted_at.unix_timestamp() - ts as i64;
-            if age > rules.max_data_age_s as i64 {
+            // A seller-controlled u64 must not wrap into an i64 timestamp.
+            // The indexed head can advance during the bounded paid request,
+            // but cannot legitimately be arbitrarily ahead of its quote.
+            let age = i128::from(quoted_at.unix_timestamp()) - i128::from(ts);
+            if age < -120 {
+                fail(
+                    failures,
+                    Reason::Freshness,
+                    format!(
+                        "{what}: indexed block timestamp is ahead of the quote's payment window"
+                    ),
+                );
+            }
+            if age > i128::from(rules.max_data_age_s) {
                 fail(
                     failures,
                     Reason::Freshness,
@@ -1493,6 +1505,21 @@ mod tests {
                 .contains("is not among the held events with that amount")),
             "{f:?}"
         );
+    }
+
+    #[test]
+    fn future_index_timestamps_do_not_bypass_freshness() {
+        let required = vec![POOL.to_owned()];
+        let (mut screen, _) = pair();
+        for timestamp in [u64::MAX, TO + 3600] {
+            screen.header.indexed_block_timestamp = Some(timestamp);
+            let f = validate_deliveries(&rules(&required), &delivered(&screen, None, None));
+            assert!(
+                f.iter()
+                    .any(|f| f.reason == Reason::Freshness && f.detail.contains("ahead")),
+                "{f:?}"
+            );
+        }
     }
 
     #[test]

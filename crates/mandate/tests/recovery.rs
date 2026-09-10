@@ -63,6 +63,17 @@ impl Drop for Scratch {
 }
 
 async fn run_with(m: &Mandate, market: &FakeMarket, ledger: Ledger, resume: bool) -> Report {
+    run_result(m, market, ledger, resume)
+        .await
+        .expect("run completes")
+}
+
+async fn run_result(
+    m: &Mandate,
+    market: &FakeMarket,
+    ledger: Ledger,
+    resume: bool,
+) -> Result<Report, mandate::run::RunError> {
     let manifest = Manifest::from_json(MANIFEST_JSON).unwrap();
     let http = reqwest::Client::new();
     let inputs = Inputs {
@@ -77,9 +88,7 @@ async fn run_with(m: &Mandate, market: &FakeMarket, ledger: Ledger, resume: bool
         quiet: true,
         resume,
     };
-    execute(inputs, ledger, market, market, &FakePublisher)
-        .await
-        .expect("run completes")
+    execute(inputs, ledger, market, market, &FakePublisher).await
 }
 
 /// The general requirement: whatever the mirror node's timing, the original
@@ -488,4 +497,31 @@ async fn a_resume_keeps_the_original_window() {
         "the resumed run investigates the window it already paid for"
     );
     assert_eq!(r.status, Status::Delivered, "{:?}", r.transcript);
+}
+
+#[tokio::test]
+async fn a_legacy_paid_run_without_a_window_cannot_change_the_task() {
+    let market = FakeMarket::new(vec![POOLS[1].to_owned()]);
+    let scratch = Scratch::new("legacy-window");
+    let m = mandate("legacy-window");
+    crash_after(&scratch, &m, &market, 1).await;
+    let before = scratch.ledger().authorizations(&m.id).unwrap().len();
+    let connection = rusqlite::Connection::open(scratch.path()).unwrap();
+    connection
+        .execute("UPDATE mandates SET window_from = 0, window_to = 0", [])
+        .unwrap();
+    drop(connection);
+    let error = run_result(&m, &market, scratch.ledger(), true)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("without a pinned analysis window"),
+        "{error}"
+    );
+    assert_eq!(
+        scratch.ledger().authorizations(&m.id).unwrap().len(),
+        before
+    );
 }
