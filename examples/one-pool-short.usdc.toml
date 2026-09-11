@@ -15,7 +15,7 @@ manifest = { path = "manifest.usdc.json", hash = "50c4cb50c38381469e19a36fac9271
 sellers = "allowlist"
 allowlist = ["mandate-sellers"]
 max_single_payment = "0.0090"
-deadline = 2026-09-13T16:00:00Z
+deadline = 2026-12-31T23:59:59Z
 eth_rpc = "https://ethereum-rpc.publicnode.com"
 
 [mandate.requirements]
