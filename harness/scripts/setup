@@ -143,7 +143,9 @@ cat <<'MSG'
 
   cargo run -p mandate -- run examples/five-pools.hbar.toml --id demo-$(date +%s)
   cargo run -p proctor  -- check harness/tasks/resume.toml --dir .
+MSG
+cat <<MSG
 
-The sellers are running on port 4021 with canned Graph facts. Stop them with
+The sellers are running on port $port with canned Graph facts. Stop them with
 harness/scripts/sellers down.
 MSG
