@@ -134,9 +134,10 @@ The runtime computes per-pool outcomes and claims from those facts, decides
 what to buy next, and checks the explanation against them. `Pool.liquidity` is
 in-range liquidity: reported, never used for materiality.
 
-Without a `GRAPH_API_KEY` the sellers serve canned facts, so a clean clone runs
-with no accounts anywhere. Adding the key switches them to the live subgraph;
-an `ANTHROPIC_API_KEY` switches the explanation from a template to a model.
+Without a `GRAPH_API_KEY` the sellers serve canned facts, so a clean clone
+needs no third-party accounts beyond the two Hedera testnet ones above. Adding
+the key switches them to the live subgraph; an `ANTHROPIC_API_KEY` switches the
+explanation from a template to a model.
 
 ## Proctor, the harness
 
