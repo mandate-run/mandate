@@ -1,90 +1,235 @@
-/* Mandate. The palette is taken from the cover art: deep green ground,
-   bone text, a single warm accent for the decision that was chosen. */
+/* Mandate. Palette taken from the cover art: deep green ground, bone text,
+   one accent for the route that was chosen. */
 :root {
-  --ink: #0f1d17;
-  --ground: #f3f1e7;
-  --panel: #ffffff;
-  --line: #d9d6c6;
-  --muted: #5c6b62;
-  --deep: #163529;
-  --accent: #2f7d5b;
-  --warn: #9a5b22;
-  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-  --sans: ui-sans-serif, -apple-system, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
+  --ink: #14231c;
+  --ground: #f4f2e9;
+  --panel: #fff;
+  --line: #ddd9c9;
+  --hair: #edeade;
+  --muted: #5d6c63;
+  --deep: #17342a;
+  --accent: #2d7a58;
+  --accent-soft: #e4efe8;
+  --warn: #96571f;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
+
+  /* Spacing. Every padding and margin on this page is one of these. */
+  --s1: 4px;  --s2: 8px;   --s3: 12px; --s4: 16px; --s5: 24px;
+  --s6: 32px; --s7: 40px;  --s8: 56px; --s9: 72px; --s10: 96px;
+
+  /* Type. Seven sizes, nothing else. */
+  --t-micro: 11px;   /* eyebrows, captions, pills */
+  --t-small: 13px;   /* table cells, chart labels */
+  --t-body:  15px;   /* default running text */
+  --t-lead:  17px;   /* section notes, hero sentence */
+  --t-num:   24px;   /* figures in cards */
+  --t-head:  28px;   /* section headings */
+  --t-hero:  clamp(32px, 3.8vw, 50px);
+
+  --col: 1080px;
+  --gutter: 40px;
 }
+
 * { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0; background: var(--ground); color: var(--ink);
-  font-family: var(--sans); line-height: 1.55;
-  -webkit-font-smoothing: antialiased;
+  font-family: var(--sans); font-size: var(--t-lead); line-height: 1.6;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
 }
 a { color: var(--accent); }
-.wrap { max-width: 940px; margin: 0 auto; padding: 0 24px; }
+.wrap { max-width: var(--col); margin: 0 auto; padding: 0 var(--gutter); }
 
-/* Hero */
-.hero { background: var(--deep); color: var(--ground); padding: 0 0 40px; }
-.hero img.cover { width: 100%; display: block; }
-.hero .wrap { padding-top: 34px; }
-.hero h1 { font-size: 15px; letter-spacing: .14em; text-transform: uppercase;
-  color: #9fbfae; margin: 0 0 14px; font-weight: 600; }
-.hero p.lead { font-size: 25px; line-height: 1.35; margin: 0 0 18px; max-width: 34em; }
-.hero p.sub { color: #b9cfc2; margin: 0 0 24px; max-width: 42em; }
-.links a {
-  display: inline-block; margin-right: 10px; margin-bottom: 8px; padding: 9px 16px;
-  border: 1px solid #33604a; border-radius: 6px; color: var(--ground);
-  text-decoration: none; font-size: 14px;
+/* Hero. Copy on the left, the argument drawn on the right. No photograph:
+   the figure is the hero, because it says in one glance what the page spends
+   the rest of its length proving. */
+.hero {
+  background:
+    radial-gradient(900px 460px at 88% 22%, #1f4a39 0%, transparent 66%),
+    linear-gradient(166deg, #17342a 0%, #0d211a 100%);
+  color: var(--ground);
+  border-bottom: 1px solid #0a1a14;
 }
-.links a.primary { background: var(--ground); color: var(--deep); border-color: var(--ground); font-weight: 600; }
+.hero-grid {
+  display: grid; grid-template-columns: minmax(0, 1fr) 470px;
+  gap: var(--s8); align-items: center;
+  padding-top: var(--s8); padding-bottom: var(--s8);
+}
 
-/* Sections */
-section { padding: 52px 0; border-bottom: 1px solid var(--line); }
-h2 { font-size: 13px; letter-spacing: .14em; text-transform: uppercase;
-  color: var(--muted); margin: 0 0 6px; font-weight: 600; }
-h3 { font-size: 27px; margin: 0 0 12px; line-height: 1.25; }
-.note { color: var(--muted); max-width: 46em; margin: 0 0 26px; }
+.hero-copy { min-width: 0; }
+.mark { display: flex; align-items: center; gap: var(--s3); margin-bottom: var(--s7); }
+.mark img { border-radius: 7px; display: block; }
+.wordmark { font-size: var(--t-lead); font-weight: 650; letter-spacing: -.015em; }
+.chip {
+  margin-left: var(--s1); padding: var(--s1) var(--s3); border-radius: 20px;
+  border: 1px solid #35604d; color: #9dc0ad;
+  font-size: var(--t-micro); letter-spacing: .1em; text-transform: uppercase; font-weight: 600;
+}
 
-/* Plan cards: the decision, side by side */
-.plans { display: grid; gap: 14px; grid-template-columns: repeat(3, 1fr); }
-.plan { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
-.plan.chosen { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(47,125,91,.18); }
-.plan .kind { font-family: var(--mono); font-size: 13px; color: var(--muted); }
-.plan .tag { float: right; font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
-  color: var(--accent); font-weight: 700; }
-.plan .tag.no { color: var(--muted); font-weight: 500; }
-.plan .amt { font-family: var(--mono); font-size: 23px; margin: 10px 0 2px; }
-.plan .lbl { font-size: 12px; color: var(--muted); }
-.plan .bound { font-family: var(--mono); font-size: 14px; color: var(--muted); margin-top: 8px; }
-.plan ul { margin: 12px 0 0; padding-left: 16px; font-size: 13px; color: var(--muted); }
+.hero h1 {
+  font-size: var(--t-hero); line-height: 1.06;
+  letter-spacing: -.034em; font-weight: 680;
+  margin: 0 0 var(--s5); color: #fbfaf4;
+}
+.hero .sub {
+  color: #a9c6b7; margin: 0 0 var(--s7); max-width: 24em;
+  font-size: var(--t-lead); line-height: 1.55;
+}
 
-/* Tables */
-table { width: 100%; border-collapse: collapse; background: var(--panel);
-  border: 1px solid var(--line); border-radius: 10px; overflow: hidden; font-size: 14px; }
-th { text-align: left; font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
-  color: var(--muted); padding: 11px 14px; border-bottom: 1px solid var(--line); font-weight: 600; }
-td { padding: 11px 14px; border-bottom: 1px solid #eceadf; }
+.links { margin: 0; }
+.links a {
+  display: inline-block; margin: 0 var(--s2) var(--s2) 0; padding: var(--s3) var(--s5);
+  border: 1px solid #37634e; border-radius: 8px; color: var(--ground);
+  text-decoration: none; font-size: var(--t-body); font-weight: 500;
+  transition: background .15s, border-color .15s, transform .15s;
+}
+.links a:hover { background: #1d4034; border-color: #4a7a62; transform: translateY(-1px); }
+.links a.primary {
+  background: var(--ground); color: #14231c; border-color: var(--ground); font-weight: 620;
+}
+.links a.primary:hover { background: #fff; border-color: #fff; }
+
+/* The hero figure */
+.hero-fig { min-width: 0; }
+.hero-figure { width: 100%; height: auto; display: block; overflow: visible; }
+.hf-cap { font: 700 var(--t-micro) var(--sans); fill: #6f9585; letter-spacing: .18em; }
+.hf-line { font: 500 var(--t-body) var(--sans); fill: #eaf3ec; }
+.hf-line.mono { font-family: var(--mono); font-size: var(--t-small); }
+.hf-found { font: 400 var(--t-small) var(--sans); fill: #8fae9e; }
+.hf-pay { font: 600 var(--t-small) var(--mono); fill: #6fe0ac; }
+.hf-big { font: 600 40px var(--mono); fill: #fbfaf4; letter-spacing: -.035em; }
+.hf-sub { font: 400 var(--t-small) var(--sans); fill: #7fa393; }
+.hf-left { font: 500 var(--t-num) var(--mono); fill: #cfe3d6; letter-spacing: -.02em; }
+
+@media (max-width: 980px) {
+  .hero-grid {
+    grid-template-columns: 1fr; gap: var(--s8);
+    padding-top: var(--s8); padding-bottom: var(--s8);
+  }
+  .hero-fig { max-width: 520px; }
+}
+
+/* The loop, above the fold of the first section */
+.explainer { background: var(--panel); border-bottom: 1px solid var(--line); padding: var(--s9) 0; }
+
+/* Charts. Everything is inline SVG scaled to the column, so it stays sharp
+   at any density and needs no library. */
+.chart-host { margin: var(--s6) 0 0; }
+.chart { width: 100%; height: auto; display: block; overflow: visible; }
+.loop { margin: 0; }
+.c-key { font: 600 var(--t-small) var(--sans); fill: var(--ink); }
+.c-key.strong { font-weight: 700; }
+.c-mute { font: 400 var(--t-small) var(--sans); fill: var(--muted); }
+.c-head { font: 700 var(--t-micro) var(--sans); fill: var(--muted); letter-spacing: .12em;
+  text-transform: uppercase; }
+.c-price { font: 500 var(--t-body) var(--mono); fill: var(--muted); letter-spacing: -.01em; }
+.c-price.strong { font-size: var(--t-num); fill: var(--ink); font-weight: 600; }
+.c-route { font: 600 var(--t-body) var(--sans); fill: var(--muted); }
+.c-route.strong { fill: var(--ink); font-weight: 700; }
+.c-badge { font: 700 var(--t-micro) var(--sans); fill: #fff; letter-spacing: .1em;
+  text-transform: uppercase; }
+.c-foot { font: 600 var(--t-small) var(--sans); fill: var(--ink); }
+.lp-n { font: 700 var(--t-micro) var(--sans); fill: var(--accent); }
+.lp-t { font: 650 var(--t-body) var(--sans); fill: var(--ink); }
+.lp-s { font: 400 var(--t-small) var(--sans); fill: var(--muted); }
+.lp-loop { font: 600 var(--t-micro) var(--sans); fill: var(--accent);
+  letter-spacing: .1em; text-transform: uppercase; }
+
+/* The re-planning chart is the argument of the whole page, so it gets its
+   own band rather than sitting inline with the body text. */
+.chart-stage {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 14px; padding: var(--s7) var(--s6) var(--s6);
+  margin: var(--s7) 0 0;
+}
+.chart-hero { max-width: 100%; }
+.seg rect { transition: opacity .15s; }
+.chart .seg:hover rect { opacity: .82; }
+.route.chosen { filter: drop-shadow(0 1px 2px rgba(45,122,88,.22)); }
+
+/* Motion is decoration here: the numbers are all still readable without it. */
+@media (prefers-reduced-motion: reduce) {
+  .chart animate { display: none; }
+  .chart rect[width="0"] { width: auto; }
+}
+
+section { padding: var(--s9) 0; border-bottom: 1px solid var(--line); }
+h2 {
+  font-size: var(--t-micro); letter-spacing: .16em; text-transform: uppercase;
+  color: var(--muted); margin: 0 0 var(--s3); font-weight: 700;
+}
+h3 { font-size: var(--t-head); margin: 0 0 var(--s4); line-height: 1.28; max-width: 20em;
+  letter-spacing: -.02em; }
+.note { color: var(--muted); max-width: 44em; margin: 0 0 var(--s5); }
+.fineprint { color: var(--muted); font-size: var(--t-small); margin: var(--s5) 0 0; }
+
+/* Legend explaining the two numbers on every card */
+
+/* Route cards */
+.plans { display: grid; gap: var(--s4); grid-template-columns: repeat(3, 1fr); }
+.plan {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 11px; padding: var(--s5);
+}
+.plan.chosen { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(45,122,88,.16); }
+.plan .head { display: flex; justify-content: space-between; align-items: baseline; }
+.plan .kind { font-size: var(--t-body); font-weight: 600; }
+.plan .tag {
+  font-size: var(--t-micro); letter-spacing: .08em; text-transform: uppercase;
+  color: var(--accent); font-weight: 700;
+}
+.plan .tag.no { color: var(--muted); font-weight: 600; }
+.plan .amt { font-family: var(--mono); font-size: var(--t-num); margin: var(--s4) 0 var(--s1);
+  letter-spacing: -.02em; }
+.plan .lbl { font-size: var(--t-small); color: var(--muted); }
+.plan .bound { font-size: var(--t-small); color: var(--muted); margin-top: var(--s3); }
+.plan .bound b { font-family: var(--mono); font-weight: 500; color: var(--ink); }
+.plan ul { margin: var(--s4) 0 0; padding-left: var(--s4); font-size: var(--t-small); color: var(--muted); }
+.plan li { margin-bottom: var(--s1); }
+
+table {
+  width: 100%; border-collapse: collapse; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 10px; overflow: hidden; font-size: var(--t-body);
+}
+th {
+  text-align: left; font-size: var(--t-micro); letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted); padding: var(--s3) var(--s4); border-bottom: 1px solid var(--line); font-weight: 700;
+}
+td { padding: var(--s3) var(--s4); border-bottom: 1px solid var(--hair); vertical-align: top; }
 tr:last-child td { border-bottom: 0; }
-td.mono, th.mono { font-family: var(--mono); font-size: 13px; }
-.scroll { overflow-x: auto; }
+td.mono { font-family: var(--mono); font-size: var(--t-small); }
+.scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
-/* Refusal */
-.refusal { background: var(--panel); border: 1px solid var(--line);
-  border-left: 4px solid var(--warn); border-radius: 8px; padding: 18px 20px; }
-.refusal code { font-family: var(--mono); font-size: 13px; word-break: break-word;
-  color: var(--ink); display: block; }
-.kv { display: flex; gap: 30px; flex-wrap: wrap; margin-top: 16px; }
-.kv div span { display: block; font-size: 11px; letter-spacing: .08em;
-  text-transform: uppercase; color: var(--muted); }
-.kv div b { font-family: var(--mono); font-size: 19px; font-weight: 500; }
+.refusal {
+  background: var(--panel); border: 1px solid var(--line);
+  border-left: 3px solid var(--warn); border-radius: 10px; padding: var(--s5);
+}
+.refusal-plain { margin: 0 0 var(--s4); font-size: var(--t-lead); }
+.refusal code {
+  font-family: var(--mono); font-size: var(--t-small); line-height: 1.7;
+  color: var(--muted); display: block; word-break: break-word;
+}
+.kv { display: flex; gap: var(--s7); flex-wrap: wrap; margin-top: var(--s5); }
+.kv div span {
+  display: block; font-size: var(--t-micro); letter-spacing: .08em;
+  text-transform: uppercase; color: var(--muted); margin-bottom: var(--s1);
+}
+.kv div b { font-family: var(--mono); font-size: var(--t-num); font-weight: 500; }
 
-.pill { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 12px;
-  background: #e3ede7; color: var(--accent); font-family: var(--mono); }
-.pill.grey { background: #eceadf; color: var(--muted); }
+.pill {
+  display: inline-block; padding: var(--s1) var(--s3); border-radius: 20px; font-size: var(--t-small);
+  background: var(--accent-soft); color: var(--accent); font-weight: 600;
+}
+.pill.grey { background: #eeece1; color: var(--muted); }
 
-footer { padding: 40px 0 60px; color: var(--muted); font-size: 14px; }
-footer a { margin-right: 14px; }
+footer { padding: var(--s9) 0 var(--s10); color: var(--muted); font-size: var(--t-body); }
+.links-row a { margin-right: var(--s5); }
 
-@media (max-width: 760px) {
+@media (max-width: 820px) {
+  .steps { grid-template-columns: 1fr; gap: 24px; padding: var(--s7) 0; }
   .plans { grid-template-columns: 1fr; }
-  .hero p.lead { font-size: 21px; }
-  h3 { font-size: 22px; }
+  .lead { font-size: var(--t-num); }
+  h3 { font-size: var(--t-num); }
+  body { font-size: var(--t-body); }
 }
