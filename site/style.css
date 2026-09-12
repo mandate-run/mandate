@@ -334,7 +334,36 @@ tr.moved td:first-child { box-shadow: inset 3px 0 0 var(--sealed); }
 /* A note that follows a table belongs to it, but not pressed against it. */
 .scroll + .note, table + .note { margin-top: var(--s6); }
 
-footer { padding: var(--s9) 0 var(--s10); color: var(--ink-soft); font-size: var(--t-entry); }
+/* The close. The page argues for five sections, then says what to do with
+   it. The commands are the point, so they carry the weight. */
+section.close {
+  background:
+    radial-gradient(720px 380px at 74% 26%, #1e4436 0%, transparent 62%),
+    linear-gradient(168deg, #16332a 0%, #0d201a 100%);
+  color: #eaf3ec;
+}
+section.close h2 { color: rgba(255,255,255,.5); }
+section.close h3 { color: #fbfaf4; margin-bottom: var(--s6); }
+section.close .note { color: #a9c6b7; }
+section.close .note code {
+  font-family: var(--mono); font-size: .92em;
+  background: rgba(255,255,255,.08); padding: 1px var(--s1); border-radius: var(--r);
+}
+.commands {
+  margin: 0 0 var(--s6); padding: var(--s5) var(--s6);
+  background: rgba(0,0,0,.26); border: 1px solid rgba(255,255,255,.1);
+  border-radius: var(--r); overflow-x: auto;
+}
+.commands code {
+  font-family: var(--mono); font-size: var(--t-entry); line-height: 2;
+  color: #cfe6d8; white-space: pre; display: block;
+}
+
+footer {
+  padding: var(--s9) 0 var(--s10);
+  color: var(--ink-soft); font-size: var(--t-entry);
+  border-top: 1px solid var(--rule);
+}
 .links-row a { margin-right: var(--s5); }
 
 @media (max-width: 820px) {
