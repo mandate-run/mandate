@@ -324,7 +324,15 @@ td.mono { font-family: var(--mono); font-size: var(--t-fine); }
   display: inline-block; padding: var(--s1) var(--s3); border-radius: var(--r-pill); font-size: var(--t-fine);
   background: rgba(47,107,79,.1); color: var(--sealed); font-weight: 600;
 }
-.pill.grey { background: #eeece1; color: var(--ink-soft); }
+.pill.grey { background: #e3ddcb; color: var(--ink-soft); }
+
+/* The one pool that moved is the only row worth money, so it is the only
+   row the eye should stop on. */
+tr.moved td { background: rgba(47,107,79,.06); }
+tr.moved td:first-child { box-shadow: inset 3px 0 0 var(--sealed); }
+
+/* A note that follows a table belongs to it, but not pressed against it. */
+.scroll + .note, table + .note { margin-top: var(--s6); }
 
 footer { padding: var(--s9) 0 var(--s10); color: var(--ink-soft); font-size: var(--t-entry); }
 .links-row a { margin-right: var(--s5); }

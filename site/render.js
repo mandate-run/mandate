@@ -132,12 +132,12 @@ function renderOutcomes(report) {
   t.appendChild(rowOf("th", ["Pool", "Verdict", "What changed"]));
 
   for (const o of report.outcomes ?? []) {
-    const tr = el("tr");
+    const moved = o.outcome === "supported";
+    const tr = el("tr", moved ? { class: "moved" } : {});
     tr.appendChild(el("td", { class: "mono" },
       `${o.pool.slice(0, 8)}…${o.pool.slice(-4)}`));
 
     const c = el("td");
-    const moved = o.outcome === "supported";
     c.appendChild(el("span", { class: `pill${moved ? "" : " grey"}` },
       OUTCOME_NAME[o.outcome] ?? o.outcome));
     tr.appendChild(c);
