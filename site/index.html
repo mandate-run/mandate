@@ -14,7 +14,19 @@
 </head>
 <body>
 
-<header class="hero">
+<nav class="topbar">
+  <div class="wrap topbar-in">
+    <a class="brand" href="#top"><img src="logo.png" width="22" height="22" alt=""> Mandate</a>
+    <div class="topnav">
+      <a href="#decision">Decision</a>
+      <a href="#payments">Payments</a>
+      <a href="#proof">Proof</a>
+      <a class="cta" href="https://github.com/mandate-run/mandate">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero" id="top">
   <div class="wrap hero-grid">
     <div class="hero-copy">
       <div class="mark">
@@ -22,7 +34,7 @@
         <span class="wordmark">Mandate</span>
         <span class="chip">ETHOnline 2026</span>
       </div>
-      <h1>Give your agent a mandate,<br>not a credit card.</h1>
+      <h1>Give your agent a mandate, not a credit card.</h1>
       <p class="sub">Give an AI agent a wallet and it will spend it. Mandate is the part that decides what is worth buying, buys only that, and proves what it paid.</p>
       <p class="links">
         <a class="primary" href="https://github.com/mandate-run/mandate">View the code</a>
@@ -41,7 +53,7 @@
 
 <section>
   <div class="wrap">
-    <h2>The decision</h2>
+    <h2 id="decision">The decision</h2>
     <h3>It priced three ways to do the job, then took the cheapest one that could still finish.</h3>
     <p class="note">Each route is a whole strategy, priced end to end. A route only qualifies if even its <em>worst case</em> fits the budget, so it can never start something it cannot afford to finish.</p>
     <div class="plans" id="plans"></div>
@@ -50,9 +62,9 @@
   </div>
 </section>
 
-<section>
+<section class="tint">
   <div class="wrap">
-    <h2>The payments</h2>
+    <h2 id="payments">The payments</h2>
     <h3>Three purchases. It confirmed each one itself.</h3>
     <p class="note">A seller saying it was paid is not proof. Mandate checks Hedera's own record of the transaction it signed. Every ID below is real and you can look it up.</p>
     <div id="budget" class="chart-host"></div>
@@ -72,7 +84,7 @@
   </div>
 </section>
 
-<section>
+<section class="dark">
   <div class="wrap">
     <h2>The refusal</h2>
     <h3>If it cannot finish the job, it spends nothing at all.</h3>
@@ -85,9 +97,9 @@
   </div>
 </section>
 
-<section>
+<section class="tint">
   <div class="wrap">
-    <h2>How we know it works</h2>
+    <h2 id="proof">How we know it works</h2>
     <h3>Nothing here takes Mandate's word for it.</h3>
     <p class="note">A separate harness reads the sellers' own logs and the payment records, then compares them against what Mandate claimed. A test passes only when both agree. It caught a real bug where Mandate reported success while quietly paying twice.</p>
     <div class="scroll"><table>
