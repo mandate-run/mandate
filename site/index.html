@@ -111,12 +111,28 @@
   </div>
 </section>
 
+<section class="close">
+  <div class="wrap">
+    <h2>Run it yourself</h2>
+    <h3>Three commands take a clean clone to a settled payment on Hedera.</h3>
+    <pre class="commands"><code>git clone https://github.com/mandate-run/mandate
+harness/scripts/setup
+harness/scripts/demo 1</code></pre>
+    <p class="note">You need two Hedera testnet accounts and a few HBAR. Nothing else: the sellers serve canned pool data, so no API keys are involved. <code>demo 3</code> shows the refusal, and <code>demo 5</code> drops a response after payment to show it recover.</p>
+    <p class="links">
+      <a class="primary" href="https://github.com/mandate-run/mandate">View the code</a>
+      <a href="https://github.com/mandate-run/mandate/blob/master/docs/spec.md">Read the specification</a>
+    </p>
+  </div>
+</section>
+
 <footer>
   <div class="wrap">
     <p class="links-row">
       <a href="https://github.com/mandate-run/mandate">Repository</a>
       <a href="https://github.com/mandate-run/mandate/blob/master/docs/spec.md">Specification</a>
       <a href="https://github.com/mandate-run/mandate/blob/master/harness/README.md">Proctor</a>
+      <a href="https://hashscan.io/testnet/topic/0.0.10410389">Receipts on HashScan</a>
     </p>
     <p class="fineprint">Built for ETHOnline 2026. Payments settle on Hedera's test network using the x402 payment standard. Pool data comes from the Uniswap v3 subgraph on The Graph. Open source under Apache-2.0.</p>
   </div>
