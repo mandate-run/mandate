@@ -235,10 +235,18 @@ async function main() {
       if (link) link.href = `https://hashscan.io/testnet/topic/${delivered.topic}`;
     }
   } catch {
-    // A page about honest accounting should not fake its own contents.
-    const note = document.getElementById("round-note");
-    if (note) note.textContent =
-      "The run reports could not be loaded. The figures they hold are in the repository.";
+    // A page about honest accounting should not fake its own contents, and
+    // should not leave a heading standing over an empty space either.
+    const said = "These figures are read from two run reports that could not " +
+      "be loaded. Both files are in the repository.";
+    for (const id of ["round-note", "validation", "refusal-plain"]) {
+      const n = document.getElementById(id);
+      if (n) n.textContent = said;
+    }
+    for (const id of ["hero-viz", "loop", "budget", "replan", "plans"]) {
+      const n = document.getElementById(id);
+      if (n && !n.children.length) n.remove();
+    }
   }
 }
 
