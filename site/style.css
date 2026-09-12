@@ -1,0 +1,90 @@
+/* Mandate. The palette is taken from the cover art: deep green ground,
+   bone text, a single warm accent for the decision that was chosen. */
+:root {
+  --ink: #0f1d17;
+  --ground: #f3f1e7;
+  --panel: #ffffff;
+  --line: #d9d6c6;
+  --muted: #5c6b62;
+  --deep: #163529;
+  --accent: #2f7d5b;
+  --warn: #9a5b22;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sans: ui-sans-serif, -apple-system, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--ground); color: var(--ink);
+  font-family: var(--sans); line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); }
+.wrap { max-width: 940px; margin: 0 auto; padding: 0 24px; }
+
+/* Hero */
+.hero { background: var(--deep); color: var(--ground); padding: 0 0 40px; }
+.hero img.cover { width: 100%; display: block; }
+.hero .wrap { padding-top: 34px; }
+.hero h1 { font-size: 15px; letter-spacing: .14em; text-transform: uppercase;
+  color: #9fbfae; margin: 0 0 14px; font-weight: 600; }
+.hero p.lead { font-size: 25px; line-height: 1.35; margin: 0 0 18px; max-width: 34em; }
+.hero p.sub { color: #b9cfc2; margin: 0 0 24px; max-width: 42em; }
+.links a {
+  display: inline-block; margin-right: 10px; margin-bottom: 8px; padding: 9px 16px;
+  border: 1px solid #33604a; border-radius: 6px; color: var(--ground);
+  text-decoration: none; font-size: 14px;
+}
+.links a.primary { background: var(--ground); color: var(--deep); border-color: var(--ground); font-weight: 600; }
+
+/* Sections */
+section { padding: 52px 0; border-bottom: 1px solid var(--line); }
+h2 { font-size: 13px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--muted); margin: 0 0 6px; font-weight: 600; }
+h3 { font-size: 27px; margin: 0 0 12px; line-height: 1.25; }
+.note { color: var(--muted); max-width: 46em; margin: 0 0 26px; }
+
+/* Plan cards: the decision, side by side */
+.plans { display: grid; gap: 14px; grid-template-columns: repeat(3, 1fr); }
+.plan { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
+.plan.chosen { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(47,125,91,.18); }
+.plan .kind { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.plan .tag { float: right; font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--accent); font-weight: 700; }
+.plan .tag.no { color: var(--muted); font-weight: 500; }
+.plan .amt { font-family: var(--mono); font-size: 23px; margin: 10px 0 2px; }
+.plan .lbl { font-size: 12px; color: var(--muted); }
+.plan .bound { font-family: var(--mono); font-size: 14px; color: var(--muted); margin-top: 8px; }
+.plan ul { margin: 12px 0 0; padding-left: 16px; font-size: 13px; color: var(--muted); }
+
+/* Tables */
+table { width: 100%; border-collapse: collapse; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 10px; overflow: hidden; font-size: 14px; }
+th { text-align: left; font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted); padding: 11px 14px; border-bottom: 1px solid var(--line); font-weight: 600; }
+td { padding: 11px 14px; border-bottom: 1px solid #eceadf; }
+tr:last-child td { border-bottom: 0; }
+td.mono, th.mono { font-family: var(--mono); font-size: 13px; }
+.scroll { overflow-x: auto; }
+
+/* Refusal */
+.refusal { background: var(--panel); border: 1px solid var(--line);
+  border-left: 4px solid var(--warn); border-radius: 8px; padding: 18px 20px; }
+.refusal code { font-family: var(--mono); font-size: 13px; word-break: break-word;
+  color: var(--ink); display: block; }
+.kv { display: flex; gap: 30px; flex-wrap: wrap; margin-top: 16px; }
+.kv div span { display: block; font-size: 11px; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--muted); }
+.kv div b { font-family: var(--mono); font-size: 19px; font-weight: 500; }
+
+.pill { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 12px;
+  background: #e3ede7; color: var(--accent); font-family: var(--mono); }
+.pill.grey { background: #eceadf; color: var(--muted); }
+
+footer { padding: 40px 0 60px; color: var(--muted); font-size: 14px; }
+footer a { margin-right: 14px; }
+
+@media (max-width: 760px) {
+  .plans { grid-template-columns: 1fr; }
+  .hero p.lead { font-size: 21px; }
+  h3 { font-size: 22px; }
+}
