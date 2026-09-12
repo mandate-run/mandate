@@ -365,6 +365,13 @@ footer { padding: var(--s9) 0 var(--s10); color: var(--ink-soft); font-size: var
   section { padding: var(--s8) 0; }
 }
 html, body { max-width: 100%; overflow-x: hidden; }
+.noscript-note {
+  margin: var(--s8) auto; padding: var(--s5);
+  border-left: 3px solid var(--retained); background: var(--card);
+  font-size: var(--t-read); max-width: 62ch;
+}
+.noscript-note p { margin: 0; }
+
 /* Nothing on this page may be wider than the screen it is read on. */
 *, *::before, *::after { min-width: 0; }
 .wrap, .hero-grid, .hero-copy, section, header, footer { max-width: 100%; }
