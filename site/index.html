@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mandate — give your agent a mandate, not a credit card</title>
+<meta name="description" content="A buyer runtime for agents that pay per request. It plans what to buy, refuses what it cannot justify, and proves every payment from the Hedera ledger.">
+<meta property="og:title" content="Mandate">
+<meta property="og:description" content="Give your agent a mandate, not a credit card.">
+<meta property="og:image" content="https://raw.githubusercontent.com/mandate-run/mandate/master/docs/img/mandate-cover-1280x720.png">
+<link rel="icon" href="logo.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="hero">
+  <img class="cover" src="cover-small.png" alt="Mandate — give your agent a mandate, not a credit card">
+  <div class="wrap">
+    <h1>ETHOnline 2026</h1>
+    <p class="lead">An agent handed a wallet will spend it. Mandate is the layer that decides whether a purchase is worth making at all.</p>
+    <p class="sub">Given a purpose, a budget and hard constraints, it collects live quotes over x402, competes plans against each other, pays one signed Hedera transfer per purchase, and writes a receipt for every decision to Hedera Consensus Service.</p>
+    <p class="links">
+      <a class="primary" href="https://github.com/mandate-run/mandate">View the code</a>
+      <a id="topic-link" href="https://hashscan.io/testnet">Receipts on HashScan</a>
+    </p>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <h2>The decision</h2>
+    <h3>Three ways to answer the question. It takes the cheapest one that can still finish.</h3>
+    <p class="note">Every figure below comes from a real run on Hedera testnet, rendered from the JSON report that run emitted. <b>Expected</b> is what the plan should cost. <b>Bound</b> is its worst case. A plan is only eligible if its <em>bound</em> fits the budget, so the runtime can never start something it cannot finish.</p>
+    <div class="plans" id="plans"></div>
+    <p class="note" id="round-note" style="margin-top:22px"></p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>The payments</h2>
+    <h3>Three signed transfers, each proven from the mirror node.</h3>
+    <p class="note">Settlement is never taken from an HTTP response. The runtime reads the consensus records for its own transaction id. Every id below links to HashScan, and each one can be checked directly against the Hedera mirror node.</p>
+    <div class="scroll"><table id="steps"></table></div>
+    <div class="kv" id="totals"></div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>What it found</h2>
+    <h3>Five pools screened. One had moved.</h3>
+    <p class="note">The runtime screened all five, then bought transaction-level evidence only for the pool that mattered. Every claim is computed from purchased facts; a model only writes the prose, and each number in it is checked back against the evidence.</p>
+    <div class="scroll"><table id="outcomes"></table></div>
+    <p class="note" id="validation" style="margin-top:22px"></p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>The refusal</h2>
+    <h3>When no plan can guarantee coverage, it spends nothing and says what completion would have cost.</h3>
+    <p class="note">A second real run, with the budget lowered to 0.0030 HBAR. All three plans are rejected before a single payment is signed. This is the product, not a failure.</p>
+    <div class="refusal"><code id="refusal-text"></code></div>
+    <div class="kv" id="refusal-totals"></div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Verified independently</h2>
+    <h3>An application is never its own oracle.</h3>
+    <p class="note">Payment behaviour is checked by Proctor, a harness in the same repository. Its task contracts have two halves: one reads the buyer's own report, the other reads what Proctor measured itself from the seller's journal and the buyer's ledger. A check passes only when both agree. Proctor caught a real double-payment bug during development from the journal, not from anything the buyer said about itself.</p>
+    <div class="scroll"><table>
+      <tr><th>Contract</th><th>What it proves</th></tr>
+      <tr><td class="mono">lost-response</td><td>A response lost after settlement is recovered with the original payment, never a second one.</td></tr>
+      <tr><td class="mono">resume</td><td>A resumed run restores what it already bought instead of buying it again.</td></tr>
+      <tr><td class="mono">refusal</td><td>A refusal leaves the seller with no signed payment at all.</td></tr>
+    </table></div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>
+      <a href="https://github.com/mandate-run/mandate">Repository</a>
+      <a href="https://github.com/mandate-run/mandate/blob/master/docs/spec.md">Specification</a>
+      <a href="https://github.com/mandate-run/mandate/blob/master/harness/README.md">Proctor</a>
+    </p>
+    <p>Hedera testnet · x402 exact scheme · evidence from the Uniswap v3 subgraph on The Graph. Apache-2.0.</p>
+  </div>
+</footer>
+
+<script src="render.js"></script>
+</body>
+</html>
