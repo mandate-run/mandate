@@ -3,6 +3,38 @@
 // every coordinate is computed from a real figure rather than hand-placed.
 const NS = "http://www.w3.org/2000/svg";
 
+// The drawings share one palette with the page. SVG attributes cannot read
+// CSS custom properties reliably across browsers, so the values live here
+// once rather than scattered through each figure.
+const C = {
+  sealed:   "#2f6b4f",   // money committed
+  sealedDim:"#4d8168",
+  retained: "#9d4e1b",   // money held back: the page's point
+  leaf:     "#3d8560",
+  mid:      "#8a7a4a",   // the middle route
+  far:      "#9a6b4a",   // the dearest route
+  ink:      "#1b2a24",
+  rule:     "#cfc3a8",   // the printed rule
+  rule2:    "#b9ab8c",
+  track:    "#ded4bd",   // unfilled column
+  soft:     "rgba(47,107,79,.1)",
+  onDeep:   "#24402f",
+  onDeep2:  "#3a5a46",
+};
+
+// One drawing system, so four figures look like one family. Stroke weights,
+// corner treatment and bar heights are chosen once here rather than per chart.
+const D = {
+  hair:   1,      // rules and dividers
+  line:   1.75,   // connectors and unemphasised series
+  bold:   2.75,   // the series that matters
+  bar:    18,     // every horizontal bar is this tall
+  pill:   9,      // radius that makes a bar a pill: bar / 2
+  card:   12,     // matches the page's --r
+  dot:    5,      // end caps
+  dotBig: 7,
+};
+
 // Someone who has asked their system for less motion gets the finished
 // drawing immediately rather than a blank one.
 const STILL = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
@@ -17,6 +49,28 @@ function animate(node, attr, from, to, dur, begin) {
   node.setAttribute(attr, String(from));
   const a = svg("animate", { attributeName: attr, from, to, dur, begin, fill: "freeze" });
   node.appendChild(a);
+}
+
+// Gradients and the one soft shadow, defined once per figure that needs them.
+function sharedDefs(idPrefix, pairs) {
+  const defs = svg("defs");
+  for (const [name, from, to] of pairs) {
+    const lg = svg("linearGradient", {
+      id: `${idPrefix}-${name}`, x1: 0, y1: 0, x2: 1, y2: 0,
+    });
+    lg.appendChild(svg("stop", { offset: "0%", "stop-color": from }));
+    lg.appendChild(svg("stop", { offset: "100%", "stop-color": to }));
+    defs.appendChild(lg);
+  }
+  const f = svg("filter", {
+    id: `${idPrefix}-lift`, x: "-20%", y: "-40%", width: "140%", height: "200%",
+  });
+  f.appendChild(svg("feDropShadow", {
+    dx: 0, dy: 1, stdDeviation: 1.5,
+    "flood-color": "#16241d", "flood-opacity": .16,
+  }));
+  defs.appendChild(f);
+  return defs;
 }
 
 function svg(tag, attrs = {}) {
@@ -40,18 +94,31 @@ const SEGMENT_LABEL = {
 };
 
 function budgetBar(report, host) {
-  const W = 880, H = 96, BAR = 34, TOP = 30;
+  const W = 1000, H = 96, BAR = D.bar, TOP = 34;
   const budget = 1_000_000; // 0.0100 HBAR, the mandate's service budget
   const s = svg("svg", {
     viewBox: `0 0 ${W} ${H}`, class: "chart", role: "img",
     "aria-label": "How much of the budget was spent",
   });
 
+  s.appendChild(sharedDefs("bb", [
+    ["a", C.sealed, C.leaf],
+    ["b", C.leaf, "#57c294"],
+    ["c", "#57c294", C.leaf],
+  ]));
+
   s.appendChild(svg("rect", {
-    x: 0, y: TOP, width: W, height: BAR, rx: 6, fill: "#e9e6d9",
+    x: 0, y: TOP, width: W, height: BAR, rx: D.pill, fill: C.track,
   }));
 
-  const colours = ["#2d7a58", "#3f9370", "#63ad8c"];
+  // Every segment is drawn square and clipped to one pill, so the filled
+  // run has clean ends however many purchases there were.
+  const clip = svg("clipPath", { id: "bb-clip" });
+  clip.appendChild(svg("rect", { x: 0, y: TOP, width: W, height: BAR, rx: D.pill }));
+  s.appendChild(clip);
+  const band = svg("g", { "clip-path": "url(#bb-clip)" });
+
+  const colours = ["url(#bb-a)", "url(#bb-b)", "url(#bb-c)"];
   let x = 0;
   (report.steps ?? []).forEach((step, i) => {
     const units = Math.round(parseFloat(step.amount) * 1e8);
@@ -65,14 +132,16 @@ function budgetBar(report, host) {
     g.appendChild(r);
     g.appendChild(svg("title")).textContent =
       `${SEGMENT_LABEL[step.listing_id] ?? step.listing_id}: ${step.amount} HBAR`;
-    s.appendChild(g);
+    band.appendChild(g);
     x += w;
   });
+
+  s.appendChild(band);
 
   // The line where spending stopped.
   const mark = svg("line", {
     x1: x, y1: TOP - 8, x2: x, y2: TOP + BAR + 8,
-    stroke: "#14231c", "stroke-width": 1.5,
+    stroke: C.ink, "stroke-width": D.line,
   });
   animate(mark, "opacity", 0, 1, "0.3s", "1.6s");
   s.appendChild(mark);
@@ -93,7 +162,8 @@ function budgetBar(report, host) {
   let lx = 0;
   (report.steps ?? []).forEach((step, i) => {
     legend.appendChild(svg("rect", {
-      x: lx, y: TOP + BAR + 12, width: 9, height: 9, rx: 2, fill: colours[i % colours.length],
+      x: lx, y: TOP + BAR + 14, width: 10, height: 10, rx: 3,
+      fill: [C.sealed, C.leaf, C.leaf][i % 3],
     }));
     const label = `${SEGMENT_LABEL[step.listing_id] ?? step.listing_id} ${trim(step.amount)}`;
     legend.appendChild(text(lx + 14, TOP + BAR + 21, label, { class: "c-mute" }));
@@ -117,7 +187,7 @@ function heroFigure(report, host) {
 
   const moved = outcomes.filter(o => o.outcome === "supported").length;
   const quiet = outcomes.length - moved;
-  const W = 580, H = 392;
+  const W = 470, H = 340;
   const s = svg("svg", {
     viewBox: `0 0 ${W} ${H}`, class: "hero-figure", role: "img",
     "aria-label":
@@ -127,33 +197,39 @@ function heroFigure(report, host) {
 
   const defs = svg("defs");
   const g1 = svg("linearGradient", { id: "hf-g", x1: 0, y1: 0, x2: 1, y2: 0 });
-  g1.appendChild(svg("stop", { offset: "0%", "stop-color": "#3f9d76" }));
-  g1.appendChild(svg("stop", { offset: "100%", "stop-color": "#6fe0ac" }));
+  g1.appendChild(svg("stop", { offset: "0%", "stop-color": C.leaf }));
+  g1.appendChild(svg("stop", { offset: "100%", "stop-color": C.leaf }));
   defs.appendChild(g1);
+  // A faint top-down wash so each card has a light edge, the way the cards
+  // on the page do. Flat translucent fills look like placeholders.
+  const g2 = svg("linearGradient", { id: "hf-card", x1: 0, y1: 0, x2: 0, y2: 1 });
+  g2.appendChild(svg("stop", { offset: "0%", "stop-color": "#ffffff", "stop-opacity": .085 }));
+  g2.appendChild(svg("stop", { offset: "100%", "stop-color": "#ffffff", "stop-opacity": .035 }));
+  defs.appendChild(g2);
   const arrow = svg("marker", {
     id: "hf-ar", viewBox: "0 0 8 8", refX: 7, refY: 4,
     markerWidth: 7, markerHeight: 7, orient: "auto",
   });
-  arrow.appendChild(svg("path", { d: "M0 0 L8 4 L0 8 z", fill: "#4e8a70" }));
+  arrow.appendChild(svg("path", { d: "M0 0 L8 4 L0 8 z", fill: C.sealedDim }));
   defs.appendChild(arrow);
   s.appendChild(defs);
 
-  const L = 22;                       // left rail for the pills
+  const L = 0;                        // the figure is its own column
   let y = 6;
 
   // --- what goes in
   const inbox = svg("g");
   inbox.appendChild(svg("rect", {
-    x: L, y, width: W - L * 2, height: 56, rx: 11,
-    fill: "rgba(255,255,255,.05)", stroke: "#2f5c4a",
+    x: L, y, width: W, height: 52, rx: D.card,
+    fill: "url(#hf-card)", stroke: C.onDeep2,
   }));
-  inbox.appendChild(text(L + 18, y + 24, "THE JOB", { class: "hf-cap" }));
-  inbox.appendChild(text(L + 18, y + 44, `Check ${outcomes.length} pools, explain what moved`, { class: "hf-line" }));
-  inbox.appendChild(text(W - L - 18, y + 24, "BUDGET", { class: "hf-cap", "text-anchor": "end" }));
-  inbox.appendChild(text(W - L - 18, y + 44, "0.0100 HBAR", { class: "hf-line mono", "text-anchor": "end" }));
+  inbox.appendChild(text(L + 16, y + 22, "The job", { class: "hf-cap" }));
+  inbox.appendChild(text(L + 16, y + 41, `Check ${outcomes.length} pools, explain what moved`, { class: "hf-line" }));
+  inbox.appendChild(text(W - 16, y + 22, "Budget", { class: "hf-cap", "text-anchor": "end" }));
+  inbox.appendChild(text(W - 16, y + 41, "0.0100 HBAR", { class: "hf-line mono", "text-anchor": "end" }));
   animate(inbox, "opacity", 0, 1, "0.4s", "0.1s");
   s.appendChild(inbox);
-  y += 56;
+  y += 52;
 
   // --- each purchase, with what it bought and what it revealed
   const BUY = [
@@ -171,52 +247,52 @@ function heroFigure(report, host) {
   BUY.forEach((b, i) => {
     const step = steps.find(x => x.listing_id === b.key) ?? steps[i];
     if (!step) return;
-    const gy = y + 16 + i * 74;
+    const gy = y + 12 + i * 66;
 
     // Connector down the left rail.
     const conn = svg("path", {
-      d: `M${L + 26} ${gy - 16} L${L + 26} ${gy + 4}`,
-      stroke: "#4e8a70", "stroke-width": 1.6, "marker-end": "url(#hf-ar)",
+      d: `M${L + 24} ${gy - 12} L${L + 24} ${gy + 4}`,
+      stroke: C.sealedDim, "stroke-width": D.line, "marker-end": "url(#hf-ar)",
     });
     animate(conn, "opacity", 0, 1, "0.3s", `${0.35 + i * 0.3}s`);
     s.appendChild(conn);
 
     const g = svg("g");
     g.appendChild(svg("rect", {
-      x: L, y: gy + 8, width: W - L * 2, height: 58, rx: 11,
-      fill: "rgba(255,255,255,.05)", stroke: "#2f5c4a",
+      x: L, y: gy + 8, width: W, height: 52, rx: D.card,
+      fill: "url(#hf-card)", stroke: C.onDeep2,
     }));
     // The price it paid, as a tag on the right.
     g.appendChild(svg("rect", {
-      x: W - L - 96, y: gy + 21, width: 82, height: 24, rx: 12,
+      x: W - 88, y: gy + 19, width: 76, height: D.bar, rx: D.pill,
       fill: "rgba(111,224,172,.13)",
     }));
-    g.appendChild(text(W - L - 55, gy + 37, trim(step.amount), {
+    g.appendChild(text(W - 50, gy + 33, trim(step.amount), {
       class: "hf-pay", "text-anchor": "middle",
     }));
 
-    g.appendChild(text(L + 18, gy + 32, b.what, { class: "hf-line" }));
-    g.appendChild(text(L + 18, gy + 52, b.found, { class: "hf-found" }));
+    g.appendChild(text(L + 16, gy + 28, b.what, { class: "hf-line" }));
+    g.appendChild(text(L + 16, gy + 46, b.found, { class: "hf-found" }));
     animate(g, "opacity", 0, 1, "0.4s", `${0.45 + i * 0.3}s`);
     s.appendChild(g);
   });
 
   // --- what is left
-  const fy = y + 16 + 3 * 74 + 12;
+  const fy = y + 12 + 3 * 66 + 10;
   const conn = svg("path", {
-    d: `M${L + 26} ${fy - 24} L${L + 26} ${fy - 4}`,
-    stroke: "#4e8a70", "stroke-width": 1.6, "marker-end": "url(#hf-ar)",
+    d: `M${L + 24} ${fy - 24} L${L + 24} ${fy - 10}`,
+    stroke: C.sealedDim, "stroke-width": D.line, "marker-end": "url(#hf-ar)",
   });
   animate(conn, "opacity", 0, 1, "0.3s", "1.35s");
   s.appendChild(conn);
 
   const out = svg("g");
-  out.appendChild(text(L, fy + 34, trim(report.totals.settled), { class: "hf-big" }));
-  out.appendChild(text(L + 128, fy + 34, "spent", { class: "hf-line" }));
-  out.appendChild(text(W - L, fy + 18, `${trim(report.totals.unspent)} HBAR`, {
+  out.appendChild(text(L, fy + 32, trim(report.totals.settled), { class: "hf-big" }));
+  out.appendChild(text(L + 158, fy + 32, "spent", { class: "hf-line" }));
+  out.appendChild(text(W, fy + 16, `${trim(report.totals.unspent)} HBAR`, {
     class: "hf-left", "text-anchor": "end",
   }));
-  out.appendChild(text(W - L, fy + 36, "never touched", {
+  out.appendChild(text(W, fy + 34, "never touched", {
     class: "hf-sub", "text-anchor": "end",
   }));
   animate(out, "opacity", 0, 1, "0.45s", "1.45s");
@@ -234,149 +310,139 @@ const ROUTE_SUB = {
   bundle: "investigate everything up front",
 };
 
-// The centrepiece. Two columns of bars, one per planning round, with a ribbon
-// between them showing how each route's price moved once the cheap scan came
-// back. The whole point of the system is in this one picture: spending a
-// little to learn something made everything else cheaper.
+// The centrepiece: what a cheap look did to the price of everything else.
+//
+// Route names sit in fixed rows on the left rather than floating at their
+// data positions. Two routes can land within 23px of each other, which is
+// not enough room for a name and a description, so anchoring labels to the
+// data was what made this chart look untidy.
 function replanChart(report, host) {
   const rounds = (report.planning ?? []).filter(r => r.plans.some(p => p.expected > 0)).slice(0, 2);
   if (rounds.length < 2 || !host) return;
 
-  const W = 1000, H = 420;
-  const L = 210, R = 150, T = 96, B = 92;
-  const plotW = W - L - R, plotH = H - T - B;
+  const W = 936, H = 430;
+  const KEY = 250;                 // fixed legend column
+  // Left prices are drawn right-aligned into the gap between the legend and
+  // the plot, so that gap must hold the widest price at its largest size.
+  const PLOT_L = KEY + 130, PLOT_R = 116;
+  const T = 96, B = 104;
+  const plotW = W - PLOT_L - PLOT_R, plotH = H - T - B;
   const max = Math.max(...rounds.flatMap(r => r.plans.map(p => p.expected)));
-  const xs = [L, L + plotW];
-  const y = v => T + plotH - (v / (max * 1.08)) * plotH;
+  const xs = [PLOT_L, PLOT_L + plotW];
+  const y = v => T + plotH - (v / (max * 1.1)) * plotH;
 
   const s = svg("svg", {
     viewBox: `0 0 ${W} ${H}`, class: "chart chart-hero", role: "img",
     "aria-label": "How the price of every route changed after a cheap first scan",
   });
 
-  const defs = svg("defs");
-  for (const [id, c] of [["g-staged", "#2d7a58"], ["g-hybrid", "#9a8440"], ["g-bundle", "#8a6650"]]) {
-    const lg = svg("linearGradient", { id, x1: 0, y1: 0, x2: 1, y2: 0 });
-    lg.appendChild(svg("stop", { offset: "0%", "stop-color": c, "stop-opacity": .16 }));
-    lg.appendChild(svg("stop", { offset: "100%", "stop-color": c, "stop-opacity": .34 }));
-    defs.appendChild(lg);
-  }
-  s.appendChild(defs);
+  const order = ["bundle", "hybrid", "staged"];
+  const colour = { staged: C.sealed, hybrid: C.mid, bundle: C.far };
 
-  // Column headings, each with what the runtime knew at that moment.
-  const heads = [
-    ["Before the scan", `all ${rounds[0].pending.length} pools still unknown`],
-    ["After the scan", `${rounds[1].pending.length} pool actually moved`],
-  ];
-  heads.forEach(([a, b], i) => {
-    const anchor = i === 0 ? "start" : "end";
-    s.appendChild(text(xs[i], T - 52, a, { class: "c-head", "text-anchor": anchor }));
-    s.appendChild(text(xs[i], T - 30, b, { class: "c-mute", "text-anchor": anchor }));
-  });
+  s.appendChild(sharedDefs("rp", order.map(k => [k, colour[k], colour[k]])));
 
+  // Column headings.
+  [["Before the scan", `all ${rounds[0].pending.length} pools unknown`, xs[0], "start"],
+   ["After the scan", `${rounds[1].pending.length} pool actually moved`, xs[1], "end"]]
+    .forEach(([a, b, x, anchor]) => {
+      s.appendChild(text(x, T - 50, a, { class: "c-head", "text-anchor": anchor }));
+      s.appendChild(text(x, T - 28, b, { class: "c-mute", "text-anchor": anchor }));
+    });
   s.appendChild(svg("line", {
-    x1: L - 18, y1: T - 16, x2: W - R + 18, y2: T - 16,
-    stroke: "#e2dfd0",
+    x1: 0, y1: T - 14, x2: W, y2: T - 14, stroke: C.rule, "stroke-width": D.hair,
   }));
 
-  const colour = { staged: "#2d7a58", hybrid: "#9a8440", bundle: "#8a6650" };
-
-  for (const kind of ["bundle", "hybrid", "staged"]) {
+  // Fixed legend rows: name, description, and the price at each end.
+  const rowH = 56, rowTop = T + 6;
+  order.forEach((kind, i) => {
     const a = rounds[0].plans.find(p => p.kind === kind);
     const b = rounds[1].plans.find(p => p.kind === kind);
-    if (!a || !b) continue;
+    if (!a || !b) return;
     const chosen = rounds[1].chosen === kind;
-    const g = svg("g", { class: chosen ? "route chosen" : "route" });
+    const ry = rowTop + i * rowH;
 
-    // A filled ribbon from the old price to the new one reads as movement in
-    // a way two dots joined by a line does not.
-    // Two routes can converge on the same purchase once only one pool is
-    // left. That is a real finding, so both stay visible and it is labelled.
-    const twin = rounds[1].plans.filter(p => p.expected === b.expected).length > 1;
-    const nudge = twin && kind !== "hybrid" ? 0 : (twin ? 13 : 0);
-    const ya = y(a.expected), yb = y(b.expected) + nudge;
-    const band = 9;
-    const ribbon = svg("path", {
-      d: `M${xs[0]} ${ya - band} C${xs[0] + plotW * .42} ${ya - band}, ${xs[1] - plotW * .42} ${yb - band}, ${xs[1]} ${yb - band}` +
-         `L${xs[1]} ${yb + band} C${xs[1] - plotW * .42} ${yb + band}, ${xs[0] + plotW * .42} ${ya + band}, ${xs[0]} ${ya + band} Z`,
-      fill: `url(#g-${kind})`, stroke: "none",
-    });
-    animate(ribbon, "opacity", 0, chosen ? 1 : .55, "0.7s", "0.35s");
-    g.appendChild(ribbon);
-
-    const spine = svg("path", {
-      d: `M${xs[0]} ${ya} C${xs[0] + plotW * .42} ${ya}, ${xs[1] - plotW * .42} ${yb}, ${xs[1]} ${yb}`,
-      fill: "none", stroke: colour[kind],
-      "stroke-width": chosen ? 2.4 : 1.4, opacity: chosen ? 1 : .5,
-      "stroke-dasharray": 900,
-    });
-    animate(spine, "stroke-dashoffset", 900, 0, "1s", "0.3s");
-    g.appendChild(spine);
-
-    // End caps and their prices.
-    [[0, a, ya], [1, b, yb]].forEach(([i, plan, yy]) => {
-      g.appendChild(svg("circle", {
-        cx: xs[i], cy: yy, r: chosen ? 6 : 4.5,
-        fill: "#fff", stroke: colour[kind], "stroke-width": chosen ? 2.6 : 1.8,
-        opacity: chosen ? 1 : .65,
-      }));
-      const price = text(
-        i === 0 ? xs[0] - 16 : xs[1] + 16, yy + 5,
-        trim(amountOf(plan.expected)),
-        { class: chosen ? "c-price strong" : "c-price", "text-anchor": i === 0 ? "end" : "start" },
-      );
-      g.appendChild(price);
-    });
-
-    // Route name on the left, outside the plot.
-    g.appendChild(text(28, ya - 3, ROUTE[kind], {
+    const key = svg("g");
+    key.appendChild(svg("rect", {
+      x: 0, y: ry - 4, width: KEY, height: rowH - 10, rx: D.card,
+      fill: chosen ? C.soft : "transparent",
+    }));
+    key.appendChild(svg("rect", {
+      x: 14, y: ry + 12, width: 14, height: 4, rx: 2, fill: colour[kind],
+    }));
+    key.appendChild(text(38, ry + 18, ROUTE[kind], {
       class: chosen ? "c-route strong" : "c-route",
     }));
-    g.appendChild(text(28, ya + 15, ROUTE_SUB[kind], { class: "c-mute" }));
+    key.appendChild(text(38, ry + 36, ROUTE_SUB[kind], { class: "c-mute" }));
+    animate(key, "opacity", 0, 1, "0.4s", `${0.15 + i * 0.1}s`);
+    s.appendChild(key);
+  });
+
+  // The lines themselves, with prices only at the ends.
+  const placed = [];
+  order.forEach((kind, i) => {
+    const a = rounds[0].plans.find(p => p.kind === kind);
+    const b = rounds[1].plans.find(p => p.kind === kind);
+    if (!a || !b) return;
+    const chosen = rounds[1].chosen === kind;
+    const ya = y(a.expected);
+    let yb = y(b.expected);
+
+    // Two routes can converge on the same purchase. Keep both readable.
+    while (placed.some(v => Math.abs(v - yb) < 20)) yb += 20;
+    placed.push(yb);
+
+    const g = svg("g");
+    const spine = svg("path", {
+      d: `M${xs[0]} ${ya} C${xs[0] + plotW * .45} ${ya}, ${xs[1] - plotW * .45} ${yb}, ${xs[1]} ${yb}`,
+      fill: "none", stroke: colour[kind],
+      "stroke-width": chosen ? D.bold : D.line,
+      opacity: chosen ? 1 : .42,
+      "stroke-linecap": "round", "stroke-dasharray": 900,
+    });
+    animate(spine, "stroke-dashoffset", 900, 0, "1s", "0.35s");
+    g.appendChild(spine);
+
+    [[0, a.expected, ya], [1, b.expected, yb]].forEach(([i2, v, yy]) => {
+      g.appendChild(svg("circle", {
+        cx: xs[i2], cy: yy, r: chosen ? D.dotBig : D.dot,
+        fill: "#fff", stroke: colour[kind],
+        "stroke-width": chosen ? D.bold : D.line, opacity: chosen ? 1 : .6,
+      }));
+      g.appendChild(text(
+        i2 === 0 ? xs[0] - 18 : xs[1] + 18, yy + 5, trim(amountOf(v)),
+        { class: chosen ? "c-price strong" : "c-price",
+          "text-anchor": i2 === 0 ? "end" : "start" },
+      ));
+    });
 
     if (chosen) {
+      const bx = xs[1] + 18, by = yb + 16;
       const badge = svg("g");
-      const bx = xs[1] + 16, by = yb + 22;
       badge.appendChild(svg("rect", {
-        x: bx, y: by, width: 62, height: 21, rx: 10.5, fill: "#2d7a58",
+        x: bx, y: by, width: 66, height: D.bar, rx: D.pill, fill: C.sealed,
       }));
-      badge.appendChild(text(bx + 31, by + 14.5, "chosen",
+      badge.appendChild(text(bx + 33, by + 13, "chosen",
         { class: "c-badge", "text-anchor": "middle" }));
-      animate(badge, "opacity", 0, 1, "0.4s", "1.2s");
+      animate(badge, "opacity", 0, 1, "0.4s", "1.25s");
       g.appendChild(badge);
     }
     s.appendChild(g);
-  }
+  });
 
-  // The takeaway, stated once under the plot.
-  // Note the convergence where it happens, next to the pair.
-  const tied = rounds[1].plans.filter(p =>
-    rounds[1].plans.filter(q => q.expected === p.expected).length > 1);
-  if (tied.length > 1) {
-    const ty = y(tied[0].expected);
-    const noteG = svg("g");
-    noteG.appendChild(text(xs[1] + 92, ty + 10,
-      "same purchase now", { class: "c-mute" }));
-    noteG.appendChild(svg("path", {
-      d: `M${xs[1] + 84} ${ty + 6} l-8 0`, stroke: "#b9b4a0", "stroke-width": 1,
-    }));
-    animate(noteG, "opacity", 0, 1, "0.4s", "1.3s");
-    s.appendChild(noteG);
-  }
-
-  const bundleBefore = rounds[0].plans.find(p => p.kind === "bundle");
-  const bundleAfter = rounds[1].plans.find(p => p.kind === "bundle");
+  // The takeaway.
+  const before = rounds[0].plans.find(p => p.kind === "bundle");
+  const after = rounds[1].plans.find(p => p.kind === "bundle");
   const foot = svg("g");
   foot.appendChild(svg("line", {
-    x1: L - 18, y1: H - 54, x2: W - R + 18, y2: H - 54, stroke: "#e2dfd0",
+    x1: 0, y1: H - 62, x2: W, y2: H - 62, stroke: C.rule, "stroke-width": D.hair,
   }));
-  foot.appendChild(text(L - 18, H - 28,
-    `A 0.0010 scan cut the dearest route from ${trim(amountOf(bundleBefore.expected))} to ${trim(amountOf(bundleAfter.expected))}.`,
+  foot.appendChild(text(0, H - 34,
+    `A ${trim(amountOf(100000))} scan cut the dearest route from ${trim(amountOf(before.expected))} to ${trim(amountOf(after.expected))}.`,
     { class: "c-foot" }));
-  foot.appendChild(text(L - 18, H - 10,
+  foot.appendChild(text(0, H - 14,
     "Knowing which pools were quiet made every remaining option cheaper.",
     { class: "c-mute" }));
-  animate(foot, "opacity", 0, 1, "0.5s", "1.4s");
+  animate(foot, "opacity", 0, 1, "0.5s", "1.45s");
   s.appendChild(foot);
 
   host.appendChild(s);
@@ -392,9 +458,9 @@ function loopDiagram(host) {
     "aria-label": "Ask the price, compare routes, buy one thing, look again",
   });
   const steps = [
-    ["Ask the price", "sellers quote the real job"],
-    ["Compare routes", "cheapest that can still finish"],
-    ["Buy one thing", "one payment, confirmed on-chain"],
+    ["Ask the price", "sellers quote the job"],
+    ["Compare routes", "cheapest that finishes"],
+    ["Buy one thing", "one payment, confirmed"],
     ["Look again", "is the plan still right?"],
   ];
   const boxW = 214, gap = (W - boxW * 4) / 3, top = 8, boxH = 78;
@@ -403,10 +469,10 @@ function loopDiagram(host) {
     const x = i * (boxW + gap);
     const g = svg("g");
     g.appendChild(svg("rect", {
-      x, y: top, width: boxW, height: boxH, rx: 12,
-      fill: "#fff", stroke: "#dcd8c8",
+      x, y: top, width: boxW, height: boxH, rx: D.card,
+      fill: "#fff", stroke: C.rule,
     }));
-    g.appendChild(svg("circle", { cx: x + 26, cy: top + 27, r: 12, fill: "#e4efe8" }));
+    g.appendChild(svg("circle", { cx: x + 26, cy: top + 27, r: 12, fill: C.soft }));
     g.appendChild(text(x + 26, top + 31, String(i + 1), {
       class: "lp-n", "text-anchor": "middle",
     }));
@@ -417,7 +483,7 @@ function loopDiagram(host) {
       const ax = x + boxW;
       g.appendChild(svg("path", {
         d: `M${ax + 9} ${top + boxH / 2} L${ax + gap - 9} ${top + boxH / 2}`,
-        stroke: "#c7c2ae", "stroke-width": 1.5, "marker-end": "url(#ar)",
+        stroke: C.rule2, "stroke-width": D.line, "marker-end": "url(#ar)",
       }));
     }
     animate(g, "opacity", 0, 1, "0.4s", `${i * 0.16}s`);
@@ -427,8 +493,8 @@ function loopDiagram(host) {
   // The return arc is the point: it re-plans rather than running once.
   const y0 = top + boxH;
   const back = svg("path", {
-    d: `M${W - boxW / 2} ${y0 + 4} L${W - boxW / 2} ${y0 + 26} Q${W - boxW / 2} ${y0 + 38} ${W - boxW / 2 - 12} ${y0 + 38} L${W / 2 + 82} ${y0 + 38} M${W / 2 - 82} ${y0 + 38} L${boxW / 2 + 12} ${y0 + 38} Q${boxW / 2} ${y0 + 38} ${boxW / 2} ${y0 + 26} L${boxW / 2} ${y0 + 8}`,
-    fill: "none", stroke: "#2d7a58", "stroke-width": 1.6,
+    d: `M${W - boxW / 2} ${y0 + 4} L${W - boxW / 2} ${y0 + 26} Q${W - boxW / 2} ${y0 + 38} ${W - boxW / 2 - 12} ${y0 + 38} L${W / 2 + 96} ${y0 + 38} M${W / 2 - 96} ${y0 + 38} L${boxW / 2 + 12} ${y0 + 38} Q${boxW / 2} ${y0 + 38} ${boxW / 2} ${y0 + 26} L${boxW / 2} ${y0 + 8}`,
+    fill: "none", stroke: C.sealed, "stroke-width": D.line,
     "stroke-dasharray": "6 5", "marker-end": "url(#ar-g)",
   });
   animate(back, "opacity", 0, 1, "0.5s", "0.8s");
@@ -439,8 +505,8 @@ function loopDiagram(host) {
   animate(lbl, "opacity", 0, 1, "0.4s", "1s");
   s.appendChild(lbl);
 
-  const defs = svg("defs");
-  for (const [id, fill] of [["ar", "#c7c2ae"], ["ar-g", "#2d7a58"]]) {
+  const defs = sharedDefs("lp", []);
+  for (const [id, fill] of [["ar", C.rule2], ["ar-g", C.sealed]]) {
     const m = svg("marker", {
       id, viewBox: "0 0 8 8", refX: 6, refY: 4,
       markerWidth: 6, markerHeight: 6, orient: "auto",
