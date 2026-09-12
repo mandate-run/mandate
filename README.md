@@ -8,7 +8,9 @@
 [![Hedera](https://img.shields.io/badge/Hedera-testnet-7040ff.svg)](https://hashscan.io/testnet/topic/0.0.10410389)
 [![x402](https://img.shields.io/badge/x402-exact%20scheme-black.svg)](docs/spec.md)
 
-**[Quick start](#quick-start) · [How it works](#how-it-works) · [Proctor](#proctor-the-harness) · [Docs](#documentation)**
+**[See a run](https://mandate-run.github.io/mandate/)** — a page built from two real testnet runs
+
+[Quick start](#quick-start) · [How it works](#how-it-works) · [Proctor](#proctor-the-harness) · [Docs](#documentation)
 
 </div>
 
