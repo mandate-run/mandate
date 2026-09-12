@@ -6,7 +6,7 @@ Mandate buys the evidence an agent needs, tracks every payment authorization aga
 
 Built from scratch for ETHOnline 2026: Hedera AI & Agentic Payments, Hedera Open Source, The Graph AI Use Case From Scratch.
 
-Status: specification complete; buyer runtime implemented in Rust with a fixture demo mode (simulated sellers, settlement and evidence) that replays the demo scenarios end to end. Live x402 sellers, Hedera testnet settlement, The Graph evidence and the Proctor harness are not wired up yet.
+Status: specification complete; buyer runtime implemented in Rust. Two execution modes: a fixture demo (simulated sellers, settlement and evidence) that replays the demo scenarios end to end, and a live mode (`run --live`) against real x402 sellers that query the live Uniswap v3 subgraph on The Graph Network, with real Hedera testnet settlement through Blocky402, settlement proven from mirror-node records, and receipts published to an HCS topic. The Proctor harness (`proctor/`) is still a scaffold.
 
 ## What it does
 
@@ -22,8 +22,8 @@ Status: specification complete; buyer runtime implemented in Rust with a fixture
 
 | Component | Role | Built with |
 |---|---|---|
-| mandate | buyer runtime and CLI | Rust, r402-hedera for signing, SQLite |
-| sellers | four x402-gated reference endpoints with published tariffs and durable result storage | TypeScript, `@x402/hedera`, x402 HTTP resource server with per-request pricing |
+| mandate | buyer runtime and CLI | Rust, `r402-hedera` + Hiero SDK for signing, SQLite |
+| sellers | four x402-gated reference endpoints with published tariffs, live The Graph evidence and durable result storage | Node (Express), x402 v2 wire format, settled via Blocky402 |
 | manifest | listings and tariffs, approved and pinned by the principal; each 402 also carries the x402 `bazaar` discovery info | JSON |
 | facilitator | verifies and settles; fee payer `0.0.7162784` on testnet | Blocky402, `api.testnet.blocky402.com` |
 
@@ -48,8 +48,11 @@ Proctor, in `harness/`, builds Hedera services from an executable acceptance con
 
 ## Build, test and run
 
-Requirements: a recent stable Rust toolchain (the workspace targets 1.96). No
-external services, keys or accounts are needed for the fixture demo.
+Requirements: a recent stable Rust toolchain (the workspace targets 1.96) and
+`protoc` (the Hiero SDK generates its protobuf at build time; Debian:
+`apt-get install protobuf-compiler`). The fixture demo needs no external
+services, keys or accounts. The live demo additionally needs Node 20+ for the
+sellers and the keys in [.env.example](.env.example).
 
 ### Build
 
@@ -86,6 +89,15 @@ cargo run -p mandate-cli -- reconcile <mandate_id> # re-check settlement of open
 print the transcript as JSON instead of the demo-style text).
 
 ## Launch the demo
+
+Two modes. `run` without `--live` is the **fixture demo**: it executes the real
+ledger, planning, purchase state machine, brief and validation logic against
+simulated quotes, settlement records and evidence (matching the arithmetic in
+docs/mandate.md section 6). `run --live` executes the same logic against real
+x402 sellers, live The Graph evidence, real Hedera testnet settlement and HCS
+receipts.
+
+### Fixture demo
 
 ```bash
 # 1. create the demo mandate, pinned manifest and empty ledger
@@ -124,16 +136,65 @@ cargo run -p mandate-cli -- receipts dev-mandate
 cargo run -p mandate-cli -- reconcile dev-mandate   # everything settled: 0 unresolved
 ```
 
-The fixture executes the real ledger, planning, purchase state machine, brief
-and validation logic against simulated quotes, settlement records and evidence
-(matching the arithmetic in docs/mandate.md section 6). The video script in
-docs/demo.md narrates these scenarios; the fixture's brief is 3 KB, so its
-explain quote and totals are slightly smaller than that script assumed.
+The video script in docs/demo.md narrates these scenarios; the fixture's brief
+is 3 KB, so its explain quote and totals are slightly smaller than that script
+assumed.
 
-Going live (not wired up yet) requires a Hedera testnet account associated
-with USDC `0.0.429274` holding the service budget in USDC and the audit budget
-in HBAR; a Subgraph Studio API key; a model API key; and the reference
-sellers.
+### Live demo (real payments, real on-chain data)
+
+Setup, once:
+
+1. **Hedera testnet account** that will be the payer. Create one at
+   https://portal.hedera.com/, claim testnet HBAR, mint testnet USDC
+   (`0.0.429274`) at https://faucet.circle.com/ (select Hedera Testnet) and
+   associate the token with the account:
+
+   The portal does not expose token association; run a `TokenAssociateTransaction`
+   once (see the snippet in the
+   [`@x402/hedera` README](https://www.npmjs.com/package/@x402/hedera), or
+   `scripts/associate.mjs` in a scratch dir) so the account can hold USDC.
+
+2. **Subgraph Studio API key** for the Uniswap v3 subgraph
+   (`5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV`) at
+   https://thegraph.com/studio/.
+3. Optionally an **HCS topic** (receipts audit trail) and an **Ethereum RPC**
+   URL (provenance spot-checks). Without them receipts stay local and
+   provenance is reported `not_applicable`.
+
+Copy [.env.example](.env.example) to `.env`, fill it in, and source it:
+
+```bash
+set -a; source .env; set +a
+
+# install the sellers and run the whole live demo (sellers + mandate + ledger)
+cd sellers && npm install && cd ..
+./scripts/demo-live.sh                      # normal scenario
+./scripts/demo-live.sh --scenario refusal   # small-budget refusal (edit mandate.json first)
+./scripts/demo-live.sh --fault drop-response-after-settle   # lost response, recovered
+```
+
+Or run the pieces by hand: start the sellers, then `run --live`:
+
+```bash
+cd sellers && GRAPH_API_KEY=$GRAPH_API_KEY npm start &
+
+cargo run -p mandate-cli -- run \
+  --mandate-path mandate-demo/mandate.json \
+  --manifest-path mandate-demo/manifest.json \
+  --ledger-path mandate-demo/ledger.json \
+  --transcript-path mandate-demo/transcript.json \
+  --scenario normal \
+  --live --sellers-url http://localhost:4021
+```
+
+What the live run does, in order: quotes `screen` and `investigate` live from
+four x402 sellers (`sellers/`), plans the cheapest path whose worst case fits
+the budget, signs one real Hedera `TransferTransaction` per purchase with the
+facilitator as fee payer, pays through Blocky402, proves each settlement from
+the mirror node (never from the HTTP response), validates live Uniswap v3
+evidence from The Graph, and publishes every receipt to HCS when
+`RECEIPTS_TOPIC` is set. See [sellers/README.md](sellers/README.md) for the
+seller fleet and its fault switches.
 
 ## Docs
 

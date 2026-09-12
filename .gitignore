@@ -10,3 +10,13 @@
 .vscode/
 *.swp
 .DS_Store
+
+# Local configuration and secrets
+.env
+
+# Node (sellers)
+sellers/node_modules/
+sellers/data/
+
+# Proctor runs
+.proctor/

@@ -5,6 +5,7 @@ pub mod brief;
 pub mod validate;
 pub mod signing;
 pub mod fixture;
+pub mod live;
 pub mod cli;
 
 #[cfg(test)]

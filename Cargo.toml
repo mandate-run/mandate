@@ -4,6 +4,7 @@ resolver = "2"
 members = [
   "mandate-core",
   "mandate-cli",
+  "proctor",
   "stub",
 ]
 

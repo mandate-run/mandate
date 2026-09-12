@@ -1,0 +1,275 @@
+{
+  "mandate": "dev-mandate",
+  "assumption": "1",
+  "brief_bound": 5632,
+  "quotes": [
+    {
+      "listing_id": "screen",
+      "amount": "0.0010",
+      "ceiling": "0.0010",
+      "within_tariff": true,
+      "listing_match": true,
+      "fee_payer_ok": true,
+      "latency_ms": 1,
+      "source": "live"
+    },
+    {
+      "listing_id": "investigate",
+      "amount": "0.0080",
+      "ceiling": "0.0080",
+      "within_tariff": true,
+      "listing_match": true,
+      "fee_payer_ok": true,
+      "latency_ms": 1,
+      "source": "live"
+    },
+    {
+      "listing_id": "events",
+      "amount": "0.0015",
+      "ceiling": "0.0015",
+      "within_tariff": true,
+      "listing_match": true,
+      "fee_payer_ok": true,
+      "latency_ms": 0,
+      "source": "estimate"
+    },
+    {
+      "listing_id": "explain",
+      "amount": "0.0008",
+      "ceiling": "0.0008",
+      "within_tariff": true,
+      "listing_match": true,
+      "fee_payer_ok": true,
+      "latency_ms": 0,
+      "source": "estimate"
+    },
+    {
+      "listing_id": "explain",
+      "amount": "0.0003",
+      "ceiling": "0.0003",
+      "within_tariff": true,
+      "listing_match": true,
+      "fee_payer_ok": true,
+      "latency_ms": 1,
+      "source": "live"
+    }
+  ],
+  "plan": {
+    "name": "staged",
+    "expected": "0.0023",
+    "bound": "0.0023",
+    "assumption": 1,
+    "authorizations": 2
+  },
+  "rejected_plans": [
+    {
+      "name": "hybrid",
+      "reason": "higher expected",
+      "bound": "0.0090",
+      "expected": "0.0042"
+    },
+    {
+      "name": "bundle",
+      "reason": "higher expected",
+      "bound": "0.0080",
+      "expected": "0.0080"
+    }
+  ],
+  "plan_phases": [
+    {
+      "chosen": {
+        "name": "staged",
+        "expected": "0.0033",
+        "bound": "0.0093",
+        "assumption": 1,
+        "authorizations": 3
+      },
+      "rejected": [
+        {
+          "name": "hybrid",
+          "reason": "higher expected",
+          "bound": "0.0090",
+          "expected": "0.0042"
+        },
+        {
+          "name": "bundle",
+          "reason": "higher expected",
+          "bound": "0.0080",
+          "expected": "0.0080"
+        }
+      ]
+    },
+    {
+      "chosen": {
+        "name": "staged",
+        "expected": "0.0023",
+        "bound": "0.0023",
+        "assumption": 1,
+        "authorizations": 2
+      },
+      "rejected": [
+        {
+          "name": "hybrid",
+          "reason": "higher expected",
+          "bound": "0.0032",
+          "expected": "0.0032"
+        },
+        {
+          "name": "bundle",
+          "reason": "higher expected",
+          "bound": "0.0032",
+          "expected": "0.0032"
+        }
+      ]
+    }
+  ],
+  "reservations": [
+    {
+      "step": "explain",
+      "amount": "0.0008",
+      "source": "ceiling_at_max",
+      "state": "consumed"
+    }
+  ],
+  "steps": [
+    {
+      "step": "screen",
+      "payment_id": "pay_5f78f1a4-686b-4452-8a2e-b3ddd9aa90a9",
+      "tx_id": "0.0.7162784@1788779648.0",
+      "submissions": 1,
+      "retrievals": 0,
+      "transitions": [
+        {
+          "from": "prepared",
+          "to": "sent",
+          "at": "2026-09-07T11:14:13.958977767Z",
+          "record_count": null,
+          "duplicates_ignored": null
+        },
+        {
+          "from": "sent",
+          "to": "settled",
+          "at": "2026-09-07T11:14:13.958977767Z",
+          "record_count": 1,
+          "duplicates_ignored": 0
+        },
+        {
+          "from": "none",
+          "to": "validated",
+          "at": "2026-09-07T11:14:13.958977767Z",
+          "record_count": null,
+          "duplicates_ignored": null
+        }
+      ]
+    },
+    {
+      "step": "events",
+      "payment_id": "pay_fa2e16e6-f022-42a5-852e-df0998857c46",
+      "tx_id": "0.0.7162784@1788779648.0",
+      "submissions": 1,
+      "retrievals": 0,
+      "transitions": [
+        {
+          "from": "prepared",
+          "to": "sent",
+          "at": "2026-09-07T11:14:13.959296910Z",
+          "record_count": null,
+          "duplicates_ignored": null
+        },
+        {
+          "from": "sent",
+          "to": "settled",
+          "at": "2026-09-07T11:14:13.959296910Z",
+          "record_count": 1,
+          "duplicates_ignored": 0
+        },
+        {
+          "from": "none",
+          "to": "validated",
+          "at": "2026-09-07T11:14:13.959296910Z",
+          "record_count": null,
+          "duplicates_ignored": null
+        }
+      ]
+    },
+    {
+      "step": "explain",
+      "payment_id": "pay_a305145f-ca3b-40c7-81ff-6bc3af4b6ac7",
+      "tx_id": "0.0.7162784@1788779648.0",
+      "submissions": 1,
+      "retrievals": 0,
+      "transitions": [
+        {
+          "from": "prepared",
+          "to": "sent",
+          "at": "2026-09-07T11:14:13.960241913Z",
+          "record_count": null,
+          "duplicates_ignored": null
+        },
+        {
+          "from": "sent",
+          "to": "settled",
+          "at": "2026-09-07T11:14:13.960241913Z",
+          "record_count": 1,
+          "duplicates_ignored": 0
+        },
+        {
+          "from": "none",
+          "to": "validated",
+          "at": "2026-09-07T11:14:13.960241913Z",
+          "record_count": null,
+          "duplicates_ignored": null
+        }
+      ]
+    }
+  ],
+  "outcomes": [
+    {
+      "pool": "0xBa9e1006dEb46A96FD07843B8C4C8C2e287D83a",
+      "outcome": "supported",
+      "claim_count": 4
+    },
+    {
+      "pool": "0x3416cF6C708Da44DB2624D63ea0AAef7113527C6",
+      "outcome": "non_material",
+      "claim_count": 0
+    },
+    {
+      "pool": "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
+      "outcome": "non_material",
+      "claim_count": 0
+    },
+    {
+      "pool": "0x8ad599c3A0ff1De0829EFDDc76F38f1F5f5f5F8",
+      "outcome": "non_material",
+      "claim_count": 0
+    },
+    {
+      "pool": "0x5777d92f208679DB4b9778590Fa3CAB3aC9E2168",
+      "outcome": "non_material",
+      "claim_count": 0
+    }
+  ],
+  "validation": {
+    "coverage": "5/5",
+    "calculations": true,
+    "citations": true,
+    "provenance": "3/3",
+    "freshness": true,
+    "schema": true,
+    "complete": true,
+    "incomplete_reason": null
+  },
+  "refusals": [],
+  "totals": {
+    "settled": "0.0028",
+    "released": "0.0005",
+    "unspent": "0.0072",
+    "unresolved": "0.0000",
+    "audit_spent": "0.0004"
+  },
+  "receipts": {
+    "topic": "0.0.1000",
+    "pending": []
+  }
+}

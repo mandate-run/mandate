@@ -1,0 +1,24 @@
+# Offline smoke task: the fixture refusal scenario (no keys or network). It
+# exercises proctor check end to end: hooks, expect over the JSON transcript,
+# journal. Use it to verify proctor works before wiring a live task.
+
+[task]
+name = "fixture refusal stops before the first purchase"
+attempts = 1
+
+[hooks]
+setup = "cargo build -q -p mandate-cli && rm -rf /tmp/mandate-refusal && cargo run -q -p mandate-cli -- init --out-dir /tmp/mandate-refusal --service-total 0.0030"
+
+[[check]]
+name = "refusal transcript"
+run = """cargo run -q -p mandate-cli -- run \
+  --mandate-path /tmp/mandate-refusal/mandate.json \
+  --manifest-path /tmp/mandate-refusal/manifest.json \
+  --ledger-path /tmp/mandate-refusal/ledger.json \
+  --transcript-path /tmp/mandate-refusal/transcript.json \
+  --scenario refusal --json"""
+
+[check.expect]
+"refusals[0].code" = "REQUIREMENT_UNMEETABLE"
+"totals.settled" = "0.0000"
+steps = []

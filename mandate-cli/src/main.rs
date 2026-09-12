@@ -34,7 +34,8 @@ enum Command {
         #[arg(long, default_value = "0.5", help = "HBAR audit budget")]
         audit_total: String,
     },
-    /// Run the demo scenario against simulated sellers, ledger and settlement
+    /// Run a demo scenario; by default against simulated sellers, ledger and
+    /// settlement, or against live x402 sellers and Hedera testnet with --live
     Run {
         #[arg(long, default_value = "mandate-demo/mandate.json")]
         mandate_path: PathBuf,
@@ -48,6 +49,10 @@ enum Command {
         scenario: Scenario,
         #[arg(long, help = "print the transcript as JSON")]
         json: bool,
+        #[arg(long, help = "run live: real x402 sellers, Hedera testnet settlement through Blocky402, HCS receipts (env: MANDATE_ACCOUNT_ID, MANDATE_PRIVATE_KEY, FACILITATOR_URL, MIRROR_NODE_URL, RECEIPTS_TOPIC, ETH_RPC_URL)")]
+        live: bool,
+        #[arg(long, help = "base URL of the live seller fleet; listing URLs are rewritten to {base}/{listing_id}")]
+        sellers_url: Option<String>,
     },
     /// Re-check settlement for every non-terminal authorization
     Reconcile {
@@ -124,6 +129,8 @@ fn run(cli: Cli) -> Result<(), String> {
             transcript_path,
             scenario,
             json,
+            live,
+            sellers_url,
         } => {
             let cmd = RunCommand {
                 mandate_path,
@@ -132,8 +139,14 @@ fn run(cli: Cli) -> Result<(), String> {
                 transcript_path,
                 scenario,
                 json,
+                live,
+                sellers_url,
             };
-            let transcript = exec::execute_run(&cmd)?;
+            let transcript = if cmd.live {
+                exec::execute_run_live(&cmd)?
+            } else {
+                exec::execute_run(&cmd)?
+            };
             if cmd.json {
                 println!(
                     "{}",

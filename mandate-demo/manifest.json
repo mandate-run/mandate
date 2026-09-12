@@ -1,0 +1,90 @@
+[
+  {
+    "id": "screen",
+    "seller": "mandate-screen",
+    "url": "https://sellers.example/screen",
+    "method": "POST",
+    "capability": "Screen",
+    "produces": [
+      "Screening"
+    ],
+    "tariff": {
+      "version": "1.0.0",
+      "base": 0,
+      "unit": "Pool",
+      "unit_price": 200,
+      "max_units": 100,
+      "rounding": "InputKb"
+    },
+    "network": "hedera:testnet",
+    "asset": "0.0.429274",
+    "pay_to": "0.0.7777777",
+    "discovery": null
+  },
+  {
+    "id": "events",
+    "seller": "mandate-events",
+    "url": "https://sellers.example/events",
+    "method": "POST",
+    "capability": "Events",
+    "produces": [
+      "Transaction"
+    ],
+    "tariff": {
+      "version": "1.0.0",
+      "base": 0,
+      "unit": "PoolWindow",
+      "unit_price": 1500,
+      "max_units": 100,
+      "rounding": "InputKb"
+    },
+    "network": "hedera:testnet",
+    "asset": "0.0.429274",
+    "pay_to": "0.0.7777777",
+    "discovery": null
+  },
+  {
+    "id": "investigate",
+    "seller": "mandate-investigate",
+    "url": "https://sellers.example/investigate",
+    "method": "POST",
+    "capability": "Investigate",
+    "produces": [
+      "Report"
+    ],
+    "tariff": {
+      "version": "1.0.0",
+      "base": 2000,
+      "unit": "Pool",
+      "unit_price": 1200,
+      "max_units": 100,
+      "rounding": "InputKb"
+    },
+    "network": "hedera:testnet",
+    "asset": "0.0.429274",
+    "pay_to": "0.0.7777777",
+    "discovery": null
+  },
+  {
+    "id": "explain",
+    "seller": "mandate-explain",
+    "url": "https://sellers.example/explain",
+    "method": "POST",
+    "capability": "Explain",
+    "produces": [
+      "Report"
+    ],
+    "tariff": {
+      "version": "1.0.0",
+      "base": 0,
+      "unit": "InputKb",
+      "unit_price": 100,
+      "max_units": 8,
+      "rounding": "InputKb"
+    },
+    "network": "hedera:testnet",
+    "asset": "0.0.429274",
+    "pay_to": "0.0.7777777",
+    "discovery": null
+  }
+]

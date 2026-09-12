@@ -44,22 +44,60 @@ pub fn execute_run(cmd: &RunCommand) -> Result<Transcript, String> {
     let mandate: Mandate = read_json(&cmd.mandate_path)?;
     let listings: Vec<Listing> = read_json(&cmd.manifest_path)?;
 
-    // Each run starts from a clean ledger for this mandate.
+    let mut ledger = fresh_file_ledger(&cmd.ledger_path, &mandate)?;
+    let run = fixture::run_scenario(&mandate, &listings, cmd.scenario)
+        .map_err(|e| format!("run: {e}"))?;
+    persist_state(&mut ledger, &mandate.id, run.state)?;
+
+    let transcript = run.transcript;
+    write_json(&cmd.transcript_path, &transcript)?;
+    Ok(transcript)
+}
+
+/// `mandate run --live`: execute the scenario against live x402 sellers,
+/// Hedera testnet settlement through Blocky402 and (when configured) HCS
+/// receipts. Keys and endpoints come from the environment (see
+/// `LiveConfig::from_env`).
+pub fn execute_run_live(cmd: &RunCommand) -> Result<Transcript, String> {
+    let mandate: Mandate = read_json(&cmd.mandate_path)?;
+    let listings: Vec<Listing> = read_json(&cmd.manifest_path)?;
+
+    let mut ledger = fresh_file_ledger(&cmd.ledger_path, &mandate)?;
+    let cfg = crate::live::LiveConfig::from_env().map_err(|e| format!("config: {e}"))?;
+    let run = crate::live::run_live(
+        &mandate,
+        &listings,
+        cmd.sellers_url.as_deref(),
+        cmd.scenario,
+        cfg,
+    )
+    .map_err(|e| format!("live run: {e}"))?;
+    persist_state(&mut ledger, &mandate.id, run.state)?;
+
+    let transcript = run.transcript;
+    write_json(&cmd.transcript_path, &transcript)?;
+    Ok(transcript)
+}
+
+/// Open a fresh file ledger for a mandate (each run starts clean).
+fn fresh_file_ledger(ledger_path: &Path, mandate: &Mandate) -> Result<FileLedger, String> {
     write_json(
-        &cmd.ledger_path,
+        ledger_path,
         &LedgerState {
             mandate_id: mandate.id.clone(),
             ..Default::default()
         },
     )?;
-    let mut ledger = FileLedger::open_or_create(&cmd.ledger_path, &mandate.id)
-        .map_err(|e| format!("open ledger: {e}"))?;
+    FileLedger::open_or_create(ledger_path, &mandate.id)
+        .map_err(|e| format!("open ledger: {e}"))
+}
 
-    let run = fixture::run_scenario(&mandate, &listings, cmd.scenario)
-        .map_err(|e| format!("run: {e}"))?;
-
-    // Persist the final ledger state through the file ledger.
-    let state = run.state;
+/// Persist a runner's final ledger state through the file ledger.
+fn persist_state(
+    ledger: &mut FileLedger,
+    mandate_id: &str,
+    state: LedgerState,
+) -> Result<(), String> {
     for auth in &state.authorizations {
         ledger.insert_authorization(auth).map_err(|e| e.to_string())?;
     }
@@ -71,13 +109,10 @@ pub fn execute_run(cmd: &RunCommand) -> Result<Transcript, String> {
     }
     if state.audit_spent > 0 {
         ledger
-            .add_audit_spend(&mandate.id, state.audit_spent)
+            .add_audit_spend(mandate_id, state.audit_spent)
             .map_err(|e| e.to_string())?;
     }
-
-    let transcript = run.transcript;
-    write_json(&cmd.transcript_path, &transcript)?;
-    Ok(transcript)
+    Ok(())
 }
 
 /// `mandate reconcile`: re-check settlement for every non-terminal

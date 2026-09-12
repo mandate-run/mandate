@@ -28,3 +28,32 @@ Main cut:
 | 3:45 | Close: repo, three tracks, one line on what comes next |
 
 Scenarios 2, 4, 6 and 7 are recorded as backup clips, not in the main cut.
+
+# Live cut (with keys)
+
+Same mandate, real services: `./scripts/demo-live.sh`. On screen, each of
+`normal` and `refusal` against live sellers, then HashScan for the money shot.
+
+Must appear on screen for the live `normal` run:
+
+- the sellers answering `402 PAYMENT-REQUIRED` with the amount in USDC
+  (`0.0.429274`) on `hedera:testnet` (the header and body both carry the
+  requirements);
+- `plan staged ... chosen` over live quotes, then each step's real tx id in
+  the `0.0.7162784@` namespace (the facilitator fee payer), printed as the
+  purchase settles;
+- the mirror node proving settlement (the transcript's transitions), and the
+  live evidence: real pool addresses, real `block_start`/`block_end` heights,
+  real mint/burn/swap transaction hashes from the Uniswap v3 subgraph;
+- `validation passed: coverage 5/5` (with real provenance when `ETH_RPC_URL`
+  is set and transactions are cited);
+- HashScan: the transfer under the facilitator's account and the HCS topic
+  with one message per receipt.
+
+Numbers are not pinned: they follow the live data. The refusal clip runs the
+same sellers against a `--service-total 0.0030` mandate and must show
+`REFUSED REQUIREMENT_UNMEETABLE` before any payment. The lost-response clip
+runs `./scripts/demo-live.sh --fault drop-response-after-settle`: the events
+purchase settles on chain, the seller drops the response, the buyer retrieves
+with the same signed payment and is served from the seller's durable storage
+(one tx id, one settlement).

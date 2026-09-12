@@ -37,6 +37,8 @@ fn init_then_run_then_read_back() {
         transcript_path: dir.join("transcript.json"),
         scenario: Scenario::Normal,
         json: false,
+        live: false,
+        sellers_url: None,
     };
     let transcript = exec::execute_run(&run).unwrap();
     assert_eq!(transcript.totals.settled, "0.0028");
@@ -107,6 +109,8 @@ fn run_refusal_persists_no_authorizations() {
         transcript_path: dir.join("transcript.json"),
         scenario: Scenario::Refusal,
         json: false,
+        live: false,
+        sellers_url: None,
     };
     let transcript = exec::execute_run(&run).unwrap();
     assert!(transcript.steps.is_empty());

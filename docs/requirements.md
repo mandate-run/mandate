@@ -8,19 +8,19 @@ Up to 3 teams, $2,000 each. Video: five minutes or less.
 
 | Requirement, quoted | Satisfied by | Status |
 |---|---|---|
-| "Host a live x402-gated service on Hedera testnet or mainnet, settled through the Blocky402 facilitator." | Four seller endpoints on `hedera:testnet`, facilitator `api.testnet.blocky402.com` | todo |
-| "Build a platform or agent that consumes that service and completes at least one real paid request end to end." | `mandate run` completes the normal scenario; tx id in transcript and on HCS | todo |
-| "Public GitHub repo with a README covering setup, architecture, and the payment flow." | README sections Setup, Architecture, Payment flow; repo made public before submission | todo |
+| "Host a live x402-gated service on Hedera testnet or mainnet, settled through the Blocky402 facilitator." | Four seller endpoints on `hedera:testnet`, facilitator `api.testnet.blocky402.com` | doing: `sellers/` implemented; needs a funded live run |
+| "Build a platform or agent that consumes that service and completes at least one real paid request end to end." | `mandate run --live` completes the normal scenario; tx id in transcript and on HCS | doing: implemented; needs a funded live run |
+| "Public GitHub repo with a README covering setup, architecture, and the payment flow." | README sections Setup, Architecture, Payment flow; repo made public before submission | doing |
 | "Demo video of five minutes or less showing the paid request executing." | One video, 3 to 4 minutes, shared with The Graph | todo |
 
 Extra points pursued:
 
 | Extra point, quoted | Satisfied by | Status |
 |---|---|---|
-| "Pay-per-call inference, data, or compute metering rather than a flat per-request charge" | Tariffs priced per pool, per pool-window, per input KB | todo |
-| "Agent discovery via UCP, or a directory that makes your service findable by other agents" | Manifest of listings served over HTTP; every 402 carries the x402 `bazaar` discovery extension | todo |
-| "HTS tokens or custom fee schedules in the settlement path" | USDC, HTS token `0.0.429274` on testnet | todo |
-| "Verifiable payment audit trails on HCS" | One receipt per decision on an HCS topic | todo |
+| "Pay-per-call inference, data, or compute metering rather than a flat per-request charge" | Tariffs priced per pool, per pool-window, per input KB | doing: implemented in `sellers/` |
+| "Agent discovery via UCP, or a directory that makes your service findable by other agents" | Manifest of listings served over HTTP; every 402 carries the x402 `bazaar` discovery extension | doing: `sellers/` serves `/manifest.json` and tags every 402 |
+| "HTS tokens or custom fee schedules in the settlement path" | USDC, HTS token `0.0.429274` on testnet | doing: implemented; needs a funded live run |
+| "Verifiable payment audit trails on HCS" | One receipt per decision on an HCS topic | doing: published in live mode; needs a topic + funded account |
 
 Not pursued: A2A or ACP negotiation, ERC-8004 or HCS-14 identity, Scheduled Transactions.
 
@@ -30,10 +30,10 @@ Not pursued: A2A or ACP negotiation, ERC-8004 or HCS-14 identity, Scheduled Tran
 
 | Requirement, quoted | Satisfied by | Status |
 |---|---|---|
-| "Use The Graph as a load-bearing part of the project ... the agent/app uses The Graph (Subgraphs, the Subgraph MCP, or Substreams) as its source of blockchain data." | All analysis data comes from Uniswap v3 subgraph `5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV` on The Graph Network; a public Ethereum RPC is used only to spot-check that cited transactions exist | todo |
-| "Consume live data from a Graph provider, for example querying Subgraphs with an API key from Subgraph Studio" | Sellers query `gateway.thegraph.com` with a Subgraph Studio API key | todo |
-| "Do meaningful work with the data: reasoning, decisions, automation, or a natural-language interface, not just printing a raw query result." | Materiality screening, evidence sufficiency and purchase decisions, cited explanation | todo |
-| "Open-source the code with a clear README or SKILL.md so judges can run it, and submit a public repository plus a short demo video (two to four minutes)." | README Setup runnable on a clean machine; same video | todo |
+| "Use The Graph as a load-bearing part of the project ... the agent/app uses The Graph (Subgraphs, the Subgraph MCP, or Substreams) as its source of blockchain data." | All analysis data comes from Uniswap v3 subgraph `5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV` on The Graph Network; a public Ethereum RPC is used only to spot-check that cited transactions exist | doing: sellers query the live subgraph; needs a key to run |
+| "Consume live data from a Graph provider, for example querying Subgraphs with an API key from Subgraph Studio" | Sellers query `gateway.thegraph.com` with a Subgraph Studio API key | doing: implemented in `sellers/lib/graph.mjs` |
+| "Do meaningful work with the data: reasoning, decisions, automation, or a natural-language interface, not just printing a raw query result." | Materiality screening, evidence sufficiency and purchase decisions, cited explanation | doing |
+| "Open-source the code with a clear README or SKILL.md so judges can run it, and submit a public repository plus a short demo video (two to four minutes)." | README Setup runnable on a clean machine; same video | doing |
 | "Select the pool that matches how you built: Start Fresh for net-new" | First commit `f6cc4fa`, 2026-09-06, no prior code | done |
 
 ## Hedera: Open Source, Improve the Hedera Harness
@@ -42,7 +42,7 @@ Up to 2 teams, $1,000 each. Design in [harness.md](harness.md).
 
 | Requirement, quoted | Satisfied by | Status |
 |---|---|---|
-| "Submit meaningful contribution to Hedera Harness (PR acceptable) or build new harness inspired by it" | Proctor in `harness/`, a standalone harness with the inspiration and differences documented | todo |
+| "Submit meaningful contribution to Hedera Harness (PR acceptable) or build new harness inspired by it" | Proctor in `proctor/`, a standalone harness with the inspiration and differences documented | doing: scaffolded |
 | "Public GitHub repo/PR with README explaining problem solved" | `harness.md` and the crate README | todo |
 | "Demo video (≤5 minutes) showing improvement" | Segment of the project video | todo |
 
