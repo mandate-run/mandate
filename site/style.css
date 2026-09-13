@@ -241,6 +241,17 @@ section:not(.tint):not(.dark):not(.close):not(.explainer) {
 
 /* A ridge line: the dark bands rise into the light ones as a horizon
    rather than butting against them. Drawn in CSS, so it costs no request. */
+/* The hero descends into the light band below it, so its ridge hangs from
+   the bottom edge rather than rising from the top. A different range of
+   hills from the ones further down the page. */
+.hero { position: relative; padding-bottom: 46px; }
+.hero::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 52px;
+  background: var(--paper);
+  clip-path: polygon(0 100%, 100% 100%, 100% 52%, 92% 66%, 83% 44%, 71% 62%,
+                     59% 38%, 47% 58%, 36% 40%, 25% 60%, 13% 46%, 5% 58%, 0 44%);
+}
+
 section.dark, section.close { margin-top: 44px; }
 section.dark::before, section.close::before {
   content: ""; position: absolute; left: 0; right: 0; top: -44px; height: 45px;
