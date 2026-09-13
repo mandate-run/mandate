@@ -236,8 +236,13 @@ function replanChart(report, host) {
     const ry = rowTop + i * rowH;
 
     const key = svg("g");
+    // The tint must clear the longest description, or it ends mid-word on
+    // one row and looks like a mistake. Same inset on both sides.
+    const INSET = 14;
+    const widest = Math.max(...order.map(k =>
+      Math.max(ROUTE[k].length * 7.2, ROUTE_SUB[k].length * 6.1)));
     key.appendChild(svg("rect", {
-      x: 0, y: ry - 4, width: KEY, height: rowH - 10, rx: D.card,
+      x: 0, y: ry - 4, width: 38 + widest + INSET, height: rowH - 10, rx: D.card,
       fill: chosen ? C.soft : "transparent",
     }));
     key.appendChild(svg("rect", {
