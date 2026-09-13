@@ -95,7 +95,9 @@ a:focus-visible {
 }
 .topnav a:hover { color: var(--ink); }
 .topnav a.cta {
-  padding: var(--s2) var(--s4); border-radius: var(--r-pill);
+  display: inline-flex; align-items: center;
+  padding: calc(var(--s2) - 1px) var(--s4) calc(var(--s2) + 1px);
+  border-radius: var(--r-pill); line-height: 1.15;
   background: var(--ink); color: var(--paper); font-weight: 600;
 }
 .topnav a.cta:hover { background: var(--deep); color: #fff; }
@@ -122,7 +124,8 @@ a:focus-visible {
 
 .hero-copy { min-width: 0; }
 .chip {
-  display: inline-block; margin: 0 0 var(--s6); padding: var(--s1) var(--s3);
+  display: inline-block; margin: 0 0 var(--s6); line-height: 1.2;
+  padding: calc(var(--s1) - 1px) var(--s3) calc(var(--s1) + 1px);
   border: 1px solid rgba(255,255,255,.22); border-radius: var(--r);
   color: rgba(255,255,255,.7); font-size: var(--t-fine); font-style: italic;
 }
@@ -140,9 +143,13 @@ a:focus-visible {
 
 .links { margin: 0; }
 .links a {
-  display: inline-block; margin: 0 var(--s2) var(--s2) 0; padding: var(--s3) var(--s5);
+  display: inline-flex; align-items: center; justify-content: center;
+  margin: 0 var(--s2) var(--s2) 0;
+  /* One extra pixel below balances the descender space the label never uses. */
+  padding: calc(var(--s3) - 1px) var(--s5) calc(var(--s3) + 1px);
   border: 1px solid #37634e; border-radius: var(--r); color: var(--paper);
   text-decoration: none; font-size: var(--t-entry); font-weight: 500;
+  line-height: 1.15;
   transition: background .15s, border-color .15s, transform .15s;
 }
 .links a:hover { background: #1d4034; border-color: #4a7a62; transform: translateY(-1px); }
@@ -410,7 +417,9 @@ td.mono { font-family: var(--mono); font-size: var(--t-fine); }
 
 
 .pill {
-  display: inline-block; padding: var(--s1) var(--s3); border-radius: var(--r-pill); font-size: var(--t-fine);
+  display: inline-block; line-height: 1.2;
+  padding: calc(var(--s1) - 1px) var(--s3) calc(var(--s1) + 1px);
+  border-radius: var(--r-pill); font-size: var(--t-fine);
   background: rgba(47,107,79,.1); color: var(--sealed); font-weight: 600;
 }
 .pill.grey { background: #e3ddcb; color: var(--ink-soft); }
