@@ -148,14 +148,14 @@ a:focus-visible {
 
 /* The hero figure */
 .hero-fig { min-width: 0; }
-.hf-cap { font: italic 400 var(--t-fine) var(--serif); fill: rgba(255,255,255,.45); }
-.hf-line { font: 500 var(--t-entry) var(--serif); fill: #eaf3ec; }
-.hf-line.mono { font-family: var(--mono); font-size: var(--t-fine); }
-.hf-found { font: 400 var(--t-fine) var(--serif); fill: #8fae9e; }
-.hf-pay { font: 600 var(--t-fine) var(--mono); fill: #6fe0ac; font-variant-numeric: tabular-nums; }
-.hf-big { font: 600 40px var(--mono); fill: #fbfaf4; letter-spacing: -.035em; font-variant-numeric: tabular-nums; }
-.hf-sub { font: 400 var(--t-fine) var(--serif); fill: #7fa393; }
-.hf-left { font: 500 var(--t-sum) var(--mono); fill: #cfe3d6; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.hf-cap { font: italic 400 var(--t-fine) var(--serif); fill: rgba(255,255,255,.42); }
+.hf-line { font: 500 var(--t-read) var(--serif); fill: #f2f8f3; }
+.hf-line.mono { font-family: var(--mono); font-size: var(--t-entry); fill: #c6dbcd; }
+.hf-found { font: 400 var(--t-fine) var(--serif); fill: #8aa89a; }
+.hf-pay { font: 500 var(--t-read) var(--mono); fill: #7ad9a8; font-variant-numeric: tabular-nums; }
+.hf-big { font: 600 42px var(--mono); fill: #fbfaf4; letter-spacing: -.035em; font-variant-numeric: tabular-nums; }
+.hf-sub { font: italic 400 var(--t-fine) var(--serif); fill: #7fa393; }
+.hf-left { font: 500 var(--t-head) var(--mono); fill: #cfe3d6; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
 
 @media (max-width: 980px) {
   .hero-grid {
@@ -385,20 +385,9 @@ tr:last-child td { border-bottom: 0; }
 td.mono { font-family: var(--mono); font-size: var(--t-fine); }
 /* A container that scrolls says so: the content fades at the edge it
    continues past, and stops fading once you reach the end. */
-/* Containers that can scroll. The edge shading is drawn only by the two
-   `local` layers, which stay pinned to the content and so are invisible
-   until there is something to scroll to. A `scroll`-attached layer would
-   paint a permanent strip over the section behind it. */
 .scroll, .chart-stage {
   overflow-x: auto; -webkit-overflow-scrolling: touch;
   scrollbar-width: thin;
-  background-image:
-    linear-gradient(to right, rgba(22,36,29,.1), rgba(22,36,29,0) 20px),
-    linear-gradient(to left,  rgba(22,36,29,.1), rgba(22,36,29,0) 20px);
-  background-position: 0 0, 100% 0;
-  background-repeat: no-repeat;
-  background-size: 20px 100%, 20px 100%;
-  background-attachment: local, local;
 }
 
 .refusal {
