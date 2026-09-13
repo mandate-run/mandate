@@ -199,6 +199,28 @@ function readableReason(raw) {
   return named;
 }
 
+// A seller broke its own published price. The run refused that listing and
+// finished anyway, which is the part worth showing.
+function renderOvercharge(report) {
+  const raw = (report.refusals ?? [])[0] ?? "";
+  const m = raw.match(/ceiling ([\d.]+) quoted ([\d.]+)/);
+  const plain = document.getElementById("over-plain");
+  if (plain && m) {
+    plain.textContent =
+      `The seller asked ${tidy(m[2])} HBAR for work it had published at ` +
+      `${tidy(m[1])}. Mandate would not pay it, re-planned, and still delivered.`;
+  }
+  const code = document.getElementById("over-text");
+  if (code) code.textContent = raw;
+
+  const t = report.totals ?? {};
+  kv("over-totals", [
+    ["it still delivered", report.status],
+    ["total spent", tidy(t.settled)],
+    ["budget left over", tidy(t.unspent)],
+  ]);
+}
+
 function rowOf(tag, cells) {
   const tr = el("tr");
   for (const c of cells) tr.appendChild(el(tag, {}, c));
@@ -219,14 +241,16 @@ function kv(id, pairs) {
 
 async function main() {
   try {
-    const [delivered, refused] = await Promise.all([
+    const [delivered, refused, overcharged] = await Promise.all([
       fetch("data/delivered.json").then(r => r.json()),
       fetch("data/refused.json").then(r => r.json()),
+      fetch("data/overcharged.json").then(r => r.json()),
     ]);
     renderPlans(delivered);
     renderSteps(delivered);
     renderOutcomes(delivered);
     renderRefusal(refused);
+    renderOvercharge(overcharged);
 
     const charts = window.MandateCharts;
     if (charts) {
