@@ -99,7 +99,7 @@ function heroFigure(report, host) {
   const moved = outcomes.filter(o => o.outcome === "supported").length;
   const quiet = outcomes.length - moved;
 
-  const W = 470, H = 340;
+  const W = 470, H = 352;
   const s = svg("svg", {
     viewBox: `0 0 ${W} ${H}`, class: "hero-figure", role: "img",
     "aria-label":
@@ -161,12 +161,12 @@ function heroFigure(report, host) {
     x1: 0, y1: by, x2: W, y2: by,
     stroke: "rgba(255,255,255,.3)", "stroke-width": 1.5,
   }));
-  foot.appendChild(text(0, by + 36, trim(report.totals.settled), { class: "hf-big" }));
-  foot.appendChild(text(0, by + 60, "spent of the budget", { class: "hf-sub" }));
-  foot.appendChild(text(W, by + 30, trim(report.totals.unspent), {
+  foot.appendChild(text(0, by + 48, trim(report.totals.settled), { class: "hf-big" }));
+  foot.appendChild(text(0, by + 72, "spent of the budget", { class: "hf-sub" }));
+  foot.appendChild(text(W, by + 42, trim(report.totals.unspent), {
     class: "hf-left", "text-anchor": "end",
   }));
-  foot.appendChild(text(W, by + 54, "never touched", {
+  foot.appendChild(text(W, by + 66, "never touched", {
     class: "hf-sub", "text-anchor": "end",
   }));
   animate(foot, "opacity", 0, 1, "0.5s", "0.75s");
