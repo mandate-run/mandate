@@ -512,5 +512,8 @@ html, body { max-width: 100%; overflow-x: hidden; }
 
 /* Nothing on this page may be wider than the screen it is read on. */
 *, *::before, *::after { min-width: 0; }
-.wrap, .hero-grid, .hero-copy, section, header, footer { max-width: 100%; }
+/* Containers must not exceed the viewport, but .wrap keeps its column: a
+   blanket max-width:100% here overrode it and let every band run full
+   width, which is what broke the page's alignment. */
+.hero-copy, section, header, footer { max-width: 100%; }
 h1, h2, h3, p, td, .refusal code { overflow-wrap: anywhere; }
