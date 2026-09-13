@@ -449,7 +449,7 @@ function replanChart(report, host) {
 
 function loopDiagram(host) {
   if (!host) return;
-  const W = 1000, H = 132;
+  const W = 1000, H = 150;
   const s = svg("svg", {
     viewBox: `0 0 ${W} ${H}`, class: "chart loop", role: "img",
     "aria-label": "Ask the price, compare routes, buy one thing, look again",
@@ -496,7 +496,7 @@ function loopDiagram(host) {
   });
   animate(back, "opacity", 0, 1, "0.5s", "0.8s");
   s.appendChild(back);
-  const lbl = text(W / 2, y0 + 34, "after every purchase", {
+  const lbl = text(W / 2, y0 + 42, "after every purchase", {
     class: "lp-loop", "text-anchor": "middle",
   });
   animate(lbl, "opacity", 0, 1, "0.4s", "1s");
