@@ -103,10 +103,10 @@ a:focus-visible {
    the rest of its length proving. */
 .hero {
   background:
-    radial-gradient(900px 460px at 88% 22%, #1f4a39 0%, transparent 66%),
-    linear-gradient(166deg, #17342a 0%, #0d211a 100%);
+    radial-gradient(760px 340px at 86% 14%, rgba(138,214,175,.2), transparent 62%),
+    radial-gradient(1100px 520px at 18% 104%, rgba(8,24,18,.78), transparent 70%),
+    linear-gradient(162deg, #1d4234 0%, #153227 44%, #0a1c15 100%);
   color: var(--paper);
-  border-bottom: 1px solid #0a1a14;
 }
 .hero-grid {
   display: grid; grid-template-columns: minmax(0, 1fr) 470px;
@@ -210,12 +210,49 @@ a:focus-visible {
   .chart rect[width="0"] { width: auto; }
 }
 
-section { padding: var(--s10) 0; }
-section.tint { background: var(--paper-2); }
+/* Sections are terrain, not slabs. Each one carries a faint contour wash
+   so the page has depth rather than reading as stacked rectangles, and the
+   boundaries between them are cut as a ridge line rather than a hard edge. */
+section { padding: var(--s10) 0; position: relative; }
+
+section.tint {
+  background:
+    radial-gradient(1200px 340px at 12% -10%, rgba(47,107,79,.06), transparent 70%),
+    radial-gradient(900px 300px at 88% 110%, rgba(47,107,79,.055), transparent 70%),
+    var(--paper-2);
+}
+
+/* Contour lines, as on a survey map. Barely visible, but they stop the
+   light bands reading as blank slabs of paper. */
+section.tint::after,
+section:not(.tint):not(.dark):not(.close):not(.explainer)::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background-image: repeating-linear-gradient(
+    -14deg, rgba(47,107,79,.035) 0 1px, transparent 1px 76px);
+  mask-image: radial-gradient(120% 90% at 78% 12%, #000 12%, transparent 72%);
+  -webkit-mask-image: radial-gradient(120% 90% at 78% 12%, #000 12%, transparent 72%);
+}
+section > .wrap { position: relative; z-index: 1; }
+section:not(.tint):not(.dark):not(.close):not(.explainer) {
+  background:
+    radial-gradient(1000px 300px at 85% -8%, rgba(47,107,79,.04), transparent 68%),
+    var(--paper);
+}
+
+/* A ridge line: the dark bands rise into the light ones as a horizon
+   rather than butting against them. Drawn in CSS, so it costs no request. */
+section.dark, section.close { margin-top: 44px; }
+section.dark::before, section.close::before {
+  content: ""; position: absolute; left: 0; right: 0; top: -44px; height: 45px;
+  background: #1a3c30;
+  clip-path: polygon(0 100%, 0 66%, 8% 50%, 17% 60%, 28% 34%, 39% 52%,
+                     51% 26%, 63% 46%, 74% 32%, 86% 48%, 94% 38%, 100% 46%, 100% 100%);
+}
 section.dark {
   background:
-    radial-gradient(760px 400px at 78% 30%, #1e4738 0%, transparent 64%),
-    linear-gradient(168deg, #16332a 0%, #0d201a 100%);
+    radial-gradient(680px 300px at 82% 18%, rgba(122,199,160,.16), transparent 66%),
+    radial-gradient(900px 420px at 20% 96%, rgba(9,26,20,.7), transparent 72%),
+    linear-gradient(164deg, #1a3c30 0%, #143026 46%, #0b1d17 100%);
   color: #eaf3ec;
 }
 section.dark h2 { color: #7fa393; }
@@ -265,9 +302,19 @@ h3 {
   transition: box-shadow .2s, transform .2s;
 }
 .plan:hover { box-shadow: var(--shadow-2); transform: translateY(-2px); }
+.plan { position: relative; }
 .plan.chosen {
-  border-color: rgba(47,125,90,.45);
-  box-shadow: var(--shadow-2), 0 0 0 1px rgba(47,125,90,.25);
+  border-color: rgba(47,107,79,.4);
+  background:
+    linear-gradient(to top, rgba(47,107,79,.09), rgba(47,107,79,0) 58%),
+    var(--card);
+  box-shadow: var(--shadow-2);
+}
+/* The route that was taken carries a stem up its edge. */
+.plan.chosen::before {
+  content: ""; position: absolute; left: 0; top: 16%; bottom: 16%; width: 3px;
+  border-radius: var(--r-pill);
+  background: linear-gradient(to top, var(--sealed), rgba(111,224,172,.55));
 }
 .plan .head { display: flex; justify-content: space-between; align-items: baseline; }
 .plan .kind { font-size: var(--t-entry); font-weight: 600; }
@@ -363,8 +410,9 @@ tr.moved td:first-child { box-shadow: inset 3px 0 0 var(--sealed); }
    it. The commands are the point, so they carry the weight. */
 section.close {
   background:
-    radial-gradient(720px 380px at 74% 26%, #1e4436 0%, transparent 62%),
-    linear-gradient(168deg, #16332a 0%, #0d201a 100%);
+    radial-gradient(680px 300px at 78% 16%, rgba(122,199,160,.14), transparent 64%),
+    radial-gradient(900px 420px at 24% 98%, rgba(9,26,20,.66), transparent 72%),
+    linear-gradient(164deg, #1a3c30 0%, #143026 46%, #0b1d17 100%);
   color: #eaf3ec;
 }
 section.close h2 { color: rgba(255,255,255,.5); }
