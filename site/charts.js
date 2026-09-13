@@ -178,122 +178,79 @@ function heroFigure(report, host) {
 
   const moved = outcomes.filter(o => o.outcome === "supported").length;
   const quiet = outcomes.length - moved;
+
   const W = 470, H = 340;
   const s = svg("svg", {
     viewBox: `0 0 ${W} ${H}`, class: "hero-figure", role: "img",
     "aria-label":
-      `A job and a budget go in. A cheap scan of ${outcomes.length} pools finds ${moved} that moved. ` +
-      `Only that one is investigated. ${trim(report.totals.settled)} of ${"0.0100"} HBAR is spent.`,
+      `A job with a ${"0.0100"} HBAR budget. A cheap scan of ${outcomes.length} pools finds ` +
+      `${moved} that moved, so only that one is investigated. ` +
+      `${trim(report.totals.settled)} spent, ${trim(report.totals.unspent)} left.`,
   });
 
-  const defs = svg("defs");
-  const g1 = svg("linearGradient", { id: "hf-g", x1: 0, y1: 0, x2: 1, y2: 0 });
-  g1.appendChild(svg("stop", { offset: "0%", "stop-color": C.leaf }));
-  g1.appendChild(svg("stop", { offset: "100%", "stop-color": C.leaf }));
-  defs.appendChild(g1);
-  // A faint top-down wash so each card has a light edge, the way the cards
-  // on the page do. Flat translucent fills look like placeholders.
-  const g2 = svg("linearGradient", { id: "hf-card", x1: 0, y1: 0, x2: 0, y2: 1 });
-  g2.appendChild(svg("stop", { offset: "0%", "stop-color": "#ffffff", "stop-opacity": .085 }));
-  g2.appendChild(svg("stop", { offset: "100%", "stop-color": "#ffffff", "stop-opacity": .035 }));
-  defs.appendChild(g2);
-  const arrow = svg("marker", {
-    id: "hf-ar", viewBox: "0 0 8 8", refX: 7, refY: 4,
-    markerWidth: 7, markerHeight: 7, orient: "auto",
-  });
-  arrow.appendChild(svg("path", { d: "M0 0 L8 4 L0 8 z", fill: "rgba(111,224,172,.65)" }));
-  defs.appendChild(arrow);
-  s.appendChild(defs);
+  // Ruled entries with the prices in one right-hand column, the way a
+  // ledger is set. Boxes and arrows were fighting each other for the same
+  // space; a rule between rows says the same thing and takes none.
+  const PRICE_X = W;                 // prices right-align to the edge
+  const LINE = "rgba(255,255,255,.13)";
 
-  const L = 0;                        // the figure is its own column
-  let y = 6;
+  // --- the premise
+  let y = 22;
+  s.appendChild(text(0, y, "The job", { class: "hf-cap" }));
+  s.appendChild(text(PRICE_X, y, "Budget", { class: "hf-cap", "text-anchor": "end" }));
+  y += 22;
+  s.appendChild(text(0, y, `Check ${outcomes.length} pools, explain what moved`, { class: "hf-line" }));
+  s.appendChild(text(PRICE_X, y, "0.0100 HBAR", { class: "hf-line mono", "text-anchor": "end" }));
 
-  // --- what goes in
-  const inbox = svg("g");
-  inbox.appendChild(svg("rect", {
-    x: L, y, width: W, height: 52, rx: D.card,
-    fill: "rgba(0,0,0,.2)", stroke: "rgba(255,255,255,.14)",
-  }));
-  inbox.appendChild(text(L + 16, y + 22, "The job", { class: "hf-cap" }));
-  inbox.appendChild(text(L + 16, y + 41, `Check ${outcomes.length} pools, explain what moved`, { class: "hf-line" }));
-  inbox.appendChild(text(W - 16, y + 22, "Budget", { class: "hf-cap", "text-anchor": "end" }));
-  inbox.appendChild(text(W - 16, y + 41, "0.0100 HBAR", { class: "hf-line mono", "text-anchor": "end" }));
-  animate(inbox, "opacity", 0, 1, "0.4s", "0.1s");
-  s.appendChild(inbox);
-  y += 52;
+  y += 20;
+  s.appendChild(svg("line", { x1: 0, y1: y, x2: W, y2: y, stroke: LINE, "stroke-width": D.hair }));
 
-  // --- each purchase, with what it bought and what it revealed
-  const BUY = [
-    { key: "screen",
-      what: `Look at all ${outcomes.length} cheaply`,
-      found: `${quiet} quiet, ${moved} moved` },
-    { key: "events",
-      what: `Buy the detail for that ${moved}`,
-      found: "the trades that moved it" },
-    { key: "explain",
-      what: "Write the answer",
-      found: "every figure traced to evidence" },
+  // --- what it bought, one entry per purchase
+  const BOUGHT = [
+    [`Looked at all ${outcomes.length}`, `${quiet} quiet, ${moved} moved`],
+    [`Bought the detail for that ${moved}`, "the trades that moved it"],
+    ["Wrote the answer", "every figure traced to evidence"],
   ];
+  const ROW = 56;
 
-  BUY.forEach((b, i) => {
-    const step = steps.find(x => x.listing_id === b.key) ?? steps[i];
+  BOUGHT.forEach(([what, found], i) => {
+    const step = steps[i];
     if (!step) return;
-    const gy = y + 12 + i * 66;
-
-    // Connector down the left rail.
-    const conn = svg("path", {
-      d: `M${L + 24} ${gy - 12} L${L + 24} ${gy + 4}`,
-      stroke: "rgba(111,224,172,.55)", "stroke-width": D.line,
-      "stroke-linecap": "round", "marker-end": "url(#hf-ar)",
-    });
-    animate(conn, "opacity", 0, 1, "0.3s", `${0.35 + i * 0.3}s`);
-    s.appendChild(conn);
-
+    const ry = y + 30 + i * ROW;
     const g = svg("g");
-    g.appendChild(svg("rect", {
-      x: L, y: gy + 8, width: W, height: 52, rx: D.card,
-      fill: "url(#hf-card)", stroke: C.onDeep2,
+    g.appendChild(text(0, ry, what, { class: "hf-line" }));
+    g.appendChild(text(0, ry + 17, found, { class: "hf-found" }));
+    g.appendChild(text(PRICE_X, ry, trim(step.amount), {
+      class: "hf-pay", "text-anchor": "end",
     }));
-    // Each purchase carries a stem, the way the chosen route does below.
-    g.appendChild(svg("rect", {
-      x: L + 1, y: gy + 20, width: 2.5, height: 28, rx: 1.25,
-      fill: "rgba(111,224,172,.6)",
-    }));
-    // The price it paid, as a tag on the right.
-    g.appendChild(svg("rect", {
-      x: W - 88, y: gy + 19, width: 76, height: D.bar, rx: D.pill,
-      fill: "rgba(111,224,172,.13)",
-    }));
-    g.appendChild(text(W - 50, gy + 33, trim(step.amount), {
-      class: "hf-pay", "text-anchor": "middle",
-    }));
-
-    g.appendChild(text(L + 16, gy + 28, b.what, { class: "hf-line" }));
-    g.appendChild(text(L + 16, gy + 46, b.found, { class: "hf-found" }));
-    animate(g, "opacity", 0, 1, "0.4s", `${0.45 + i * 0.3}s`);
+    animate(g, "opacity", 0, 1, "0.45s", `${0.2 + i * 0.16}s`);
     s.appendChild(g);
+
+    if (i < BOUGHT.length - 1) {
+      const ly = ry + 32;
+      s.appendChild(svg("line", {
+        x1: 0, y1: ly, x2: W, y2: ly, stroke: LINE, "stroke-width": D.hair,
+      }));
+    }
   });
 
-  // --- what is left
-  const fy = y + 12 + 3 * 66 + 10;
-  const conn = svg("path", {
-    d: `M${L + 24} ${fy - 24} L${L + 24} ${fy - 10}`,
-    stroke: C.sealedDim, "stroke-width": D.line, "marker-end": "url(#hf-ar)",
-  });
-  animate(conn, "opacity", 0, 1, "0.3s", "1.35s");
-  s.appendChild(conn);
-
-  const out = svg("g");
-  out.appendChild(text(L, fy + 32, trim(report.totals.settled), { class: "hf-big" }));
-  out.appendChild(text(L + 158, fy + 32, "spent", { class: "hf-line" }));
-  out.appendChild(text(W, fy + 16, `${trim(report.totals.unspent)} HBAR`, {
+  // --- the balance, under a heavier rule as a ledger closes its column
+  const by = y + 30 + BOUGHT.length * ROW - 8;
+  const foot = svg("g");
+  foot.appendChild(svg("line", {
+    x1: 0, y1: by, x2: W, y2: by,
+    stroke: "rgba(255,255,255,.3)", "stroke-width": 1.5,
+  }));
+  foot.appendChild(text(0, by + 36, trim(report.totals.settled), { class: "hf-big" }));
+  foot.appendChild(text(0, by + 60, "spent of the budget", { class: "hf-sub" }));
+  foot.appendChild(text(W, by + 30, trim(report.totals.unspent), {
     class: "hf-left", "text-anchor": "end",
   }));
-  out.appendChild(text(W, fy + 34, "never touched", {
+  foot.appendChild(text(W, by + 54, "never touched", {
     class: "hf-sub", "text-anchor": "end",
   }));
-  animate(out, "opacity", 0, 1, "0.45s", "1.45s");
-  s.appendChild(out);
+  animate(foot, "opacity", 0, 1, "0.5s", "0.75s");
+  s.appendChild(foot);
 
   host.appendChild(s);
 }
