@@ -438,7 +438,7 @@ tr.moved td { background: rgba(47,107,79,.06); }
 tr.moved td:first-child { box-shadow: inset 3px 0 0 var(--sealed); }
 
 /* A note that follows a table belongs to it, but not pressed against it. */
-.scroll + .note, table + .note { margin-top: var(--s6); }
+.scroll + .note, table + .note, .plans + .note { margin-top: var(--s6); }
 
 /* The close. The page argues for five sections, then says what to do with
    it. The commands are the point, so they carry the weight. */
