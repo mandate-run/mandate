@@ -297,7 +297,32 @@ th {
 td { padding: var(--s3) var(--s4); border-bottom: 1px solid var(--rule); vertical-align: top; }
 tr:last-child td { border-bottom: 0; }
 td.mono { font-family: var(--mono); font-size: var(--t-fine); }
-.scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+/* A container that scrolls says so: the content fades at the edge it
+   continues past, and stops fading once you reach the end. */
+.scroll, .explainer .wrap, .chart-stage {
+  overflow-x: auto; -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  background-image:
+    linear-gradient(to right, var(--card) 30%, rgba(255,255,255,0)),
+    linear-gradient(to left,  var(--card) 30%, rgba(255,255,255,0)),
+    linear-gradient(to right, rgba(22,36,29,.14), rgba(22,36,29,0) 14px),
+    linear-gradient(to left,  rgba(22,36,29,.14), rgba(22,36,29,0) 14px);
+  background-position: 0 0, 100% 0, 0 0, 100% 0;
+  background-repeat: no-repeat;
+  background-size: 36px 100%, 36px 100%, 14px 100%, 14px 100%;
+  background-attachment: local, local, scroll, scroll;
+}
+/* The fade takes the colour of the band it sits in. */
+section.tint .scroll { background-image:
+  linear-gradient(to right, var(--paper-2) 30%, rgba(255,255,255,0)),
+  linear-gradient(to left,  var(--paper-2) 30%, rgba(255,255,255,0)),
+  linear-gradient(to right, rgba(22,36,29,.14), rgba(22,36,29,0) 14px),
+  linear-gradient(to left,  rgba(22,36,29,.14), rgba(22,36,29,0) 14px); }
+section:not(.tint):not(.dark):not(.close) .scroll { background-image:
+  linear-gradient(to right, var(--paper) 30%, rgba(255,255,255,0)),
+  linear-gradient(to left,  var(--paper) 30%, rgba(255,255,255,0)),
+  linear-gradient(to right, rgba(22,36,29,.14), rgba(22,36,29,0) 14px),
+  linear-gradient(to left,  rgba(22,36,29,.14), rgba(22,36,29,0) 14px); }
 
 .refusal {
   background: var(--card); border: 1px solid rgba(224,220,203,.7);
@@ -367,11 +392,14 @@ footer {
 .links-row a { margin-right: var(--s5); }
 
 @media (max-width: 820px) {
-  .steps { grid-template-columns: 1fr; gap: 24px; padding: var(--s7) 0; }
   .plans { grid-template-columns: 1fr; }
-  .lead { font-size: var(--t-sum); }
   h3 { font-size: var(--t-sum); }
-  body { font-size: var(--t-entry); }
+
+  /* A drawing authored at 1000px would shrink its own labels to about 9px
+     here. Let the wide figures scroll instead, the way the tables do. */
+  .explainer .wrap, .chart-stage { overflow-x: auto; }
+  .loop { min-width: 760px; }
+  .chart-stage .chart { min-width: 700px; }
 }
 
 /* Narrow screens: the gutter shrinks, the hero stacks, and every wide
