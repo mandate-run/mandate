@@ -151,7 +151,6 @@ a:focus-visible {
 
 /* The hero figure */
 .hero-fig { min-width: 0; }
-.hero-figure { width: 100%; height: auto; display: block; max-width: 100%; }
 .hf-cap { font: italic 400 var(--t-fine) var(--serif); fill: rgba(255,255,255,.45); }
 .hf-line { font: 500 var(--t-entry) var(--serif); fill: #eaf3ec; }
 .hf-line.mono { font-family: var(--mono); font-size: var(--t-fine); }
@@ -170,27 +169,27 @@ a:focus-visible {
 }
 
 /* The loop, above the fold of the first section */
-.explainer { background: var(--card); padding: var(--s9) 0; }
+.explainer { background: var(--card); padding: var(--s10) 0; }
 
 /* Charts. Everything is inline SVG scaled to the column, so it stays sharp
    at any density and needs no library. */
 .chart-host { margin: var(--s6) 0 0; }
-.chart { width: 100%; height: auto; display: block; max-width: 100%; }
+.chart, .hero-figure { width: 100%; height: auto; display: block; max-width: 100%; }
 .loop { margin: 0; }
-.c-key { font: 600 var(--t-fine) var(--serif); fill: var(--ink); }
+.c-key, .c-foot { font: 600 var(--t-fine) var(--serif); fill: var(--ink); }
 .c-key.strong { font-weight: 700; }
-.c-mute { font: 400 var(--t-fine) var(--serif); fill: var(--ink-soft); }
+.c-mute, .lp-s { font: 400 var(--t-fine) var(--serif); fill: var(--ink-soft); }
 .c-head { font: italic 400 var(--t-entry) var(--serif); fill: var(--ink-soft); }
 .c-price { font: 500 var(--t-entry) var(--mono); fill: var(--ink-soft); letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
 .c-price.strong { font-size: var(--t-sum); fill: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
 .c-route { font: 600 var(--t-entry) var(--serif); fill: var(--ink-soft); }
 .c-route.strong { fill: var(--ink); font-weight: 700; }
 .c-badge { font: 500 var(--t-fine) var(--serif); fill: #fff; letter-spacing: .01em; }
-.c-foot { font: 600 var(--t-fine) var(--serif); fill: var(--ink); }
+
 .lp-n { font: 700 var(--t-fine) var(--serif); fill: var(--sealed); }
 .lp-n.first { fill: #fff; }
 .lp-t { font: 650 var(--t-entry) var(--serif); fill: var(--ink); }
-.lp-s { font: 400 var(--t-fine) var(--serif); fill: var(--ink-soft); }
+
 .lp-loop { font: italic 400 var(--t-fine) var(--serif); fill: var(--sealed); }
 
 /* The re-planning chart is the argument of the whole page, so it gets its
@@ -217,7 +216,7 @@ a:focus-visible {
 section { padding: var(--s10) 0; position: relative; }
 
 section.tint {
-  margin-top: 34px;
+  margin-top: 34px; padding-top: calc(var(--s10) - 34px);
   background:
     radial-gradient(1200px 340px at 12% -10%, rgba(47,107,79,.06), transparent 70%),
     radial-gradient(900px 300px at 88% 110%, rgba(47,107,79,.055), transparent 70%),
@@ -262,7 +261,9 @@ section.tint::before {
                      58% 36%, 70% 54%, 81% 42%, 91% 58%, 100% 46%, 100% 100%);
 }
 /* And where a tinted band gives way to plain paper below it. */
-section.tint + section:not(.dark):not(.close) { margin-top: 34px; }
+section.tint + section:not(.dark):not(.close) {
+  margin-top: 34px; padding-top: calc(var(--s10) - 34px);
+}
 section.tint + section:not(.dark):not(.close)::before {
   content: ""; position: absolute; left: 0; right: 0; top: -34px; height: 35px;
   background: var(--paper); z-index: 0;
@@ -270,7 +271,9 @@ section.tint + section:not(.dark):not(.close)::before {
                      57% 56%, 69% 42%, 80% 60%, 90% 44%, 100% 56%, 100% 100%);
 }
 
-section.dark, section.close { margin-top: 44px; }
+section.dark, section.close {
+  margin-top: 44px; padding-top: calc(var(--s10) - 44px);
+}
 section.dark::before, section.close::before {
   content: ""; position: absolute; left: 0; right: 0; top: -44px; height: 45px;
   background: #1a3c30;
