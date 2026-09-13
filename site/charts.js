@@ -201,7 +201,7 @@ function heroFigure(report, host) {
     id: "hf-ar", viewBox: "0 0 8 8", refX: 7, refY: 4,
     markerWidth: 7, markerHeight: 7, orient: "auto",
   });
-  arrow.appendChild(svg("path", { d: "M0 0 L8 4 L0 8 z", fill: C.sealedDim }));
+  arrow.appendChild(svg("path", { d: "M0 0 L8 4 L0 8 z", fill: "rgba(111,224,172,.65)" }));
   defs.appendChild(arrow);
   s.appendChild(defs);
 
@@ -212,7 +212,7 @@ function heroFigure(report, host) {
   const inbox = svg("g");
   inbox.appendChild(svg("rect", {
     x: L, y, width: W, height: 52, rx: D.card,
-    fill: "url(#hf-card)", stroke: C.onDeep2,
+    fill: "rgba(0,0,0,.2)", stroke: "rgba(255,255,255,.14)",
   }));
   inbox.appendChild(text(L + 16, y + 22, "The job", { class: "hf-cap" }));
   inbox.appendChild(text(L + 16, y + 41, `Check ${outcomes.length} pools, explain what moved`, { class: "hf-line" }));
@@ -243,7 +243,8 @@ function heroFigure(report, host) {
     // Connector down the left rail.
     const conn = svg("path", {
       d: `M${L + 24} ${gy - 12} L${L + 24} ${gy + 4}`,
-      stroke: C.sealedDim, "stroke-width": D.line, "marker-end": "url(#hf-ar)",
+      stroke: "rgba(111,224,172,.55)", "stroke-width": D.line,
+      "stroke-linecap": "round", "marker-end": "url(#hf-ar)",
     });
     animate(conn, "opacity", 0, 1, "0.3s", `${0.35 + i * 0.3}s`);
     s.appendChild(conn);
@@ -252,6 +253,11 @@ function heroFigure(report, host) {
     g.appendChild(svg("rect", {
       x: L, y: gy + 8, width: W, height: 52, rx: D.card,
       fill: "url(#hf-card)", stroke: C.onDeep2,
+    }));
+    // Each purchase carries a stem, the way the chosen route does below.
+    g.appendChild(svg("rect", {
+      x: L + 1, y: gy + 20, width: 2.5, height: 28, rx: 1.25,
+      fill: "rgba(111,224,172,.6)",
     }));
     // The price it paid, as a tag on the right.
     g.appendChild(svg("rect", {
