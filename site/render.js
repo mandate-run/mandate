@@ -85,13 +85,11 @@ function renderPlans(report) {
 
   const note = document.getElementById("round-note");
   if (!note) return;
-  const chosenPlan = round.plans.find(p => p.kind === round.chosen);
-  const dearest = round.plans.reduce((a, b) => (a.expected > b.expected ? a : b));
+  // The cards above already show which route won and what it cost. This says
+  // the part they cannot: the choice was not made once.
   note.textContent =
-    `It chose "${ROUTE_NAME[round.chosen] ?? round.chosen}" at ${tidy(amount(chosenPlan.expected))} HBAR ` +
-    `over the most expensive route at ${tidy(amount(dearest.expected))}. ` +
-    `It then re-checked its plan after every purchase, ${report.planning.length} times in all, ` +
-    `because a cheap scan can change what is still worth buying.`;
+    `It re-checked the plan after every purchase, ${report.planning.length} times in all, ` +
+    `because a cheap scan changes what is still worth buying.`;
 }
 
 function renderSteps(report) {

@@ -94,7 +94,7 @@ const SEGMENT_LABEL = {
 };
 
 function budgetBar(report, host) {
-  const W = 1000, H = 96, BAR = D.bar, TOP = 34;
+  const W = 1000, H = 72, BAR = D.bar, TOP = 26;
   const budget = 1_000_000; // 0.0100 HBAR, the mandate's service budget
   const s = svg("svg", {
     viewBox: `0 0 ${W} ${H}`, class: "chart", role: "img",
@@ -140,36 +140,27 @@ function budgetBar(report, host) {
 
   // The line where spending stopped.
   const mark = svg("line", {
-    x1: x, y1: TOP - 8, x2: x, y2: TOP + BAR + 8,
+    x1: x, y1: TOP - 6, x2: x, y2: TOP + BAR + 6,
     stroke: C.ink, "stroke-width": D.line,
   });
   animate(mark, "opacity", 0, 1, "0.3s", "1.6s");
   s.appendChild(mark);
 
-  const spent = text(x + 10, TOP - 12, `spent ${trim(report.totals.settled)}`, {
-    class: "c-key",
+  // Only the proportion. The table below itemises every purchase, so a
+  // legend here would repeat it line for line.
+  const spent = text(x - 10, TOP - 14, `${trim(report.totals.settled)} spent`, {
+    class: "c-key", "text-anchor": "end",
   });
   animate(spent, "opacity", 0, 1, "0.4s", "1.7s");
   s.appendChild(spent);
 
-  s.appendChild(text(0, TOP - 12, "0", { class: "c-mute" }));
-  s.appendChild(text(W, TOP - 12, "budget 0.0100 HBAR", { class: "c-mute", "text-anchor": "end" }));
+  s.appendChild(text(W, TOP - 14, "of a 0.0100 HBAR budget", {
+    class: "c-mute", "text-anchor": "end",
+  }));
   s.appendChild(text(W, TOP + BAR + 22, `${trim(report.totals.unspent)} never spent`, {
     class: "c-mute", "text-anchor": "end",
   }));
 
-  const legend = svg("g");
-  let lx = 0;
-  (report.steps ?? []).forEach((step, i) => {
-    legend.appendChild(svg("rect", {
-      x: lx, y: TOP + BAR + 14, width: 10, height: 10, rx: 3,
-      fill: [C.sealed, C.leaf, C.leaf][i % 3],
-    }));
-    const label = `${SEGMENT_LABEL[step.listing_id] ?? step.listing_id} ${trim(step.amount)}`;
-    legend.appendChild(text(lx + 14, TOP + BAR + 21, label, { class: "c-mute" }));
-    lx += 14 + label.length * 6.1 + 22;
-  });
-  s.appendChild(legend);
   host.appendChild(s);
 }
 
