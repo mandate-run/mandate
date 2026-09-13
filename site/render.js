@@ -70,6 +70,14 @@ function renderPlans(report) {
     card.appendChild(el("div", { class: "amt" }, tidy(amount(p.expected))));
     card.appendChild(el("div", { class: "lbl" }, "HBAR, likely cost"));
 
+    // A bar against the dearest route, so the difference between 0.0033 and
+    // 0.0080 is seen rather than worked out.
+    const dearest = Math.max(...round.plans.map(q => q.expected));
+    const gauge = el("div", { class: "gauge" });
+    const fill = el("i", { style: `width:${(p.expected / dearest) * 100}%` });
+    gauge.appendChild(fill);
+    card.appendChild(gauge);
+
     const bound = el("div", { class: "bound" });
     bound.appendChild(document.createTextNode("worst case "));
     bound.appendChild(el("b", {}, tidy(amount(p.bound))));
