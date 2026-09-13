@@ -355,6 +355,20 @@ h3 {
 .plan .amt { font-family: var(--mono); font-size: var(--t-sum); margin: var(--s4) 0 var(--s1);
   letter-spacing: -.02em; }
 .plan .lbl { font-size: var(--t-fine); color: var(--ink-soft); }
+/* The price as a length, not just a number. Scaled against the dearest
+   route so the three cards can be compared at a glance. */
+.gauge {
+  height: 5px; border-radius: var(--r-pill); background: rgba(22,36,29,.08);
+  margin: var(--s3) 0 0; overflow: hidden;
+}
+.gauge i {
+  display: block; height: 100%; border-radius: var(--r-pill);
+  background: rgba(22,36,29,.24);
+}
+.plan.chosen .gauge i {
+  background: linear-gradient(to right, var(--sealed), #6fe0ac);
+}
+
 .plan .bound { font-size: var(--t-fine); color: var(--ink-soft); margin-top: var(--s3); }
 .plan .bound b { font-family: var(--mono); font-weight: 500; color: var(--ink); }
 .plan ul { margin: var(--s4) 0 0; padding-left: var(--s4); font-size: var(--t-fine); color: var(--ink-soft); }
