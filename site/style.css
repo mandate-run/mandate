@@ -96,7 +96,7 @@ a:focus-visible {
 .topnav a:hover { color: var(--ink); }
 .topnav a.cta {
   display: inline-flex; align-items: center;
-  padding: calc(var(--s2) - .22em) var(--s4) calc(var(--s2) + .22em);
+  padding: calc(var(--s2) + .09em) var(--s4) calc(var(--s2) - .09em);
   border-radius: var(--r-pill); line-height: 1.15;
   background: var(--ink); color: var(--paper); font-weight: 600;
 }
@@ -125,7 +125,7 @@ a:focus-visible {
 .hero-copy { min-width: 0; }
 .chip {
   display: inline-block; margin: 0 0 var(--s6); line-height: 1.2;
-  padding: calc(var(--s1) - .20em) var(--s3) calc(var(--s1) + .20em);
+  padding: calc(var(--s1) + .08em) var(--s3) calc(var(--s1) - .08em);
   border: 1px solid rgba(255,255,255,.22); border-radius: var(--r);
   color: rgba(255,255,255,.7); font-size: var(--t-fine); font-style: italic;
 }
@@ -148,7 +148,7 @@ a:focus-visible {
   /* A serif reserves more room above the cap height than the label uses,
      so equal padding leaves the letters riding high. The offset is a
      fraction of the size, not a fixed pixel, so it holds at any scale. */
-  padding: calc(var(--s3) - .22em) var(--s5) calc(var(--s3) + .22em);
+  padding: calc(var(--s3) + .09em) var(--s5) calc(var(--s3) - .09em);
   border: 1px solid #37634e; border-radius: var(--r); color: var(--paper);
   text-decoration: none; font-size: var(--t-entry); font-weight: 500;
   line-height: 1.15;
@@ -420,7 +420,7 @@ td.mono { font-family: var(--mono); font-size: var(--t-fine); }
 
 .pill {
   display: inline-block; line-height: 1.2;
-  padding: calc(var(--s1) - .20em) var(--s3) calc(var(--s1) + .20em);
+  padding: calc(var(--s1) + .08em) var(--s3) calc(var(--s1) - .08em);
   border-radius: var(--r-pill); font-size: var(--t-fine);
   background: rgba(47,107,79,.1); color: var(--sealed); font-weight: 600;
 }
