@@ -84,86 +84,6 @@ function text(x, y, s, attrs = {}) {
   return t;
 }
 
-/* ---------- 1. Where the budget went ---------- */
-
-const SEGMENT_LABEL = {
-  screen: "Quick scan",
-  events: "Detailed history",
-  explain: "Explanation",
-  investigate: "Full investigation",
-};
-
-function budgetBar(report, host) {
-  const W = 1000, H = 72, BAR = D.bar, TOP = 26;
-  const budget = 1_000_000; // 0.0100 HBAR, the mandate's service budget
-  const s = svg("svg", {
-    viewBox: `0 0 ${W} ${H}`, class: "chart", role: "img",
-    "aria-label": "How much of the budget was spent",
-  });
-
-  s.appendChild(sharedDefs("bb", [
-    ["a", C.sealed, C.leaf],
-    ["b", C.leaf, "#57c294"],
-    ["c", "#57c294", C.leaf],
-  ]));
-
-  s.appendChild(svg("rect", {
-    x: 0, y: TOP, width: W, height: BAR, rx: D.pill, fill: C.track,
-  }));
-
-  // Every segment is drawn square and clipped to one pill, so the filled
-  // run has clean ends however many purchases there were.
-  const clip = svg("clipPath", { id: "bb-clip" });
-  clip.appendChild(svg("rect", { x: 0, y: TOP, width: W, height: BAR, rx: D.pill }));
-  s.appendChild(clip);
-  const band = svg("g", { "clip-path": "url(#bb-clip)" });
-
-  const colours = ["url(#bb-a)", "url(#bb-b)", "url(#bb-c)"];
-  let x = 0;
-  (report.steps ?? []).forEach((step, i) => {
-    const units = Math.round(parseFloat(step.amount) * 1e8);
-    const w = (units / budget) * W;
-    const g = svg("g", { class: "seg" });
-    const r = svg("rect", {
-      x, y: TOP, height: BAR, fill: colours[i % colours.length],
-    });
-    // Grow each segment in turn, so the eye follows the spending.
-    animate(r, "width", 0, w, "0.5s", `${0.15 + i * 0.45}s`);
-    g.appendChild(r);
-    g.appendChild(svg("title")).textContent =
-      `${SEGMENT_LABEL[step.listing_id] ?? step.listing_id}: ${step.amount} HBAR`;
-    band.appendChild(g);
-    x += w;
-  });
-
-  s.appendChild(band);
-
-  // The line where spending stopped.
-  const mark = svg("line", {
-    x1: x, y1: TOP - 6, x2: x, y2: TOP + BAR + 6,
-    stroke: C.ink, "stroke-width": D.line,
-  });
-  animate(mark, "opacity", 0, 1, "0.3s", "1.6s");
-  s.appendChild(mark);
-
-  // Only the proportion. The table below itemises every purchase, so a
-  // legend here would repeat it line for line.
-  const spent = text(x - 10, TOP - 14, `${trim(report.totals.settled)} spent`, {
-    class: "c-key", "text-anchor": "end",
-  });
-  animate(spent, "opacity", 0, 1, "0.4s", "1.7s");
-  s.appendChild(spent);
-
-  s.appendChild(text(W, TOP - 14, "of a 0.0100 HBAR budget", {
-    class: "c-mute", "text-anchor": "end",
-  }));
-  s.appendChild(text(W, TOP + BAR + 22, `${trim(report.totals.unspent)} never spent`, {
-    class: "c-mute", "text-anchor": "end",
-  }));
-
-  host.appendChild(s);
-}
-
 /* ---------- 0. The hero figure: what actually happens ---------- */
 
 // A reader arriving cold needs the shape of the thing, not a price table.
@@ -483,4 +403,4 @@ function trim(v) {
   return t.includes(".") ? t.replace(/(\.\d{4}?\d*?)0+$/, "$1") : t;
 }
 
-window.MandateCharts = { heroFigure, budgetBar, replanChart, loopDiagram };
+window.MandateCharts = { heroFigure, replanChart, loopDiagram };

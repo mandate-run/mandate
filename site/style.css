@@ -170,7 +170,6 @@ a:focus-visible {
 
 /* Charts. Everything is inline SVG scaled to the column, so it stays sharp
    at any density and needs no library. */
-.chart-host { margin: var(--s6) 0 0; }
 .chart, .hero-figure { width: 100%; height: auto; display: block; max-width: 100%; }
 .loop { margin: 0; }
 .c-key, .c-foot { font: 600 var(--t-fine) var(--serif); fill: var(--ink); }
@@ -197,8 +196,6 @@ a:focus-visible {
   margin: var(--s7) 0 0; box-shadow: var(--shadow-2);
 }
 .chart-hero { max-width: 100%; }
-.seg rect { transition: opacity .15s; }
-.chart .seg:hover rect { opacity: .82; }
 .route.chosen { filter: drop-shadow(0 1px 2px rgba(45,122,88,.22)); }
 
 /* Motion is decoration here: the numbers are all still readable without it. */
