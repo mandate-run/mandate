@@ -124,11 +124,11 @@ function renderSteps(report) {
 
   const totals = report.totals ?? {};
   const filed = (report.receipts ?? []).filter(r => r.hcs_sequence != null).length;
+  // The hero already gave the balance. What only this section can say is
+  // that nothing is owed and every decision was filed.
   kv("totals", [
-    ["total spent", tidy(totals.settled)],
-    ["budget left over", tidy(totals.unspent)],
     ["still owed", tidy(totals.outstanding)],
-    ["receipts filed", String(filed)],
+    ["receipts filed on Hedera", String(filed)],
   ]);
 }
 
@@ -232,7 +232,6 @@ async function main() {
     if (charts) {
       charts.heroFigure(delivered, document.getElementById("hero-viz"));
       charts.loopDiagram(document.getElementById("loop"));
-      charts.budgetBar(delivered, document.getElementById("budget"));
       charts.replanChart(delivered, document.getElementById("replan"));
     }
 
