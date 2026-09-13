@@ -317,12 +317,12 @@ function replanChart(report, host) {
   const rounds = (report.planning ?? []).filter(r => r.plans.some(p => p.expected > 0)).slice(0, 2);
   if (rounds.length < 2 || !host) return;
 
-  const W = 936, H = 430;
+  const W = 936, H = 382;
   const KEY = 250;                 // fixed legend column
   // Left prices are drawn right-aligned into the gap between the legend and
   // the plot, so that gap must hold the widest price at its largest size.
   const PLOT_L = KEY + 130, PLOT_R = 116;
-  const T = 96, B = 104;
+  const T = 64, B = 88;
   const plotW = W - PLOT_L - PLOT_R, plotH = H - T - B;
   const max = Math.max(...rounds.flatMap(r => r.plans.map(p => p.expected)));
   const xs = [PLOT_L, PLOT_L + plotW];
@@ -350,7 +350,7 @@ function replanChart(report, host) {
   }));
 
   // Fixed legend rows: name, description, and the price at each end.
-  const rowH = 56, rowTop = T + 6;
+  const rowH = plotH / 3, rowTop = T + 4;
   order.forEach((kind, i) => {
     const a = rounds[0].plans.find(p => p.kind === kind);
     const b = rounds[1].plans.find(p => p.kind === kind);
@@ -449,7 +449,7 @@ function replanChart(report, host) {
 
 function loopDiagram(host) {
   if (!host) return;
-  const W = 1000, H = 152;
+  const W = 1000, H = 132;
   const s = svg("svg", {
     viewBox: `0 0 ${W} ${H}`, class: "chart loop", role: "img",
     "aria-label": "Ask the price, compare routes, buy one thing, look again",
