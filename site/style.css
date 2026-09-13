@@ -77,12 +77,17 @@ a:focus-visible {
   display: flex; align-items: center; justify-content: space-between;
   height: 58px;
 }
+/* The wordmark has no descenders, so centring its line box leaves the
+   letters sitting high against the logo. Aligning the two by eye rather
+   than by box is the difference between right and nearly right. */
 .brand {
-  display: inline-flex; align-items: center; gap: var(--s2);
+  display: inline-flex; align-items: center; gap: var(--s3);
   font-weight: 650; font-size: var(--t-entry); color: var(--ink);
   text-decoration: none; letter-spacing: -.01em;
+  line-height: 1;
 }
-.brand img { border-radius: var(--r); }
+.brand img { border-radius: var(--r); display: block; flex: none; }
+.brand span { display: block; transform: translateY(.06em); }
 .topnav { display: flex; align-items: center; gap: var(--s5); }
 .topnav a {
   font-size: var(--t-fine); color: var(--ink-soft); text-decoration: none;
