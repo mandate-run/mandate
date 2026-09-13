@@ -110,17 +110,14 @@ a:focus-visible {
   color: var(--paper);
 }
 .hero-grid {
-  display: grid; grid-template-columns: minmax(0, 1fr) 470px;
+  display: grid; grid-template-columns: minmax(0, 1.08fr) 430px;
   gap: var(--s8); align-items: center;
-  padding: var(--s8) var(--gutter);
+  padding: var(--s9) var(--gutter) var(--s4);
 }
 
 .hero-copy { min-width: 0; }
-.mark { display: flex; align-items: center; gap: var(--s3); margin-bottom: var(--s7); }
-.mark img { border-radius: var(--r); display: block; }
-.wordmark { font-size: var(--t-read); font-weight: 650; letter-spacing: -.015em; }
 .chip {
-  margin-left: var(--s1); padding: var(--s1) var(--s3);
+  display: inline-block; margin: 0 0 var(--s6); padding: var(--s1) var(--s3);
   border: 1px solid rgba(255,255,255,.22); border-radius: var(--r);
   color: rgba(255,255,255,.7); font-size: var(--t-fine); font-style: italic;
 }
@@ -128,7 +125,7 @@ a:focus-visible {
 .hero h1 {
   font-size: var(--t-hero); line-height: 1.06;
   letter-spacing: -.034em; font-weight: 680;
-  margin: 0 0 var(--s5); color: #f7f4ea; max-width: 11em;
+  margin: 0 0 var(--s5); color: #f7f4ea; max-width: 13.5em;
   text-wrap: balance; hyphens: none;
 }
 .hero .sub {
